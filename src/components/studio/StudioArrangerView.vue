@@ -1064,7 +1064,7 @@ const verticalPencil = ref(false);
 
 const referencePart = computed(()=>parts.value.find(p=>p.id===referencePartId.value && p!==active.value));
 const trackTimelines=computed(()=>new Map(parts.value.map(part=>[part.id,part===active.value ? timing.value : timingForPart(part)])));
-const referenceTimeline=computed(()=>trackTimelines.value.get(referencePartId.value));
+const referenceTimeline=computed(()=>referencePart.value ? trackTimelines.value.get(referencePart.value.id) : undefined);
 const trackRows=computed(()=>parts.value.map((part,index)=>{
   const timeline=trackTimelines.value.get(part.id)!;
   const source=part.midiSource;
