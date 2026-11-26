@@ -1,0 +1,48 @@
+# 环境变量与密钥（严禁提交到仓库）
+.env
+.env.*
+!.env.example
+*.secret
+*.key
+/server/.zhihu-author-defaults.local.json
+
+# 本地研究资料与个人录音
+/docs/试听/
+/docs/ipa-constriction-audit.csv
+/docs/ipa-reference-inventory.csv
+/engine/reference_library/
+/engine/model_bundle/speakers/
+/engine/model_bundle/**/*.spk.json
+/src/editions/hackathon/recordings/
+/assets/source-audio/onboarding/
+/public/onboarding/*.mp3
+
+# 本地推理权重与运行时依赖
+/engine/model_bundle/**/*.onnx
+/engine/model_bundle/**/*.pt
+/engine/model_bundle/**/*.pth
+/engine/model_bundle/**/*.safetensors
+/engine/model_bundle/packages/kf_ipa_synth/assets/lexicon/TIMITDIC.TXT
+/engine/vendor/
+/engine/vtl_native/native/*.dll
+/refs/
+
+# 依赖与构建产物
+node_modules/
+dist/
+dist-public/
+dist-hackathon/
+dist-friends/
+build/
+src-tauri/target/
+.cache/
+.playwright-cli/
+
+# Python 临时文件
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kf-ipa-synth"
+version = "0.1.0"
+description = "Self-contained IPA-to-Dynamic-Vocal-Tract (KF2Tract27) speech synthesis core, 1KB speaker profile store, themeable multi-track web studio, and bidirectional vocal-tract/keyframe bridge."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "soundfile>=0.12",
+  "torch>=2.1",
+]
+
+[project.optional-dependencies]
+lexicon = [
+  "cmudict>=1.0",
+  "pyopenjtalk>=0.3",
+  "pypinyin>=0.51",
+]
+fastapi = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
+
+[project.scripts]
+kf-ipa-synth-server = "kf_ipa_synth.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kf_ipa_synth*"]

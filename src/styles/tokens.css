@@ -1,0 +1,198 @@
+/* Semantic Design Tokens — Acoustic & Vocal Workstation
+   Default Palette: Codex Light (#f9f9f9 / #202020 / #0969da)
+   Default Surface Skin: Frosted Soft Neumorphism (neumorphism)
+   Default Backdrop: Aurora Grid (--glass-blur: 7px) */
+
+:root {
+  color-scheme: light;
+
+  /* Typography Stacks (default to bundled Source Han Serif / VC Noto Serif SC & JetBrains Mono) */
+  --font-ui: "VC Noto Serif SC", "Noto Serif CJK SC", "SimSun", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+  --font-ipa: "PTBIPAPlus", "PTB-Doulos", "Doulos SIL", "Charis SIL", serif;
+  --font-figure: var(--font-ui);
+
+  /* 29+1 Codex Palette Semantic Surfaces & Accents */
+  --app: #f9f9f9;
+  --bg: var(--app);
+  --panel: #fcfcfc;
+  --sidebar: #f0f2f5;
+  --rail: #f3f4f6;
+  --text: #202020;
+  --muted: #5a6069;
+  --border: #cfd6de;
+  --accent: #0969da;
+  --selected: #e3eefc;
+  --on-accent: #ffffff;
+  --success: #267544;
+  --warning: #8a5a13;
+  --danger: #b33448;
+  --teal: #1d7f7a;
+  --teal-bg: rgba(29, 127, 122, 0.14);
+  --violet: #6f52a3;
+  --violet-bg: rgba(111, 82, 163, 0.13);
+  --selection: rgba(9, 105, 218, 0.18);
+  --wave: #2463eb;
+  --waveform-color: var(--accent);
+  --shadow-ink: #0f172a;
+
+  /* Legacy & Cross-Module Semantic Aliases (zero ghost variables) */
+  --panel-strong: color-mix(in srgb, var(--sidebar) 90%, var(--panel));
+  --text-2: var(--muted);
+  --line: color-mix(in srgb, var(--border) 78%, transparent);
+  --accent-text: var(--on-accent);
+  --ink: var(--text);
+  --green: var(--accent);
+
+  /* Voice-Morph Curve Editor Semantic Tokens (light/dark adaptive) */
+  --vm-bg: var(--panel);
+  --vm-border: var(--panel-border);
+  --vm-accent: var(--accent);
+  --vm-canvas-bg: color-mix(in srgb, var(--panel) 95%, var(--sidebar));
+  --vm-grid-line: color-mix(in srgb, var(--muted) 20%, transparent);
+  --vm-muted: var(--muted);
+  --vm-wave-color: color-mix(in srgb, var(--muted) 30%, transparent);
+  --vm-gate-block: color-mix(in srgb, var(--danger) 16%, transparent);
+  --vm-curve-raw: color-mix(in srgb, var(--violet) 72%, transparent);
+  --vm-curve-eff: var(--accent);
+  --vm-curve-fill: color-mix(in srgb, var(--accent) 16%, transparent);
+  --vm-knot-fill: var(--panel);
+  --vm-knot-stroke: var(--accent);
+  --vm-knot-active: var(--warning);
+  --vm-align-strip-bg: color-mix(in srgb, var(--panel) 84%, var(--sidebar));
+  --vm-align-bound: color-mix(in srgb, var(--accent) 32%, var(--border));
+  --vm-align-text: var(--text);
+  --vm-tooltip-bg: color-mix(in srgb, var(--panel) 96%, var(--text));
+  --vm-tooltip-fg: var(--text);
+  --vm-tooltip-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+
+  /* Anatomical Vocal Tract Semantic Tokens */
+  --tract-tongue: rgba(214, 126, 124, 0.36);
+  --tract-tongue-stroke: rgba(176, 88, 86, 0.86);
+  --overlay: rgba(15, 20, 32, 0.46);
+
+  /* Adaptive Scale & Layout Density */
+  --page-scale: 1;
+  --track-row-scale: 1;
+
+  /* Typography Density Scale */
+  --fs-body: 12px;
+  --fs-micro: 10.5px;
+  --control-height: 27px;
+  --control-height-sm: 24px;
+  --control-height-xs: 20px;
+  --control-font-size: 0.958333rem;
+  --control-font-size-sm: 0.916667rem;
+  --control-font-size-xs: 0.833333rem;
+
+  /* Motion System Tokens (Octathlon-grade precision easing) */
+  --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 165ms;
+  --dur-med: 210ms;
+
+  /* Default Surface Geometry & Materials (Neumorphism × Frosted Glass) */
+  --r-panel: 9px;
+  --r-ctrl: 6px;
+  --r-seg: 7px;
+  --r-pill: 12px;
+  --gap-layout: 9px;
+  --pad-shell: 9px;
+  --border-w: 1px;
+  --glass-alpha: 68%;
+  --glass-blur: 7px;
+  --panel-bg: color-mix(in srgb, var(--panel) var(--glass-alpha), transparent);
+  --panel-border: color-mix(in srgb, #ffffff 74%, var(--border));
+  --ctrl-border: color-mix(in srgb, var(--border) 66%, #ffffff);
+  --neu-hi: rgba(255, 255, 255, 0.88);
+  --neu-lo: rgba(15, 23, 42, 0.085);
+  --panel-shadow:
+    4px 8px 20px var(--neu-lo),
+    -3px -3px 10px var(--neu-hi),
+    inset 0 1px 0 rgba(255, 255, 255, 0.90),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.05);
+  --shadow-panel: var(--panel-shadow);
+  --ctrl-bg: rgba(252, 252, 252, 0.86);
+  --ctrl-shadow:
+    2px 3px 7px rgba(15, 23, 42, 0.065),
+    -2px -2px 5px rgba(255, 255, 255, 0.82),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  --ctrl-inset:
+    inset 2px 2px 5px rgba(15, 23, 42, 0.09),
+    inset -2px -2px 5px rgba(255, 255, 255, 0.78);
+  --popover-bg: color-mix(in srgb, var(--panel) 95%, #ffffff);
+  --popover-shadow:
+    0 18px 44px -8px rgba(8, 18, 36, 0.24),
+    0 2px 6px rgba(8, 18, 36, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.84);
+  --glass-backdrop: blur(var(--glass-blur)) saturate(142%);
+
+  /* Customizable Tech Backdrop Controls */
+  --bg-sat: 128%;
+  --bg-cov: 1.18;
+  --bg-c1: var(--accent);
+  --bg-c2: var(--teal);
+  --bg-c3: var(--violet);
+  --orb-alpha-a: 0.42;
+  --orb-alpha-b: 0.36;
+  --orb-alpha-c: 0.30;
+  --orb-alpha-d: 0.26;
+  --orb-alpha-e: 0.24;
+  --grid-alpha: 0.58;
+  --grain-alpha: 0.028;
+
+  /* Z-Index Hierarchy Ladder */
+  --z-base: 1;
+  --z-sticky: 10;
+  --z-drawer: 30;
+  --z-popover: 50;
+  --z-overlay: 70;
+  --z-modal: 90;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --shadow-ink: #000000;
+  --tract-tongue: rgba(224, 138, 136, 0.30);
+  --tract-tongue-stroke: rgba(236, 158, 156, 0.84);
+  --overlay: rgba(4, 8, 16, 0.66);
+  --glass-alpha: 64%;
+  --panel-strong: color-mix(in srgb, var(--sidebar) 88%, #ffffff 4%);
+  --line: rgba(255, 255, 255, 0.11);
+  --vm-canvas-bg: color-mix(in srgb, var(--panel) 92%, #090c12);
+  --vm-grid-line: rgba(255, 255, 255, 0.085);
+  --vm-wave-color: rgba(255, 255, 255, 0.22);
+  --vm-align-strip-bg: rgba(15, 23, 42, 0.72);
+  --vm-align-bound: rgba(148, 163, 184, 0.36);
+  --vm-align-text: #e2e8f0;
+  --vm-tooltip-bg: rgba(15, 23, 42, 0.94);
+  --vm-tooltip-fg: #f8fafc;
+  --vm-tooltip-border: rgba(148, 163, 184, 0.28);
+  --panel-border: rgba(255, 255, 255, 0.11);
+  --ctrl-border: rgba(255, 255, 255, 0.14);
+  --neu-hi: rgba(255, 255, 255, 0.05);
+  --neu-lo: rgba(0, 0, 0, 0.56);
+  --panel-shadow:
+    0 10px 26px var(--neu-lo),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.05);
+  --shadow-panel: var(--panel-shadow);
+  --ctrl-bg: rgba(28, 32, 42, 0.84);
+  --ctrl-shadow:
+    0 2px 7px rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --ctrl-inset:
+    inset 1px 2px 5px rgba(0, 0, 0, 0.52),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  --popover-bg: color-mix(in srgb, var(--panel) 94%, #10131c);
+  --popover-shadow:
+    0 24px 56px rgba(0, 0, 0, 0.72),
+    0 2px 8px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  --orb-alpha-a: 0.44;
+  --orb-alpha-b: 0.38;
+  --orb-alpha-c: 0.32;
+  --orb-alpha-d: 0.28;
+  --orb-alpha-e: 0.24;
+  --grid-alpha: 0.44;
+  --grain-alpha: 0.032;
+}

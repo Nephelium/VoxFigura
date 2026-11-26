@@ -1,0 +1,90 @@
+{
+  "version": "1.0.0",
+  "source": "Open JTalk NAIST-JDIC (pyopenjtalk-plus dictionary)",
+  "sourceSha256": "23287ce5d518164b8b97683b1d9534df095556e446f3470a6c52bd737be74527",
+  "license": "Modified BSD License (NAIST-JDIC / Open JTalk)",
+  "entries": 408422,
+  "totalCompressedBytes": 2446177,
+  "files": {
+    "0.tsv.gz": {
+      "bytes": 125604,
+      "entries": 20269,
+      "sha256": "15fca4debe1c30bd0c117ac27595aa656bacad1a96c96e5ba3dfd7b567049504"
+    },
+    "1.tsv.gz": {
+      "bytes": 151344,
+      "entries": 24312,
+      "sha256": "d32cd4f9724f2d8d14a54c8eb8c90dd3db1958b4db641c3312916e1b9c08b0b9"
+    },
+    "2.tsv.gz": {
+      "bytes": 169185,
+      "entries": 28281,
+      "sha256": "fb490fec66725ed0e8c8237633c93b35891f8e081c184ca2d01a5787a8bc8e4b"
+    },
+    "3.tsv.gz": {
+      "bytes": 139171,
+      "entries": 23117,
+      "sha256": "9e7ee47c7e9255ea50a11e16eebb36500f89de898dab3ed7f7b16c8b92b1d4c1"
+    },
+    "4.tsv.gz": {
+      "bytes": 154601,
+      "entries": 25996,
+      "sha256": "5c6199fd28bc6337c48c167588c75598be3e984adec3bb124931d430bd610a64"
+    },
+    "5.tsv.gz": {
+      "bytes": 150562,
+      "entries": 25338,
+      "sha256": "b6804c0fff53aa2658d833fd7409e97b9a42d6e271a26b65183762d13893fc1c"
+    },
+    "6.tsv.gz": {
+      "bytes": 133382,
+      "entries": 22936,
+      "sha256": "ba5153b3bfd47e6dc4afc9ed9351131329619e9d4cb7af7a6bde453deddcfaf6"
+    },
+    "7.tsv.gz": {
+      "bytes": 160951,
+      "entries": 26057,
+      "sha256": "170f9e7c85943f20eeda7170696845df7ef27d71cf233809c677ab63051cbcd7"
+    },
+    "8.tsv.gz": {
+      "bytes": 171875,
+      "entries": 28018,
+      "sha256": "c36568ae5b27241cca5c96ac2af0a55b51dbf6bdd36f97361972a5db9947f3e9"
+    },
+    "9.tsv.gz": {
+      "bytes": 144018,
+      "entries": 22609,
+      "sha256": "614022d74deb2a22f2240c62e69ec004b95f28173e78c2dceaa09cda0a72edd6"
+    },
+    "a.tsv.gz": {
+      "bytes": 160481,
+      "entries": 26276,
+      "sha256": "b37b481de68e0f16ad89360dd1a8aaaa031c8f60027c63c60058920ec7f575bb"
+    },
+    "b.tsv.gz": {
+      "bytes": 209700,
+      "entries": 36707,
+      "sha256": "0fa3941ae2146b244a6e5080964f6e3ac9fc3b1f3f739b83dd585f0dc2a58571"
+    },
+    "c.tsv.gz": {
+      "bytes": 115019,
+      "entries": 19268,
+      "sha256": "5300c9dbf1b72f6c0c6424ab9b02f7c387470ef7d97f0d6f404840394fa1fe11"
+    },
+    "d.tsv.gz": {
+      "bytes": 156880,
+      "entries": 26325,
+      "sha256": "219e3dee36226b3dbcc236054a3eabe013801dafaeabf8c178f7ea733a35403e"
+    },
+    "e.tsv.gz": {
+      "bytes": 119173,
+      "entries": 20363,
+      "sha256": "e8aebd641f08e8be0a8a95c205bdb1afb634907c87f9ffbe33cc16983860db68"
+    },
+    "f.tsv.gz": {
+      "bytes": 184231,
+      "entries": 32550,
+      "sha256": "80a6ba4a823b8038eaec0c236792d14cea09c62167e87febaae2f3dd03dbe784"
+    }
+  }
+}

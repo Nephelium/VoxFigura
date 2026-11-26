@@ -1,0 +1,35 @@
+:root {
+  --chart-series: var(--teal);
+  --chart-peer: var(--accent);
+  --chart-panel: color-mix(in srgb, var(--panel) 94%, var(--chart-series));
+  --chart-grid: color-mix(in srgb, var(--muted) 24%, var(--chart-panel));
+  --chart-fill: color-mix(in srgb, var(--chart-series) 17%, var(--chart-panel));
+  --chart-outline: color-mix(in srgb, var(--panel-border) 72%, var(--chart-series));
+  --chart-corner: 8px;
+  --chart-line: 1.65;
+  --vowel-unrounded: #0ea5e9;
+  --vowel-unrounded-text: #075985;
+  --vowel-rounded: #9333ea;
+  --vowel-rounded-text: #6b21a8;
+}
+:root[data-theme='dark'],
+:root[data-mode='dark'] {
+  --chart-grid: color-mix(in srgb, var(--muted) 32%, var(--chart-panel));
+  --vowel-unrounded: #38bdf8;
+  --vowel-unrounded-text: #e0f2fe;
+  --vowel-rounded: #c084fc;
+  --vowel-rounded-text: #f3e8ff;
+}
+:root[data-style='clay'] { --chart-panel: color-mix(in srgb, var(--panel) 89%, var(--chart-series)); --chart-corner: 14px; --chart-line: 2.45; }
+:root[data-style='glass'] { --chart-panel: color-mix(in srgb, var(--panel) 92%, var(--chart-peer)); --chart-corner: 11px; --chart-line: 2.05; }
+:root[data-style='minimal'] { --chart-panel: var(--panel); --chart-corner: 2px; --chart-line: 1.3; }
+:root[data-style='material'] { --chart-series: var(--accent); --chart-peer: var(--teal); --chart-corner: 9px; --chart-line: 2; }
+:root[data-style='swiss'] { --chart-panel: var(--panel); --chart-corner: 0; --chart-line: 1.45; }
+:root[data-style='bauhaus'] { --chart-corner: 3px; --chart-line: 2.5; --chart-outline: var(--chart-peer); }
+:root[data-style='brutal'] { --chart-corner: 0; --chart-line: 2.65; --chart-outline: var(--text); }
+
+.acoustic-plot {
+  background: var(--chart-panel);
+  border: var(--border-w, 1px) solid var(--chart-outline);
+  border-radius: var(--chart-corner);
+}

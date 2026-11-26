@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@vocalcut/edition": ["src/editions/public.ts"],
+      "@/*": ["src/*"],
+      "@vocalcut/core": ["packages/core-ts/src/index.ts"],
+      "@vocalcut/g2p": ["packages/g2p-ts/src/index.ts"],
+      "@vocalcut/model-adapters": ["packages/model-adapters/src/index.ts"]
+    }
+  }
+}

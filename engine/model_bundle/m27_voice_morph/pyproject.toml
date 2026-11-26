@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m27-voice-morph"
+version = "0.1.0"
+description = "Packable M27 articulatory/phonation time-varying morphing & preset modulation engine with themeable web studio"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "soundfile>=0.12",
+    "torch>=2.1",
+]
+
+[project.scripts]
+m27-voice-morph-serve = "m27_voice_morph.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

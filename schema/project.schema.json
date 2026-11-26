@@ -1,0 +1,656 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vocalcut.studio/schema/project.schema.json",
+  "title": "VoxFigura Project (.vcproj / project.json)",
+  "description": "1:1 synchronized schema generated from packages/core-ts/src/types.ts using 48 kHz integer samples (_smp), half-open intervals [start_smp, end_smp), and Pascals (0..1600 Pa).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "revision",
+    "id",
+    "name",
+    "settings",
+    "voice_order",
+    "voices",
+    "asset_order",
+    "assets",
+    "track_order",
+    "tracks",
+    "clip_order",
+    "clips",
+    "layer_order",
+    "layers",
+    "phonation_anchor_order",
+    "phonation_anchors",
+    "render"
+  ],
+  "properties": {
+    "arrangements": {
+      "type": "object", "additionalProperties": {
+        "type": "object", "required": ["version","state"], "additionalProperties": false,
+        "properties": {"version":{"const":2},"state":{"type":"object","required":["parts","active","bpm"],"properties":{"parts":{"type":"array","minItems":0,"items":{"type":"object","required":["id","rows","lyrics","scoreEditor"]}}}}}
+      }
+    },
+    "schema": { "const": "vocalcut/project" },
+    "schema_version": { "const": 1 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "settings": { "$ref": "#/$defs/ProjectSettings" },
+    "voice_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "voices": { "type": "object", "additionalProperties": { "$ref": "#/$defs/VoiceConfig" } },
+    "asset_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "assets": { "type": "object", "additionalProperties": { "$ref": "#/$defs/AssetRef" } },
+    "track_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "tracks": { "type": "object", "additionalProperties": { "$ref": "#/$defs/Track" } },
+    "clip_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "clips": { "type": "object", "additionalProperties": { "$ref": "#/$defs/Clip" } },
+    "layer_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "layers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/VisualLayer" } },
+    "phonation_anchor_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "phonation_anchors": { "type": "object", "additionalProperties": { "$ref": "#/$defs/PhonationAnchor" } },
+    "f0_pins": { "type": "array", "items": { "$ref": "#/$defs/F0PinSegment" } },
+    "vibrato": { "$ref": "#/$defs/VibratoConfig" },
+    "perturbation": { "$ref": "#/$defs/PerturbationConfig" },
+    "render": { "$ref": "#/$defs/RenderConfig" }
+  },
+  "$defs": {
+    "ComputeDevice": {
+      "type": "string",
+      "enum": ["webgpu-high", "webgpu-low", "cuda", "wasm-cpu"]
+    },
+    "PhonationRegime": {
+      "type": "string",
+      "enum": ["pressed", "modal", "breathy", "whisper", "creaky", "falsetto"]
+    },
+    "OrganScope": {
+      "type": "string",
+      "enum": ["lips", "jaw", "tongue_tip", "tongue_blade", "tongue_body", "tongue_root", "velum", "hyoid", "larynx", "glottis"]
+    },
+    "TractParamName": {
+      "type": "string",
+      "enum": ["HX", "HY", "JX", "JA", "LP", "LD", "VS", "VO", "TCX", "TCY", "TTX", "TTY", "TBX", "TBY", "TRX", "TRY", "TS1", "TS2", "TS3"]
+    },
+    "SongTonic": {
+      "type": "string",
+      "enum": ["C2", "D2", "E2", "F2", "G2", "A2", "B2", "C3", "D3", "E3", "F3", "G3"]
+    },
+    "TempoEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tick", "bpm"],
+      "properties": {
+        "tick": { "type": "integer", "minimum": 0 },
+        "bpm": { "type": "number", "minimum": 30, "maximum": 260 }
+      }
+    },
+    "ProjectSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_rate_hz", "fps", "size_px", "tempo_map", "ppq", "time_signature", "default_lead_policy", "compute_device"],
+      "properties": {
+        "sample_rate_hz": { "const": 48000 },
+        "fps": { "type": "integer", "enum": [24, 25, 30, 50, 60] },
+        "size_px": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 320, "maximum": 3840 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "tempo_map": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/TempoEvent" }
+        },
+        "ppq": { "type": "integer", "minimum": 24 },
+        "time_signature": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1, "maximum": 16 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "default_lead_policy": { "type": "string", "enum": ["nucleus_on_beat", "onset_on_beat"] },
+        "compute_device": { "$ref": "#/$defs/ComputeDevice" }
+      }
+    },
+    "VoiceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "speaker", "dimension", "geometry", "sections", "preset_pack", "f0_ref_hz", "range_st", "seed"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "speaker": { "type": "string", "enum": ["JD2", "W02", "M01", "JD2-2D", "W02-2D"] },
+        "dimension": { "type": "string", "enum": ["2d", "3d"] },
+        "geometry": { "const": "m10/r21" },
+        "sections": { "type": "integer", "enum": [33, 65, 129, 257] },
+        "preset_pack": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "sha256"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "minLength": 1 }
+          }
+        },
+        "f0_ref_hz": { "type": "number", "minimum": 60, "maximum": 600 },
+        "range_st": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -36, "maximum": 36 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "seed": { "type": "integer" }
+      }
+    },
+    "AssetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "sha256", "path"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["audio", "textgrid", "image", "video", "font", "score", "spritesheet"] },
+        "sha256": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "role": { "type": "string" },
+        "duration_smp": { "type": "integer", "minimum": 0 },
+        "width_px": { "type": "integer", "minimum": 1 },
+        "height_px": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["textgrid", "articulation", "phonation", "f0", "pressure", "audio", "visual", "subtitle"] },
+        "voice_id": { "type": "string", "minLength": 1 },
+        "tiers": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["syllable", "phone", "note"] }
+        },
+        "clip_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "layer_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "source_track_id": { "type": "string" },
+        "style_id": { "type": "string" },
+        "gain_db": { "type": "number", "minimum": -96, "maximum": 24 },
+        "height_px": { "type": "integer", "minimum": 16, "maximum": 600 },
+        "expanded": { "type": "boolean" }
+      }
+    },
+    "StopTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["closure_ms", "release_ms", "aspiration_ms", "vot_ms"],
+      "properties": {
+        "closure_ms": { "type": "number", "minimum": 10 },
+        "release_ms": { "type": "number", "minimum": 1 },
+        "aspiration_ms": { "type": "number", "minimum": 0 },
+        "vot_ms": { "type": "number" },
+        "locked": { "type": "boolean" },
+        "auto_generated": { "type": "boolean" }
+      }
+    },
+    "SegmentAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ipa", "start_smp", "end_smp", "role", "elastic", "voiced"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "ipa": { "type": "string" },
+        "start_smp": { "type": "integer", "minimum": 0 },
+        "end_smp": { "type": "integer", "minimum": 0 },
+        "role": { "type": "string", "enum": ["onset", "nucleus", "coda", "aspiration", "rest"] },
+        "elastic": { "type": "boolean" },
+        "voiced": { "type": "boolean" },
+        "params": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 19,
+          "maxItems": 19
+        },
+        "lip_width": { "type": "number", "minimum": 0.55, "maximum": 1.6 },
+        "larynx_height_cm": { "type": "number", "minimum": -1.0, "maximum": 1.0 },
+        "manual_root": { "type": "boolean" },
+        "tongue_shape": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -2.0, "maximum": 2.0 },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "lip_shape": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -2.0, "maximum": 2.0 },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "stop_timing": { "$ref": "#/$defs/StopTiming" },
+        "stress": { "type": "number", "minimum": 0, "maximum": 2 }
+      }
+    },
+    "QtaTargetCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["m_st_per_s", "b_end_st", "lambda_per_s", "source"],
+      "properties": {
+        "m_st_per_s": { "type": "number" },
+        "b_end_st": { "type": "number" },
+        "lambda_per_s": { "type": "number", "minimum": 1, "maximum": 120 },
+        "source": { "type": "string", "enum": ["user", "transfer", "score", "default"] },
+        "rule": { "type": "string" }
+      }
+    },
+    "QtaTargetSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "span_id", "start_smp", "end_smp", "candidates"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "start_smp": { "type": "integer", "minimum": 0 },
+        "end_smp": { "type": "integer", "minimum": 0 },
+        "voiced": { "type": "boolean" },
+        "is_rest_after": { "type": "boolean" },
+        "pre_glide_ms": { "type": "number", "minimum": 0 },
+        "candidates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "user": { "$ref": "#/$defs/QtaTargetCandidate" },
+            "transfer": { "$ref": "#/$defs/QtaTargetCandidate" },
+            "score": { "$ref": "#/$defs/QtaTargetCandidate" },
+            "default": { "$ref": "#/$defs/QtaTargetCandidate" }
+          }
+        }
+      }
+    },
+    "PoseOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seg_index", "delta"],
+      "properties": {
+        "seg_index": { "type": "integer", "minimum": 0 },
+        "seg_id": { "type": "string" },
+        "delta": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "scope": { "type": "array", "items": { "$ref": "#/$defs/OrganScope" } }
+      }
+    },
+    "F0ResidualPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["u", "st"],
+      "properties": {
+        "u": { "type": "number", "minimum": 0, "maximum": 1 },
+        "st": { "type": "number" }
+      }
+    },
+    "F0ResidualSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "span_id", "points", "feather_ms"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "span_id": { "type": "string", "minLength": 1 },
+        "points": { "type": "array", "items": { "$ref": "#/$defs/F0ResidualPoint" } },
+        "feather_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "PressurePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["u", "pressure_pa"],
+      "properties": {
+        "u": { "type": "number", "minimum": 0, "maximum": 1 },
+        "pressure_pa": { "type": "number", "minimum": 0, "maximum": 1600 }
+      }
+    },
+    "GlottisMixSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["u0", "u1", "preset", "blend"],
+      "properties": {
+        "u0": { "type": "number", "minimum": 0, "maximum": 1 },
+        "u1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "preset": { "$ref": "#/$defs/PhonationRegime" },
+        "blend": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "VibratoConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "rate_hz", "depth_cents", "delay_ms", "fade_in_ms", "fade_out_ms", "min_hold_ms"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rate_hz": { "type": "number", "minimum": 0, "maximum": 20 },
+        "depth_cents": { "type": "number", "minimum": 0, "maximum": 400 },
+        "delay_ms": { "type": "number", "minimum": 0 },
+        "fade_in_ms": { "type": "number", "minimum": 0 },
+        "fade_out_ms": { "type": "number", "minimum": 0 },
+        "min_hold_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "PartialVibratoConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rate_hz": { "type": "number", "minimum": 0, "maximum": 20 },
+        "depth_cents": { "type": "number", "minimum": 0, "maximum": 400 },
+        "delay_ms": { "type": "number", "minimum": 0 },
+        "fade_in_ms": { "type": "number", "minimum": 0 },
+        "fade_out_ms": { "type": "number", "minimum": 0 },
+        "min_hold_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "PerturbationConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flutter", "shimmer", "seed"],
+      "properties": {
+        "flutter": { "type": "number", "minimum": 0, "maximum": 100 },
+        "shimmer": { "type": "number", "minimum": 0, "maximum": 100 },
+        "seed": { "type": "integer" }
+      }
+    },
+    "PartialPerturbationConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flutter": { "type": "number", "minimum": 0, "maximum": 100 },
+        "shimmer": { "type": "number", "minimum": 0, "maximum": 100 },
+        "seed": { "type": "integer" }
+      }
+    },
+    "SyllableOverrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["poses", "f0_resid", "pressure", "glottis"],
+      "properties": {
+        "poses": { "type": "array", "items": { "$ref": "#/$defs/PoseOverride" } },
+        "f0_resid": { "type": "array", "items": { "$ref": "#/$defs/F0ResidualSegment" } },
+        "pressure": { "type": "array", "items": { "$ref": "#/$defs/PressurePoint" } },
+        "glottis": { "type": "array", "items": { "$ref": "#/$defs/GlottisMixSpan" } },
+        "vibrato": { "$ref": "#/$defs/PartialVibratoConfig" },
+        "perturbation": { "$ref": "#/$defs/PartialPerturbationConfig" }
+      }
+    },
+    "SyllableAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "lead_ms", "bias_ms"],
+      "properties": {
+        "tick": { "type": "integer", "minimum": 0 },
+        "beat": { "type": "number" },
+        "policy": { "type": "string", "enum": ["nucleus_on_beat", "speech_timing"] },
+        "lead_ms": { "type": ["number", "null"] },
+        "bias_ms": { "type": "number" }
+      }
+    },
+    "Syllable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "ipa", "nucleus_index", "start_smp", "end_smp", "anchor", "segments", "targets", "overrides"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "ipa": { "type": "array", "items": { "type": "string" } },
+        "nucleus_index": { "type": "integer", "minimum": 0 },
+        "start_smp": { "type": "integer", "minimum": 0 },
+        "end_smp": { "type": "integer", "minimum": 0 },
+        "tone_levels": { "type": "string" },
+        "tone_id": { "type": "string" },
+        "checked": { "type": "boolean" },
+        "coda_release": { "type": "string", "enum": ["unreleased", "glottal", "released"] },
+        "reading_candidates": { "type": "array", "items": { "type": "string" } },
+        "anchor": { "$ref": "#/$defs/SyllableAnchor" },
+        "segments": { "type": "array", "items": { "$ref": "#/$defs/SegmentAnchor" } },
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/QtaTargetSpan" } },
+        "overrides": { "$ref": "#/$defs/SyllableOverrides" }
+      }
+    },
+    "ClipSourceMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lyrics": { "type": "string" },
+        "score": { "type": "string" },
+        "score_tonic": { "$ref": "#/$defs/SongTonic" },
+        "score_bpm": { "type": "number", "minimum": 30, "maximum": 260 },
+        "reading_standard": { "type": "string" },
+        "lang": { "type": "string", "enum": ["cmn", "en", "ja", "ipa", "mixed"] },
+        "transcription": { "type": "string" }
+      }
+    },
+    "AnnotationControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phonation_anchor_order", "phonation_anchors"],
+      "properties": {
+        "phonation_anchor_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "phonation_anchors": { "type": "object", "additionalProperties": { "$ref": "#/$defs/PhonationAnchor" } },
+        "f0_pins": { "type": "array", "items": { "$ref": "#/$defs/F0PinSegment" } },
+        "vibrato": { "$ref": "#/$defs/VibratoConfig" },
+        "perturbation": { "$ref": "#/$defs/PerturbationConfig" }
+      }
+    },
+    "Clip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "start_smp", "end_smp", "syllable_order", "syllables"],
+      "properties": {
+        "annotation_controls": { "$ref": "#/$defs/AnnotationControls" },
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["phrase", "audio", "video", "subtitle"] },
+        "voice_id": { "type": "string" },
+        "asset_id": { "type": "string" },
+        "start_smp": { "type": "integer", "minimum": 0 },
+        "end_smp": { "type": "integer", "minimum": 0 },
+        "variants": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["synth", "inversion", "original"] }
+        },
+        "active_variant": { "type": "string", "enum": ["synth", "inversion", "original"] },
+        "source": { "$ref": "#/$defs/ClipSourceMeta" },
+        "syllable_order": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "syllables": { "type": "object", "additionalProperties": { "$ref": "#/$defs/Syllable" } },
+        "orphan_overrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["syllable_id", "overrides"],
+            "properties": {
+              "syllable_id": { "type": "string" },
+              "overrides": { "$ref": "#/$defs/SyllableOverrides" }
+            }
+          }
+        }
+      }
+    },
+    "VisualLayerKeyframe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "t_smp": { "type": "integer", "minimum": 0 },
+        "at": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bar": { "type": "integer" },
+            "beat": { "type": "number" },
+            "bind": { "const": "beat" }
+          }
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "scale": { "type": "number" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rotation_deg": { "type": "number" },
+        "pulse": { "type": "number" },
+        "decay_ms": { "type": "number", "minimum": 0 },
+        "frame": { "type": "string" }
+      }
+    },
+    "SubtitleJitterConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "min_pct", "max_pct", "seed"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "min_pct": { "type": "number" },
+        "max_pct": { "type": "number" },
+        "seed": { "type": "integer" }
+      }
+    },
+    "SubtitleStyleConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["font_family", "font_size_px", "tilt_deg", "reveal_mode", "text_color", "highlight_color", "show_ipa", "show_translation", "safe_margin_px"],
+      "properties": {
+        "font_family": { "type": "string" },
+        "font_size_px": { "type": "number", "minimum": 8, "maximum": 240 },
+        "tilt_deg": { "type": "number" },
+        "reveal_mode": { "type": "string", "enum": ["line", "word", "char_by_char", "single_char"] },
+        "text_color": { "type": "string" },
+        "highlight_color": { "type": "string" },
+        "show_ipa": { "type": "boolean" },
+        "show_translation": { "type": "boolean" },
+        "safe_margin_px": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "size_jitter": { "$ref": "#/$defs/SubtitleJitterConfig" }
+      }
+    },
+    "VisualLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "z_index", "visible"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["background", "sprite", "tract", "spectrum", "particles", "subtitle"] },
+        "z_index": { "type": "integer" },
+        "asset_id": { "type": "string" },
+        "visible": { "type": "boolean" },
+        "switches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at", "frame"],
+            "properties": {
+              "at": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["bar", "beat"],
+                "properties": {
+                  "bar": { "type": "integer" },
+                  "beat": { "type": "number" }
+                }
+              },
+              "frame": { "type": "string" }
+            }
+          }
+        },
+        "keys": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/VisualLayerKeyframe" }
+          }
+        },
+        "style": { "$ref": "#/$defs/SubtitleStyleConfig" },
+        "tract_render_style": { "type": "string", "enum": ["natural", "ink", "oil", "watercolor", "pastel", "sketch"] }
+      }
+    },
+    "GlottisM27Params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["f0_hz", "pr_pa", "xb_cm", "xt_cm", "ca_cm2", "lag_rad", "ra", "ps", "fl", "shim"],
+      "properties": {
+        "f0_hz": { "type": "number", "minimum": 40, "maximum": 600 },
+        "pr_pa": { "type": "number", "minimum": 0, "maximum": 1600 },
+        "xb_cm": { "type": "number", "minimum": -0.05, "maximum": 0.3 },
+        "xt_cm": { "type": "number", "minimum": -0.05, "maximum": 0.3 },
+        "ca_cm2": { "type": "number", "minimum": -0.25, "maximum": 0.25 },
+        "lag_rad": { "type": "number", "minimum": 0, "maximum": 3.1415 },
+        "ra": { "type": "number", "minimum": -1, "maximum": 1 },
+        "ps": { "type": "number", "minimum": -1, "maximum": 1 },
+        "fl": { "type": "number", "minimum": 0, "maximum": 100 },
+        "shim": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "PhonationAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "t_smp", "regime", "blend"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "t_smp": { "type": "integer", "minimum": 0 },
+        "regime": { "$ref": "#/$defs/PhonationRegime" },
+        "blend": { "type": "number", "minimum": 0, "maximum": 1 },
+        "syllable_id": { "type": "string" },
+        "glottis": { "$ref": "#/$defs/GlottisM27Params" },
+        "voqs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["symbol", "source_id", "t_s"],
+          "properties": {
+            "symbol": { "type": "string" },
+            "source_id": { "type": "string" },
+            "t_s": { "type": "number" }
+          }
+        },
+        "larynx_height_cm": { "type": "number", "minimum": -1, "maximum": 1 }
+      }
+    },
+    "F0PinPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["t_smp", "f0_hz"],
+      "properties": {
+        "t_smp": { "type": "integer", "minimum": 0 },
+        "f0_hz": { "type": "number", "minimum": 40, "maximum": 600 }
+      }
+    },
+    "F0PinSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "start_smp", "end_smp", "points", "transition_ms", "exit_fit_ms"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "start_smp": { "type": "integer", "minimum": 0 },
+        "end_smp": { "type": "integer", "minimum": 0 },
+        "points": { "type": "array", "items": { "$ref": "#/$defs/F0PinPoint" } },
+        "transition_ms": { "type": "number", "minimum": 0 },
+        "exit_fit_ms": { "type": "number", "minimum": 0 },
+        "snap_entry": { "type": "boolean" }
+      }
+    },
+    "RenderConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container", "video", "audio", "safe_margin_px", "max_width_px", "max_height_px"],
+      "properties": {
+        "container": { "type": "string", "enum": ["mp4", "webm"] },
+        "video": { "type": "string", "enum": ["h264", "vp8", "vp9"] },
+        "audio": { "type": "string", "enum": ["aac", "opus", "pcm"] },
+        "safe_margin_px": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "max_width_px": { "type": "integer", "minimum": 320, "maximum": 1920 },
+        "max_height_px": { "type": "integer", "minimum": 240, "maximum": 1080 }
+      }
+    }
+  }
+}

@@ -1,0 +1,304 @@
+/* 8 Curated Surface Skins — Driven Purely by Semantic CSS Variables
+   Flagship A: neumorphism (Frosted Soft Relief — Default)
+   Flagship B: minimal (Precision Scientific Instrument — Octathlon Edition) */
+
+/* 1. Flagship Default: Frosted Soft Neumorphism (轻新拟态) */
+html:root[data-style="neumorphism"] {
+  --r-panel: 9px;
+  --r-ctrl: 6px;
+  --r-seg: 7px;
+  --r-pill: 12px;
+  --gap-layout: 9px;
+  --pad-shell: 9px;
+  --border-w: 1px;
+  --panel-border: color-mix(in srgb, #ffffff 72%, var(--border));
+  --ctrl-border: color-mix(in srgb, var(--border) 66%, #ffffff);
+  --neu-hi: rgba(255, 255, 255, 0.88);
+  --neu-lo: rgba(15, 23, 42, 0.085);
+  --panel-shadow:
+    4px 8px 20px var(--neu-lo),
+    -3px -3px 10px var(--neu-hi),
+    inset 0 1px 0 rgba(255, 255, 255, 0.90),
+    inset 0 0 0 0.5px rgba(15, 23, 42, 0.05);
+  --shadow-panel: 0 2px 10px rgba(15, 23, 42, 0.05), inset 0 -1px 0 rgba(15, 23, 42, 0.04);
+  --ctrl-shadow:
+    2px 3px 7px rgba(15, 23, 42, 0.065),
+    -2px -2px 5px rgba(255, 255, 255, 0.82),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  --ctrl-inset:
+    inset 2px 2px 5px rgba(15, 23, 42, 0.085),
+    inset -2px -2px 5px rgba(255, 255, 255, 0.78);
+}
+
+html:root[data-style="neumorphism"][data-theme="dark"] {
+  --panel-border: rgba(255, 255, 255, 0.105);
+  --ctrl-border: rgba(255, 255, 255, 0.135);
+  --neu-hi: rgba(255, 255, 255, 0.045);
+  --neu-lo: rgba(0, 0, 0, 0.56);
+  --panel-shadow:
+    0 10px 26px var(--neu-lo),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.05);
+  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.36), inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+  --ctrl-shadow:
+    0 2px 7px rgba(0, 0, 0, 0.44),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --ctrl-inset:
+    inset 1px 2px 5px rgba(0, 0, 0, 0.52),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+html:root[data-style="neumorphism"] .work-header .header-tools > button {
+  border-radius: 7px;
+  border: 1px solid var(--ctrl-border);
+  box-shadow: var(--ctrl-shadow);
+}
+
+/* 2. Claymorphism (轻黏土拟态) */
+html:root[data-style="clay"] {
+  --r-panel: 13px;
+  --r-ctrl: 8px;
+  --r-seg: 9px;
+  --r-pill: 14px;
+  --gap-layout: 10px;
+  --pad-shell: 10px;
+  --border-w: 1px;
+  --glass-alpha: 78%;
+  --panel-border: color-mix(in srgb, #ffffff 78%, var(--accent));
+  --ctrl-border: color-mix(in srgb, #ffffff 74%, var(--border));
+  --panel-shadow:
+    0 10px 24px rgba(18, 28, 52, 0.11),
+    inset 0 3px 6px rgba(255, 255, 255, 0.78),
+    inset 0 -3px 7px color-mix(in srgb, var(--accent) 8%, rgba(0, 0, 0, 0.05));
+  --shadow-panel: 0 4px 14px rgba(18, 28, 52, 0.08);
+  --ctrl-shadow:
+    0 3px 8px rgba(18, 28, 52, 0.08),
+    inset 0 2px 3px rgba(255, 255, 255, 0.74),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.05);
+}
+html:root[data-style="clay"][data-theme="dark"] {
+  --panel-border: rgba(255, 255, 255, 0.13);
+  --ctrl-border: rgba(255, 255, 255, 0.15);
+  --panel-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.52),
+    inset 0 2px 4px rgba(255, 255, 255, 0.10),
+    inset 0 -4px 8px rgba(0, 0, 0, 0.42);
+  --shadow-panel: 0 4px 16px rgba(0, 0, 0, 0.40);
+  --ctrl-shadow:
+    0 3px 9px rgba(0, 0, 0, 0.40),
+    inset 0 1.5px 2px rgba(255, 255, 255, 0.09);
+}
+
+/* 3. Liquid Frosted Glass (液态磨砂玻璃) */
+html:root[data-style="glass"] {
+  --r-panel: 10px;
+  --r-ctrl: 7px;
+  --r-seg: 8px;
+  --r-pill: 12px;
+  --gap-layout: 10px;
+  --pad-shell: 10px;
+  --border-w: 1px;
+  --glass-alpha: 46%;
+  --panel-border: rgba(255, 255, 255, 0.84);
+  --ctrl-border: rgba(255, 255, 255, 0.72);
+  --panel-shadow:
+    0 12px 32px rgba(15, 23, 42, 0.09),
+    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
+    inset 0 0 16px rgba(255, 255, 255, 0.22);
+  --ctrl-shadow:
+    0 2px 8px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.88);
+}
+html:root[data-style="glass"][data-theme="dark"] {
+  --glass-alpha: 42%;
+  --panel-border: rgba(255, 255, 255, 0.20);
+  --ctrl-border: rgba(255, 255, 255, 0.18);
+  --panel-shadow:
+    0 14px 36px rgba(0, 0, 0, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --ctrl-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* 4. Flagship Precision Instrument (精致仪器风 — Octathlon Scientific Publication Style) */
+html:root[data-style="minimal"] {
+  --r-panel: 6px;
+  --r-ctrl: 4px;
+  --r-seg: 5px;
+  --r-pill: 6px;
+  --gap-layout: 8px;
+  --pad-shell: 8px;
+  --border-w: 1px;
+  --instrument-app: color-mix(in srgb, #f7f7fa 88%, var(--app));
+  --instrument-panel: color-mix(in srgb, #ffffff 92%, var(--panel));
+  --instrument-head: color-mix(in srgb, #f1f2f7 86%, var(--sidebar));
+  --panel-bg: var(--instrument-panel);
+  --panel-strong: var(--instrument-head);
+  --panel-border: rgba(15, 23, 42, 0.105);
+  --ctrl-border: rgba(15, 23, 42, 0.145);
+  --line: rgba(15, 23, 42, 0.10);
+  --panel-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 8px 20px -10px rgba(15, 23, 42, 0.07);
+  --shadow-panel: none;
+  --ctrl-shadow: 0 1px 1px rgba(15, 23, 42, 0.03);
+  --ctrl-inset: inset 0 1px 2px rgba(15, 23, 42, 0.045);
+  --popover-bg: #ffffff;
+  --glass-backdrop: none;
+}
+
+html:root[data-style="minimal"][data-theme="dark"] {
+  --instrument-app: color-mix(in srgb, #0e0d15 90%, var(--app));
+  --instrument-panel: color-mix(in srgb, #151420 90%, var(--panel));
+  --instrument-head: color-mix(in srgb, #1b1928 88%, var(--sidebar));
+  --panel-bg: var(--instrument-panel);
+  --panel-strong: var(--instrument-head);
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --ctrl-border: rgba(255, 255, 255, 0.13);
+  --line: rgba(255, 255, 255, 0.085);
+  --vm-canvas-bg: #12111c;
+  --panel-shadow:
+    0 10px 28px -8px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --ctrl-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --ctrl-inset: inset 0 1px 2px rgba(0, 0, 0, 0.46);
+  --popover-bg: #181725;
+}
+
+html:root[data-style="minimal"] .app-shell {
+  background: var(--instrument-app);
+}
+
+html:root[data-style="minimal"] .tech-backdrop .material-surface {
+  background-color: var(--instrument-app);
+  background-image:
+    radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 45%),
+    radial-gradient(circle at 84% 82%, color-mix(in srgb, var(--teal) 6%, transparent), transparent 46%),
+    linear-gradient(to right, color-mix(in srgb, var(--text) 3.2%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--text) 3.2%, transparent) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+  filter: none;
+}
+
+html:root[data-style="minimal"] :is(.work-header, .subbar, .actbar, .set-nav, .statusbar) {
+  background: var(--instrument-panel);
+  border-color: var(--panel-border);
+  backdrop-filter: none;
+}
+
+html:root[data-style="minimal"] .panel {
+  position: relative;
+  background: var(--instrument-panel);
+  backdrop-filter: none;
+}
+
+html:root[data-style="minimal"] .panel > .p-head {
+  background: var(--instrument-head);
+  border-bottom: 1px solid var(--panel-border);
+  box-shadow: inset 0 1.5px 0 0 color-mix(in srgb, var(--accent) 68%, transparent);
+}
+
+html:root[data-style="minimal"] .work-header .header-tools > button {
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--ctrl-border);
+  background: color-mix(in srgb, var(--instrument-head) 72%, transparent);
+}
+
+/* 5. Material 3 Elevation (现代材质分层) */
+html:root[data-style="material"] {
+  --r-panel: 9px;
+  --r-ctrl: 6px;
+  --r-seg: 8px;
+  --r-pill: 12px;
+  --gap-layout: 9px;
+  --pad-shell: 9px;
+  --border-w: 1px;
+  --glass-alpha: 88%;
+  --panel-border: color-mix(in srgb, var(--border) 62%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--border) 74%, transparent);
+  --panel-shadow: 0 4px 12px rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --ctrl-shadow: 0 1px 3px rgba(0, 0, 0, 0.09);
+}
+html:root[data-style="material"][data-theme="dark"] {
+  --panel-border: rgba(255, 255, 255, 0.11);
+  --ctrl-border: rgba(255, 255, 255, 0.14);
+  --panel-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.32);
+  --ctrl-shadow: 0 1px 4px rgba(0, 0, 0, 0.34);
+}
+
+/* 6. Swiss Editorial Grid (瑞士网格) */
+html:root[data-style="swiss"] {
+  --r-panel: 2px;
+  --r-ctrl: 2px;
+  --r-seg: 2px;
+  --r-pill: 3px;
+  --gap-layout: 6px;
+  --pad-shell: 8px;
+  --border-w: 1px;
+  --glass-alpha: 92%;
+  --panel-border: color-mix(in srgb, var(--text) 22%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--text) 26%, transparent);
+  --panel-shadow: none;
+  --ctrl-shadow: none;
+  --ctrl-inset: none;
+}
+
+/* 7. Bauhaus Geometry (包豪斯几何 — fixed dark shadows & unified button geometry) */
+html:root[data-style="bauhaus"] {
+  --r-panel: 4px;
+  --r-ctrl: 3px;
+  --r-seg: 3px;
+  --r-pill: 4px;
+  --gap-layout: 8px;
+  --pad-shell: 9px;
+  --border-w: 1.5px;
+  --glass-alpha: 92%;
+  --panel-border: color-mix(in srgb, var(--text) 38%, var(--border));
+  --ctrl-border: color-mix(in srgb, var(--text) 42%, var(--border));
+  --panel-shadow: 2px 2px 0 rgba(15, 23, 42, 0.16);
+  --ctrl-shadow: 1.5px 1.5px 0 rgba(15, 23, 42, 0.18);
+  --ctrl-inset: inset 1.5px 1.5px 0 rgba(0, 0, 0, 0.10);
+}
+html:root[data-style="bauhaus"][data-theme="dark"] {
+  --panel-border: color-mix(in srgb, var(--accent) 36%, rgba(255, 255, 255, 0.22));
+  --ctrl-border: rgba(255, 255, 255, 0.26);
+  --panel-shadow: 2px 2px 0 rgba(0, 0, 0, 0.68);
+  --ctrl-shadow: 1.5px 1.5px 0 rgba(0, 0, 0, 0.68);
+}
+html:root[data-style="bauhaus"] .work-header .header-tools > button {
+  border-radius: var(--r-ctrl);
+}
+
+/* 8. Soft Brutalism (轻新粗野 — fixed dark shadows so no white blocks appear) */
+html:root[data-style="brutal"] {
+  --r-panel: 5px;
+  --r-ctrl: 4px;
+  --r-seg: 4px;
+  --r-pill: 5px;
+  --gap-layout: 9px;
+  --pad-shell: 9px;
+  --border-w: 1.5px;
+  --glass-alpha: 94%;
+  --panel-border: color-mix(in srgb, var(--text) 72%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--text) 72%, transparent);
+  --panel-shadow: 3px 3px 0 rgba(15, 23, 42, 0.72);
+  --ctrl-shadow: 2px 2px 0 rgba(15, 23, 42, 0.68);
+  --ctrl-inset: inset 2px 2px 0 rgba(15, 23, 42, 0.20);
+}
+html:root[data-style="brutal"][data-theme="dark"] {
+  --panel-border: color-mix(in srgb, var(--accent) 48%, rgba(255, 255, 255, 0.34));
+  --ctrl-border: color-mix(in srgb, var(--accent) 42%, rgba(255, 255, 255, 0.32));
+  --panel-shadow: 3px 3px 0 rgba(0, 0, 0, 0.85);
+  --ctrl-shadow: 2px 2px 0 rgba(0, 0, 0, 0.82);
+  --ctrl-inset: inset 2px 2px 0 rgba(0, 0, 0, 0.55);
+}
+html:root[data-style="brutal"][data-theme="dark"] :is(.work-header, .actbar, .set-nav, .work-header .header-tools > button) {
+  border-color: var(--panel-border);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.82);
+}
+html:root[data-style="brutal"] .btn.primary {
+  background: var(--accent);
+  border-color: var(--ctrl-border);
+  box-shadow: var(--ctrl-shadow);
+}

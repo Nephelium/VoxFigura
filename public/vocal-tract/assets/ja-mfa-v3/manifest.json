@@ -1,0 +1,78 @@
+{
+  "version": "3.0.0",
+  "sourceUrl": "https://github.com/MontrealCorpusTools/mfa-models/releases/download/dictionary-japanese_mfa-v3.0.0/japanese_mfa.dict",
+  "sha256": "4a0c66760576e4b7f3748f3169e7d5217c0135f857f0b5d34637c93a85fd1c91",
+  "license": "CC BY 4.0",
+  "totalRows": 544160,
+  "kanaRows": 256576,
+  "kanaHeadwords": 241941,
+  "alignableRows": 247294,
+  "headwords": 234655,
+  "variants": 235308,
+  "files": {
+    "0.tsv.gz": {
+      "bytes": 119364,
+      "sha256": "ab6ba8a46e054b3a23aea99b1039b33227f49bd33c433dedabb4cecf873d5c8b"
+    },
+    "1.tsv.gz": {
+      "bytes": 166582,
+      "sha256": "a15ae3b757434fec9ec4d7ee262d996976f54bfbca8e08720d16795085178ddb"
+    },
+    "2.tsv.gz": {
+      "bytes": 281464,
+      "sha256": "81ce24d13a6334c9c0b676b26ec9e5ecc548816f2efdff8fc7afe7d84097f66f"
+    },
+    "3.tsv.gz": {
+      "bytes": 149555,
+      "sha256": "d71da2ab686b59e17d0b3efe4c49aa9724626cbb43bdc073c63b1eb02b6db07f"
+    },
+    "4.tsv.gz": {
+      "bytes": 220320,
+      "sha256": "ba03c7fe1455945c27b9fac46b71cac9f18d1129aba6f99774104a3920ee1b9d"
+    },
+    "5.tsv.gz": {
+      "bytes": 168874,
+      "sha256": "af8cfd1dc459e66d7f1a61f9e3bc6730dab03042d5d3a2865ea249b1b838cf24"
+    },
+    "6.tsv.gz": {
+      "bytes": 188040,
+      "sha256": "64c0cb79aad0ab466697fc7e96cd2ac9f9a27a1189e884d06f1f7df80a459208"
+    },
+    "7.tsv.gz": {
+      "bytes": 235661,
+      "sha256": "686d7b41f1dc7da68954154f08c312c90db88a75885439b9a70b99736f0b500d"
+    },
+    "8.tsv.gz": {
+      "bytes": 281800,
+      "sha256": "9d86083698d44fca78fde896f0b30479416b38f9c7ec55c6ad53ad6cc892b70b"
+    },
+    "9.tsv.gz": {
+      "bytes": 147556,
+      "sha256": "13f5a2946ba83ccaff5748961c9bc32283e05fa32fc8c8c18a1314ac115d93c3"
+    },
+    "a.tsv.gz": {
+      "bytes": 217783,
+      "sha256": "38b3c2d39dc5c8b94af80af39afcc5201e48e14ac9a02fbe1d2e9481bb8ef1fb"
+    },
+    "b.tsv.gz": {
+      "bytes": 330785,
+      "sha256": "edb92635e5eb86b49a7edf92404e33bb0cd8e42b13f642def50a1c5e13453487"
+    },
+    "c.tsv.gz": {
+      "bytes": 91717,
+      "sha256": "223838b51ffedfce38e9a3c67826a701ed9381600398ba91f19a24a9ff78f158"
+    },
+    "d.tsv.gz": {
+      "bytes": 206617,
+      "sha256": "c34f93c0b03d0356d111af78648d317c9bd75d7966df199832193e77a920593c"
+    },
+    "e.tsv.gz": {
+      "bytes": 115533,
+      "sha256": "69b9530aee63a98314bac56e403ad215cb7c20c4610eb45f25aa30c653501af7"
+    },
+    "f.tsv.gz": {
+      "bytes": 307681,
+      "sha256": "948d062db1f5559f18d565cb666045900aac14f4505d527660f66e6b1b1f1201"
+    }
+  }
+}

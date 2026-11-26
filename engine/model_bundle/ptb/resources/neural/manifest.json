@@ -1,0 +1,20 @@
+{
+  "components": [
+    {
+      "id": "dpdfnet",
+      "version": "dd6818d00f50c836fed43a6243ebe49116de5964",
+      "url": "https://www.phonetictoolbox.com/releases/components/dpdfnet2_48khz_hr.onnx",
+      "file": "dpdfnet2_48khz_hr.onnx",
+      "bytes": 10493337,
+      "sha256": "7f0575a5cec0ba4ffd8f8bd657e06d007e4ccdd955d76faab922b9d3291dc14b",
+      "origin_url": "https://huggingface.co/Ceva-IP/DPDFNet/resolve/dd6818d00f50c836fed43a6243ebe49116de5964/onnx/dpdfnet2_48khz_hr.onnx",
+      "runtime": "host-onnx"
+    },
+    {
+      "id": "swiftf0",
+      "version": "0.3.0",
+      "file": "swift-f0-0.3.0.onnx",
+      "sha256": "6385e8c2ebc3872e82c9ff5946228de44cd3be77a750ea53698b7dbfe94b0a22"
+    }
+  ]
+}

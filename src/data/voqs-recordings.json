@@ -1,0 +1,588 @@
+[
+  {
+    "symbol": "V͈",
+    "label": "挤喉发声/紧声",
+    "group": "closure",
+    "group_label": "声门压紧、周期振动与漏气",
+    "legacy": "pressed",
+    "takes": [
+      {
+        "id": "supplement-vq_08_pressed_a",
+        "file": "vq_08_pressed_a.wav",
+        "frame": 44,
+        "t_s": 0.88,
+        "tagged": true,
+        "candidate_frames": 38,
+        "glottis": {
+          "f0_hz": 104.4281,
+          "pr_pa": 1421.7772,
+          "xb_cm": 0.0254,
+          "xt_cm": 0.0317,
+          "ca_cm2": 0.0078,
+          "lag_rad": 1.4341,
+          "ra": 0.8639,
+          "ps": 0.4994,
+          "fl": 18.6535,
+          "shim": 6.1888
+        }
+      },
+      {
+        "id": "main-T256",
+        "file": "vq_08_pressed_a.wav",
+        "frame": 28,
+        "t_s": 0.56,
+        "tagged": false,
+        "candidate_frames": 48,
+        "glottis": {
+          "f0_hz": 103.4799,
+          "pr_pa": 1427.2308,
+          "xb_cm": 0.0256,
+          "xt_cm": 0.0288,
+          "ca_cm2": 0.0086,
+          "lag_rad": 1.5511,
+          "ra": 0.872,
+          "ps": 0.5104,
+          "fl": 18.9322,
+          "shim": 6.6294
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "V",
+    "label": "常态浊声",
+    "group": "closure",
+    "group_label": "声门压紧、周期振动与漏气",
+    "legacy": "modal",
+    "takes": [
+      {
+        "id": "supplement-S017",
+        "file": "S017_voqs_modal_voice.wav",
+        "frame": 55,
+        "t_s": 1.1,
+        "tagged": true,
+        "candidate_frames": 38,
+        "glottis": {
+          "f0_hz": 127.1296,
+          "pr_pa": 1218.2736,
+          "xb_cm": 0.0584,
+          "xt_cm": 0.0797,
+          "ca_cm2": -0.0601,
+          "lag_rad": 1.7927,
+          "ra": 0.7235,
+          "ps": 0.0517,
+          "fl": 42.4367,
+          "shim": 37.5086
+        }
+      },
+      {
+        "id": "main-T249",
+        "file": "vq_01_modal_a.wav",
+        "frame": 53,
+        "t_s": 1.06,
+        "tagged": false,
+        "candidate_frames": 64,
+        "glottis": {
+          "f0_hz": 124.4822,
+          "pr_pa": 1325.8644,
+          "xb_cm": 0.0349,
+          "xt_cm": 0.0392,
+          "ca_cm2": 0.0126,
+          "lag_rad": 1.3668,
+          "ra": 0.8682,
+          "ps": 0.4711,
+          "fl": 19.3143,
+          "shim": 6.437
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "V̤",
+    "label": "气声",
+    "group": "closure",
+    "group_label": "声门压紧、周期振动与漏气",
+    "legacy": "breathy",
+    "takes": [
+      {
+        "id": "supplement-S023",
+        "file": "S023_voqs_breathy_voice.wav",
+        "frame": 36,
+        "t_s": 0.72,
+        "tagged": true,
+        "candidate_frames": 34,
+        "glottis": {
+          "f0_hz": 126.757,
+          "pr_pa": 1424.6968,
+          "xb_cm": 0.0827,
+          "xt_cm": 0.0739,
+          "ca_cm2": -0.065,
+          "lag_rad": 1.7141,
+          "ra": 0.4331,
+          "ps": -0.2338,
+          "fl": 53.3564,
+          "shim": 55.8509
+        }
+      },
+      {
+        "id": "main-T250",
+        "file": "vq_02_breathy_a.wav",
+        "frame": 64,
+        "t_s": 1.28,
+        "tagged": false,
+        "candidate_frames": 45,
+        "glottis": {
+          "f0_hz": 125.8001,
+          "pr_pa": 1512.2366,
+          "xb_cm": 0.072,
+          "xt_cm": 0.0251,
+          "ca_cm2": 0.0194,
+          "lag_rad": 1.6302,
+          "ra": 0.3031,
+          "ps": -0.038,
+          "fl": 46.1336,
+          "shim": 38.4599
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "Ṿ",
+    "label": "耳语声",
+    "group": "closure",
+    "group_label": "声门压紧、周期振动与漏气",
+    "legacy": "breathy",
+    "takes": [
+      {
+        "id": "supplement-S021",
+        "file": "S021_voqs_whispery_voice.wav",
+        "frame": 49,
+        "t_s": 0.98,
+        "tagged": true,
+        "candidate_frames": 42,
+        "glottis": {
+          "f0_hz": 112.0046,
+          "pr_pa": 1470.2117,
+          "xb_cm": 0.0705,
+          "xt_cm": 0.0789,
+          "ca_cm2": -0.0401,
+          "lag_rad": 2.113,
+          "ra": 0.2842,
+          "ps": -0.0193,
+          "fl": 62.3968,
+          "shim": 67.8654
+        }
+      },
+      {
+        "id": "main-T251",
+        "file": "vq_03_whispery_voice_a.wav",
+        "frame": 50,
+        "t_s": 1.0,
+        "tagged": false,
+        "candidate_frames": 78,
+        "glottis": {
+          "f0_hz": 124.8884,
+          "pr_pa": 1540.1824,
+          "xb_cm": 0.0414,
+          "xt_cm": 0.0264,
+          "ca_cm2": 0.0823,
+          "lag_rad": 1.097,
+          "ra": 0.2169,
+          "ps": 0.1428,
+          "fl": 41.2334,
+          "shim": 24.9969
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "W",
+    "label": "耳语",
+    "group": "closure",
+    "group_label": "声门压紧、周期振动与漏气",
+    "legacy": "whisper",
+    "takes": [
+      {
+        "id": "supplement-S019",
+        "file": "S019_voqs_whisper.wav",
+        "frame": 28,
+        "t_s": 0.56,
+        "tagged": true,
+        "candidate_frames": 38,
+        "glottis": {
+          "f0_hz": 120.0,
+          "pr_pa": 1260.8917,
+          "xb_cm": 0.0889,
+          "xt_cm": 0.0507,
+          "ca_cm2": 0.0643,
+          "lag_rad": 1.858,
+          "ra": -0.0177,
+          "ps": 0.0749,
+          "fl": 47.8403,
+          "shim": 28.2021
+        }
+      },
+      {
+        "id": "main-T252",
+        "file": "vq_04_whisper_a.wav",
+        "frame": 27,
+        "t_s": 0.54,
+        "tagged": false,
+        "candidate_frames": 72,
+        "glottis": {
+          "f0_hz": 120.0,
+          "pr_pa": 1457.0958,
+          "xb_cm": 0.0811,
+          "xt_cm": 0.0467,
+          "ca_cm2": 0.0524,
+          "lag_rad": 1.8562,
+          "ra": -0.0204,
+          "ps": -0.0328,
+          "fl": 53.8141,
+          "shim": 41.9559
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "V̰",
+    "label": "嘎裂声",
+    "group": "irregular",
+    "group_label": "不规则振动与嘎裂",
+    "legacy": "creaky",
+    "takes": [
+      {
+        "id": "supplement-S022",
+        "file": "S022_voqs_creaky_voice.wav",
+        "frame": 115,
+        "t_s": 2.3,
+        "tagged": true,
+        "candidate_frames": 115,
+        "glottis": {
+          "f0_hz": 67.9328,
+          "pr_pa": 1268.1383,
+          "xb_cm": 0.0523,
+          "xt_cm": 0.092,
+          "ca_cm2": -0.0793,
+          "lag_rad": 1.867,
+          "ra": 0.5488,
+          "ps": -0.0658,
+          "fl": 59.0337,
+          "shim": 67.2528
+        }
+      },
+      {
+        "id": "main-T257",
+        "file": "vq_09_creaky_a.wav",
+        "frame": 78,
+        "t_s": 1.56,
+        "tagged": false,
+        "candidate_frames": 101,
+        "glottis": {
+          "f0_hz": 62.4904,
+          "pr_pa": 1264.1853,
+          "xb_cm": 0.0249,
+          "xt_cm": 0.0497,
+          "ca_cm2": -0.0172,
+          "lag_rad": 1.9169,
+          "ra": 0.6566,
+          "ps": 0.3448,
+          "fl": 60.4137,
+          "shim": 65.5627
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "C",
+    "label": "嘎裂",
+    "group": "irregular",
+    "group_label": "不规则振动与嘎裂",
+    "legacy": "creaky",
+    "takes": [
+      {
+        "id": "supplement-S020",
+        "file": "S020_voqs_creak.wav",
+        "frame": 193,
+        "t_s": 3.86,
+        "tagged": true,
+        "candidate_frames": 267,
+        "glottis": {
+          "f0_hz": 56.609,
+          "pr_pa": 1165.7791,
+          "xb_cm": 0.0378,
+          "xt_cm": 0.0955,
+          "ca_cm2": -0.0544,
+          "lag_rad": 2.1158,
+          "ra": 0.3948,
+          "ps": -0.0611,
+          "fl": 59.1737,
+          "shim": 72.7547
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "V̰̣",
+    "label": "耳语嘎裂声",
+    "group": "irregular",
+    "group_label": "不规则振动与嘎裂",
+    "legacy": "creaky",
+    "takes": [
+      {
+        "id": "supplement-S031",
+        "file": "S031_voqs_whispery_creaky_voice.wav",
+        "frame": 106,
+        "t_s": 2.12,
+        "tagged": true,
+        "candidate_frames": 100,
+        "glottis": {
+          "f0_hz": 62.3968,
+          "pr_pa": 1337.5472,
+          "xb_cm": 0.0698,
+          "xt_cm": 0.0661,
+          "ca_cm2": -0.0469,
+          "lag_rad": 2.0224,
+          "ra": 0.4606,
+          "ps": 0.0898,
+          "fl": 62.1116,
+          "shim": 70.7658
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "F",
+    "label": "假声",
+    "group": "falsetto",
+    "group_label": "假声及其复合发声",
+    "legacy": "falsetto",
+    "takes": [
+      {
+        "id": "supplement-S018",
+        "file": "S018_voqs_falsetto.wav",
+        "frame": 72,
+        "t_s": 1.44,
+        "tagged": true,
+        "candidate_frames": 55,
+        "glottis": {
+          "f0_hz": 493.4,
+          "pr_pa": 722.6786,
+          "xb_cm": 0.0153,
+          "xt_cm": 0.0393,
+          "ca_cm2": 0.0343,
+          "lag_rad": 0.4258,
+          "ra": 0.1835,
+          "ps": -0.0591,
+          "fl": 20.5429,
+          "shim": 10.4672
+        }
+      },
+      {
+        "id": "main-T253",
+        "file": "vq_05_falsetto_a.wav",
+        "frame": 56,
+        "t_s": 1.12,
+        "tagged": false,
+        "candidate_frames": 108,
+        "glottis": {
+          "f0_hz": 488.3414,
+          "pr_pa": 1000.3768,
+          "xb_cm": 0.0089,
+          "xt_cm": 0.0335,
+          "ca_cm2": 0.0366,
+          "lag_rad": 0.8544,
+          "ra": 0.1255,
+          "ps": 0.0471,
+          "fl": 26.9506,
+          "shim": 16.4205
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "F̣",
+    "label": "耳语假声",
+    "group": "falsetto",
+    "group_label": "假声及其复合发声",
+    "legacy": "falsetto",
+    "takes": [
+      {
+        "id": "supplement-S025",
+        "file": "S025_voqs_whispery_falsetto.wav",
+        "frame": 59,
+        "t_s": 1.18,
+        "tagged": true,
+        "candidate_frames": 61,
+        "glottis": {
+          "f0_hz": 326.6113,
+          "pr_pa": 1034.5453,
+          "xb_cm": 0.0179,
+          "xt_cm": 0.0332,
+          "ca_cm2": 0.0267,
+          "lag_rad": 1.1195,
+          "ra": 0.1547,
+          "ps": 0.0749,
+          "fl": 32.3987,
+          "shim": 22.0034
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "F̰",
+    "label": "嘎裂假声",
+    "group": "falsetto",
+    "group_label": "假声及其复合发声",
+    "legacy": "falsetto",
+    "takes": [
+      {
+        "id": "supplement-S026",
+        "file": "S026_voqs_creaky_falsetto.wav",
+        "frame": 33,
+        "t_s": 0.66,
+        "tagged": true,
+        "candidate_frames": 39,
+        "glottis": {
+          "f0_hz": 103.6617,
+          "pr_pa": 1120.7649,
+          "xb_cm": 0.0496,
+          "xt_cm": 0.0616,
+          "ca_cm2": -0.0386,
+          "lag_rad": 2.0671,
+          "ra": 0.3155,
+          "ps": -0.4209,
+          "fl": 58.6905,
+          "shim": 68.4354
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "F̰̣",
+    "label": "耳语嘎裂假声",
+    "group": "falsetto",
+    "group_label": "假声及其复合发声",
+    "legacy": "falsetto",
+    "takes": [
+      {
+        "id": "supplement-S033",
+        "file": "S033_voqs_whispery_creaky_falsetto.wav",
+        "frame": 31,
+        "t_s": 0.62,
+        "tagged": true,
+        "candidate_frames": 76,
+        "glottis": {
+          "f0_hz": 272.8564,
+          "pr_pa": 1376.3488,
+          "xb_cm": 0.0279,
+          "xt_cm": 0.051,
+          "ca_cm2": -0.0112,
+          "lag_rad": 2.0618,
+          "ra": 0.1488,
+          "ps": -0.0376,
+          "fl": 61.7062,
+          "shim": 67.3945
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "L̝",
+    "label": "喉位偏高声",
+    "group": "height",
+    "group_label": "喉位录音参照",
+    "legacy": "modal",
+    "takes": [
+      {
+        "id": "supplement-vq_11_raised_larynx_a",
+        "file": "vq_11_raised_larynx_a.wav",
+        "frame": 52,
+        "t_s": 1.04,
+        "tagged": true,
+        "candidate_frames": 45,
+        "glottis": {
+          "f0_hz": 122.3843,
+          "pr_pa": 1251.2166,
+          "xb_cm": 0.0312,
+          "xt_cm": 0.0351,
+          "ca_cm2": 0.0144,
+          "lag_rad": 1.242,
+          "ra": 0.7794,
+          "ps": 0.5276,
+          "fl": 19.8248,
+          "shim": 7.2358
+        }
+      },
+      {
+        "id": "main-T259",
+        "file": "vq_11_raised_larynx_a.wav",
+        "frame": 45,
+        "t_s": 0.9,
+        "tagged": false,
+        "candidate_frames": 59,
+        "glottis": {
+          "f0_hz": 121.8575,
+          "pr_pa": 1252.8801,
+          "xb_cm": 0.031,
+          "xt_cm": 0.0343,
+          "ca_cm2": 0.0157,
+          "lag_rad": 1.2627,
+          "ra": 0.7781,
+          "ps": 0.5274,
+          "fl": 20.0599,
+          "shim": 7.357
+        }
+      }
+    ]
+  },
+  {
+    "symbol": "L̞",
+    "label": "喉位偏低声",
+    "group": "height",
+    "group_label": "喉位录音参照",
+    "legacy": "modal",
+    "takes": [
+      {
+        "id": "supplement-vq_12_lowered_larynx_a",
+        "file": "vq_12_lowered_larynx_a.wav",
+        "frame": 54,
+        "t_s": 1.08,
+        "tagged": true,
+        "candidate_frames": 43,
+        "glottis": {
+          "f0_hz": 123.8217,
+          "pr_pa": 1245.3723,
+          "xb_cm": 0.0541,
+          "xt_cm": 0.0597,
+          "ca_cm2": -0.0531,
+          "lag_rad": 1.475,
+          "ra": 0.5846,
+          "ps": 0.0343,
+          "fl": 40.113,
+          "shim": 35.1372
+        }
+      },
+      {
+        "id": "main-T260",
+        "file": "vq_12_lowered_larynx_a.wav",
+        "frame": 30,
+        "t_s": 0.6,
+        "tagged": false,
+        "candidate_frames": 57,
+        "glottis": {
+          "f0_hz": 123.3659,
+          "pr_pa": 1273.526,
+          "xb_cm": 0.0519,
+          "xt_cm": 0.0557,
+          "ca_cm2": -0.0531,
+          "lag_rad": 1.4822,
+          "ra": 0.5795,
+          "ps": 0.047,
+          "fl": 40.6599,
+          "shim": 35.3425
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,45 @@
+{
+  "name": "vocalcut-studio",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite",
+    "dev:hackathon": "vite --mode hackathon",
+    "dev:friends": "vite --mode friends",
+    "build": "vite build && node scripts/check-edition.mjs public",
+    "build:hackathon": "vite build --mode hackathon && node scripts/check-edition.mjs hackathon",
+    "build:friends": "vite build --mode friends && node scripts/check-edition.mjs friends",
+    "preview:hackathon": "vite preview --mode hackathon",
+    "preview:friends": "vite preview --mode friends",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "server": "node server/index.mjs",
+    "server:hackathon": "node server/hackathon.mjs",
+    "server:friends": "node server/friends.mjs",
+    "engine": "node scripts/start-engine.mjs",
+    "setup:asr": "node scripts/start-engine.mjs --setup-asr",
+    "portable:public": "py -3.11 -B -X utf8 scripts/portable/build.py --edition public",
+    "portable:friends": "py -3.11 -B -X utf8 scripts/portable/build.py --edition friends"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "echarts": "^6.1.0",
+    "fflate": "0.8.2",
+    "katex": "0.19.1",
+    "midi-file": "1.2.4",
+    "three": "^0.172.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/three": "^0.172.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5",
+    "vue-tsc": "^2.2.2"
+  }
+}

@@ -1,0 +1,502 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "registry_version": "1.0.0",
+  "units": {
+    "sample_rate_hz": 48000,
+    "time": "48 kHz integer samples (_smp), half-open [start_smp, end_smp)",
+    "f0": "Hz (allowed 60..600 Hz) or semitones relative to f0_ref_hz (_st)",
+    "pressure": "Pa (allowed 0..1600 Pa; converted to dPa = Pa * 10 only inside engine/)"
+  },
+  "permissions": {
+    "R": "Read-only query or measurement; safe to run autonomously.",
+    "E": "Edit command routed through CommandBus into a reviewable proposal transaction with single-step undo.",
+    "X": "External side-effect (media/stimuli/card export or destructive asset removal); requires explicit user confirmation."
+  },
+  "diagnosis_table": {
+    "muffled_stop": {
+      "symptom": "塞音太闷、不脆",
+      "measure": ["oral_min_area_cm2", "closure_ms", "release_ms", "pressure_pa", "vot_ms"],
+      "actions": ["缩短 release_ms（下限 1 ms）", "除阻前抬高 pressure_pa（0..1600 Pa）", "送气音适当延长 aspiration_ms"]
+    },
+    "breathy_ending": {
+      "symptom": "尾音改成轻柔气声",
+      "measure": ["glottis_preset", "pressure_pa", "spectral_tilt"],
+      "actions": ["在 phonation_anchors 或 voice.set_glottis 末段向 breathy 预设混合", "缓降尾段 pressure_pa", "适度增加 flutter"]
+    },
+    "excess_nasality": {
+      "symptom": "鼻音太重",
+      "measure": ["VO", "nasal_port_area"],
+      "actions": ["通过 artic.set_pose 降低元音段 VO", "缩短鼻音协同发音提前量"]
+    },
+    "unclear_articulation": {
+      "symptom": "咬字不清",
+      "measure": ["oral_min_area_cm2", "consonant_dur_ms"],
+      "actions": ["调节主构音器官狭窄度至临界区", "通过 sing.set_lead 延长前导量"]
+    },
+    "off_beat": {
+      "symptom": "没踩在拍上",
+      "measure": ["nucleus_onset_smp", "beat_smp", "lead_ms"],
+      "actions": ["通过 sing.set_lead 调整 lead_ms / bias_ms", "检查是否触发相邻韵核预算压缩"]
+    },
+    "flat_or_slow_pitch": {
+      "symptom": "跑调、滑音太慢",
+      "measure": ["f0_hz", "target_b_end_st", "lambda"],
+      "actions": ["提高靶点逼近速率 lambda", "检查是否受相邻音高约束或越界"]
+    },
+    "robotic_voice": {
+      "symptom": "太机械",
+      "measure": ["flutter", "pressure_pa", "vibrato"],
+      "actions": ["通过 voice.set_perturbation 适度提高 flutter/shimmer", "绘制乐句气压起伏", "长音开启颤音"]
+    },
+    "pressed_or_weak": {
+      "symptom": "声音太紧或太虚",
+      "measure": ["phonation_state", "pressure_pa", "XB", "CA"],
+      "actions": ["在 pressed / modal / breathy 间直连插值调整", "微调声门下压包络"]
+    }
+  },
+  "tools": [
+    {
+      "name": "project.summary",
+      "permission": "R",
+      "mvp": true,
+      "description": "获取工程概览：采样率、fps、速度、声部、轨道、片段与总时长（_smp）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "timeline.query",
+      "permission": "R",
+      "mvp": true,
+      "description": "查询指定半开采样区间 [start_smp, end_smp) 内的音节、音段、靶点、发声态锚点与覆盖项。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "range": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "tracks": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "name": "selection.get",
+      "permission": "R",
+      "mvp": true,
+      "description": "获取用户当前选中的音节/音段 ID、选区区间与播放头采样位置。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "rules.get",
+      "permission": "R",
+      "mvp": true,
+      "description": "按主题按需获取权威规则说明与合法范围（避免上下文膨胀）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic"],
+        "properties": {
+          "topic": {
+            "type": "string",
+            "enum": ["ranges", "ipa", "glottis", "qta", "numbered_score", "diagnosis", "units"]
+          }
+        }
+      }
+    },
+    {
+      "name": "analysis.measure",
+      "permission": "R",
+      "mvp": true,
+      "description": "测量指定区间内的输出基频 F0、强度、共振峰 F1/F2/F3、最小截面积与爆破标志点。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["range"],
+        "properties": {
+          "range": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "metrics": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["f0_hz", "pressure_pa", "formants_hz", "oral_min_area_cm2", "stop_timing", "spectral_tilt"] }
+          }
+        }
+      }
+    },
+    {
+      "name": "analysis.lint",
+      "permission": "R",
+      "mvp": true,
+      "description": "检查构型意外闭塞、闭塞丢失、踩拍偏差与参数越界风险。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "range": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "text.to_ipa",
+      "permission": "R",
+      "mvp": false,
+      "description": "把中英日与方括号 IPA 混排文本转为 IPA 候选与缺失构型提示。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "text": { "type": "string", "minLength": 1 },
+          "lang": { "type": "string", "enum": ["auto", "cmn", "en", "ja", "yue"] },
+          "standard": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "score.validate",
+      "permission": "R",
+      "mvp": true,
+      "description": "校验结构化乐谱：小节拍数合计、歌词音节与音符数量、60-600 Hz 音域与休止合法性。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["score"],
+        "properties": {
+          "score": { "type": "object" }
+        }
+      }
+    },
+    {
+      "name": "score.apply",
+      "permission": "E",
+      "mvp": true,
+      "description": "将已校验乐谱与歌词编译为片段：音节计划、韵核踩拍抢拍调度、TextGrid 与 qTA 靶点。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["score", "voice"],
+        "properties": {
+          "score": { "type": "object" },
+          "voice": { "type": "string" },
+          "lead_policy": { "type": "string", "enum": ["nucleus_on_beat", "consonant_on_beat"] },
+          "at_smp": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    {
+      "name": "lyrics.set_reading",
+      "permission": "E",
+      "mvp": false,
+      "description": "修改指定音节的 IPA 读音、重音或调符。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["syllable", "ipa"],
+        "properties": {
+          "syllable": { "type": "string" },
+          "ipa": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        }
+      }
+    },
+    {
+      "name": "clip.edit",
+      "permission": "E",
+      "mvp": false,
+      "description": "对片段执行插入、移动、分割、修剪、删除或切换活跃版本。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "clip"],
+        "properties": {
+          "action": { "type": "string", "enum": ["move", "split", "trim", "delete", "ripple_delete", "set_variant"] },
+          "clip": { "type": "string" },
+          "at_smp": { "type": "integer", "minimum": 0 },
+          "variant": { "type": "string", "enum": ["synth", "inversion", "original", "neural"] }
+        }
+      }
+    },
+    {
+      "name": "textgrid.set_boundary",
+      "permission": "E",
+      "mvp": false,
+      "description": "移动 TextGrid 锚点边界并触发联动重定时（遵守塞音刚性下限）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["boundary_id", "to_smp"],
+        "properties": {
+          "boundary_id": { "type": "string" },
+          "to_smp": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    {
+      "name": "sing.set_lead",
+      "permission": "E",
+      "mvp": true,
+      "description": "调整指定音节字头的前导量 lead_ms 与踩拍偏置 bias_ms。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["syllable"],
+        "properties": {
+          "syllable": { "type": "string" },
+          "lead_ms": { "type": "number", "minimum": 0, "maximum": 500 },
+          "bias_ms": { "type": "number", "minimum": -200, "maximum": 200 }
+        }
+      }
+    },
+    {
+      "name": "artic.set_pose",
+      "permission": "E",
+      "mvp": true,
+      "description": "对指定音节音段的声道参数施加增量 delta，可限定器官分组 scope。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["syllable", "seg", "delta"],
+        "properties": {
+          "syllable": { "type": "string" },
+          "seg": { "type": "integer", "minimum": 0 },
+          "delta": { "type": "object", "additionalProperties": { "type": "number" } },
+          "scope": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "name": "artic.set_stop_timing",
+      "permission": "E",
+      "mvp": true,
+      "description": "调整塞音闭塞、释放、送气与 VOT 时长（闭塞下限 10 ms、释放下限 1 ms）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["syllable", "seg"],
+        "properties": {
+          "syllable": { "type": "string" },
+          "seg": { "type": "integer", "minimum": 0 },
+          "closure_ms": { "type": "number", "minimum": 10, "maximum": 400 },
+          "release_ms": { "type": "number", "minimum": 1, "maximum": 120 },
+          "aspiration_ms": { "type": "number", "minimum": 0, "maximum": 250 }
+        }
+      }
+    },
+    {
+      "name": "f0.set_targets",
+      "permission": "E",
+      "mvp": true,
+      "description": "写入 qTA 靶点（m, b_end_st, lambda）与音高；越界 60-600 Hz 直接报错不夹紧。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["targets"],
+        "properties": {
+          "targets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["syllable", "span"],
+              "properties": {
+                "syllable": { "type": "string" },
+                "span": { "type": "string" },
+                "note_hz": { "type": "number", "minimum": 60, "maximum": 600 },
+                "m": { "type": "number", "minimum": -120, "maximum": 120 },
+                "b_end_st": { "type": "number", "minimum": -36, "maximum": 36 },
+                "lambda": { "type": "number", "minimum": 5, "maximum": 200 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "f0.draw",
+      "permission": "E",
+      "mvp": false,
+      "description": "写入手绘基频残差或绝对钉住片段。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["syllable", "points", "mode"],
+        "properties": {
+          "syllable": { "type": "string" },
+          "mode": { "type": "string", "enum": ["residual_st", "pin_hz"] },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["u", "value"],
+              "properties": {
+                "u": { "type": "number", "minimum": 0, "maximum": 1 },
+                "value": { "type": "number" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "voice.set_glottis",
+      "permission": "E",
+      "mvp": true,
+      "description": "在指定时间段向 6 档离散声门预设之一混合（pressed/modal/breathy/whisper/creaky/falsetto）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["span", "preset", "blend"],
+        "properties": {
+          "span": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "preset": { "type": "string", "enum": ["pressed", "modal", "breathy", "whisper", "creaky", "falsetto"] },
+          "blend": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    {
+      "name": "voice.set_pressure",
+      "permission": "E",
+      "mvp": true,
+      "description": "写入声门下压包络控制点（单位 Pa，合法范围 0..1600 Pa）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["span", "points"],
+        "properties": {
+          "span": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "points": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["u", "pressure_pa"],
+              "properties": {
+                "u": { "type": "number", "minimum": 0, "maximum": 1 },
+                "pressure_pa": { "type": "number", "minimum": 0, "maximum": 1600 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "phonation.set_anchors",
+      "permission": "E",
+      "mvp": true,
+      "description": "写入或更新 6 档离散发声态锚点轨（任意两点在 m27 10 维空间直接线性插值）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["clip_id", "anchors"],
+        "properties": {
+          "clip_id": { "type": "string" },
+          "anchors": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["time_smp", "state"],
+              "properties": {
+                "time_smp": { "type": "integer", "minimum": 0 },
+                "state": { "type": "string", "enum": ["pressed", "modal", "breathy", "whisper", "creaky", "falsetto"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "preview.render",
+      "permission": "R",
+      "mvp": true,
+      "description": "对指定采样区间执行物理引擎合成并返回测量摘要与试听句柄。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["range"],
+        "properties": {
+          "range": {
+            "type": "object",
+            "required": ["start_smp", "end_smp"],
+            "properties": {
+              "start_smp": { "type": "integer", "minimum": 0 },
+              "end_smp": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "card.export",
+      "permission": "X",
+      "mvp": true,
+      "description": "导出自定义像素尺寸的发音单音卡或双音对比卡（需用户确认）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target"],
+        "properties": {
+          "target": { "type": "string" },
+          "compare_with": { "type": "string" },
+          "width_px": { "type": "integer", "minimum": 320, "maximum": 3840 },
+          "height_px": { "type": "integer", "minimum": 240, "maximum": 2160 },
+          "slow_rate": { "type": "number", "minimum": 0.25, "maximum": 1.0 }
+        }
+      }
+    },
+    {
+      "name": "export.media",
+      "permission": "X",
+      "mvp": false,
+      "description": "导出音频、视频、TextGrid 或复现卡片（需用户确认）。",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["wav", "mp4", "webm", "textgrid", "vcproj"] }
+        }
+      }
+    }
+  ]
+}

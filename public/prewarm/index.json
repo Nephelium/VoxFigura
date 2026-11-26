@@ -1,0 +1,54 @@
+{
+  "schema": "vocalcut/prewarm-index",
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "suan_mandarin",
+      "title": "汉语「算」 [swan⁵¹]",
+      "speaker": "JD2",
+      "duration_s": 0.85,
+      "wav_url": "/prewarm/suan_mandarin.mp3",
+      "json_url": "/prewarm/suan_mandarin.json"
+    },
+    {
+      "case_id": "swan_english",
+      "title": "英语「swan」 [swɒn]",
+      "speaker": "JD2",
+      "duration_s": 0.85,
+      "wav_url": "/prewarm/swan_english.mp3",
+      "json_url": "/prewarm/swan_english.json"
+    },
+    {
+      "case_id": "overtone_khoomei",
+      "title": "呼麦双峰共振调谐",
+      "speaker": "JD2",
+      "duration_s": 1.6,
+      "wav_url": "/prewarm/overtone_khoomei.mp3",
+      "json_url": "/prewarm/overtone_khoomei.json"
+    },
+    {
+      "case_id": "creaky_vs_breathy",
+      "title": "嘎裂声 ↔ 常态 ↔ 气声",
+      "speaker": "JD2",
+      "duration_s": 1.5,
+      "wav_url": "/prewarm/creaky_vs_breathy.mp3",
+      "json_url": "/prewarm/creaky_vs_breathy.json"
+    },
+    {
+      "case_id": "cantonese_checked",
+      "title": "湾区粤语入声 [sɐt̚⁵]",
+      "speaker": "JD2",
+      "duration_s": 0.55,
+      "wav_url": "/prewarm/cantonese_checked.mp3",
+      "json_url": "/prewarm/cantonese_checked.json"
+    },
+    {
+      "case_id": "voqs_quality",
+      "title": "VoQS 音质符号对照",
+      "speaker": "JD2",
+      "duration_s": 1.5,
+      "wav_url": "/prewarm/voqs_quality.mp3",
+      "json_url": "/prewarm/voqs_quality.json"
+    }
+  ]
+}

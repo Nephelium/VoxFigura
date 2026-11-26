@@ -1,0 +1,100 @@
+{
+  "name": "kanshan-official-assets",
+  "version": "1.0.0",
+  "license_note": "知乎官方赛题提供刘看山动态 GIF 与三视图素材，仅限于知乎黑客松 S3 参赛项目互动伴读与舞台立绘展示，严禁商用或独立转授权。",
+  "source_root": "assets/kanshan/",
+  "gifs": [
+    {
+      "id": "idle",
+      "file": "idle.gif",
+      "url": "/assets/kanshan/idle.gif",
+      "original_file": "刘看山动态/待机_5秒_320x320_20fps_透明.gif",
+      "duration_s": 5,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "默认待机"
+    },
+    {
+      "id": "greet",
+      "file": "greet.gif",
+      "url": "/assets/kanshan/greet.gif",
+      "original_file": "刘看山动态/打招呼_4秒_320x320_20fps_透明.gif",
+      "duration_s": 4,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "迎宾与打招呼"
+    },
+    {
+      "id": "sway",
+      "file": "sway.gif",
+      "url": "/assets/kanshan/sway.gif",
+      "original_file": "刘看山动态/晃悠_320x320_3秒_20fps_透明.gif",
+      "duration_s": 3,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "节拍播放与试听陪伴"
+    },
+    {
+      "id": "computer",
+      "file": "computer.gif",
+      "url": "/assets/kanshan/computer.gif",
+      "original_file": "刘看山动态/电脑_6秒_320x320_20fps_透明.gif",
+      "duration_s": 6,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "直答检索与声道重建计算中"
+    },
+    {
+      "id": "sleepy",
+      "file": "sleepy.gif",
+      "url": "/assets/kanshan/sleepy.gif",
+      "original_file": "刘看山动态/瞌睡_5秒_320x320_20fps_透明.gif",
+      "duration_s": 5,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "长时间静默与降级提示"
+    },
+    {
+      "id": "dribble",
+      "file": "dribble.gif",
+      "url": "/assets/kanshan/dribble.gif",
+      "original_file": "刘看山动态/运球_4秒_320x320_20fps_透明.gif",
+      "duration_s": 4,
+      "width": 320,
+      "height": 320,
+      "fps": 20,
+      "transparent": true,
+      "role": "成功完成与导出庆祝"
+    }
+  ],
+  "sheets": [
+    {
+      "id": "sheet-1",
+      "file": "sheet-1.jpg",
+      "url": "/assets/kanshan/sheet-1.jpg",
+      "original_file": "看山三视图/33f11967cc145627560c3db70c7d3ab8.jpg"
+    },
+    {
+      "id": "sheet-2",
+      "file": "sheet-2.jpg",
+      "url": "/assets/kanshan/sheet-2.jpg",
+      "original_file": "看山三视图/c8d9642e1d6a402907200a8fed6c0fc3.jpg"
+    },
+    {
+      "id": "sheet-3",
+      "file": "sheet-3.jpg",
+      "url": "/assets/kanshan/sheet-3.jpg",
+      "original_file": "看山三视图/de232c5a0202dd7512ec1b7bddd150d8.jpg"
+    }
+  ]
+}

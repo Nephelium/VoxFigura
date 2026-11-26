@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>原音选听 · 声学元音图</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <h1>原音选听</h1>
+      <p>为每个音录制或导入几条候选。在声学元音图上点选试听，每组留一条。</p>
+    </header>
+    <div class="workspace">
+      <section class="paper chart" aria-labelledby="chart-title">
+        <header class="chart-header">
+          <h2 id="chart-title">声学元音图</h2>
+          <div class="legend">
+            <span><i class="dot reference"></i><span id="reference-count">原音参考</span></span>
+            <div id="group-legend"></div>
+            <div class="axis-choice" role="group" aria-label="坐标刻度">
+              <button type="button" data-axis="linear" aria-pressed="true">线性</button>
+              <button type="button" data-axis="logarithmic" aria-pressed="false">对数</button>
+            </div>
+            <button type="button" id="toggle-silence" aria-pressed="false" title="显示或隐藏所选原录音的低能量区间">显示静音</button>
+          </div>
+        </header>
+        <div class="graph">
+          <canvas id="plot" aria-label="F2 与 F1 声学元音图。也可从右侧列表选择候选录音。"></canvas>
+          <div id="point-detail" class="point-detail" hidden></div>
+        </div>
+        <div id="silence-row" hidden>
+          <span>原音静音</span>
+          <div id="silence-track" aria-hidden="true" hidden></div>
+          <span id="silence-status" role="status"></span>
+        </div>
+        <p class="plot-note" id="plot-note">Praat Burg · 测量区间中央 40% 的稳定有声帧中位数</p>
+      </section>
+      <aside id="groups" aria-label="候选录音">
+        <button type="button" id="add-group">添加一组</button>
+      </aside>
+      <section class="paper player" aria-labelledby="player-title">
+        <header>
+          <h2 id="player-title">试听</h2>
+          <p id="current-file">点选图上的候选点，或在列表里选一条录音。</p>
+        </header>
+        <div id="player-controls" hidden>
+          <audio id="audio" controls preload="metadata"></audio>
+          <div class="selection-actions">
+            <button type="button" id="keep">保留这条</button>
+          </div>
+          <details>
+            <summary>调整测量区间</summary>
+            <form id="range">
+              <label>起点（秒）<input id="range-start" type="number" min="0" step="any" required></label>
+              <label>终点（秒）<input id="range-end" type="number" min="0" step="any" required></label>
+              <button id="remeasure" type="submit">重新测量</button>
+            </form>
+            <p id="range-info" role="status"></p>
+          </details>
+        </div>
+      </section>
+    </div>
+    <p class="footnote">录音在本机分析。刷新或关闭页面前，请下载要留用的原音。</p>
+    <div class="undo-notice" id="undo-notice" hidden>
+      <p id="undo-message" role="status"></p>
+      <button type="button" id="undo-delete">撤销</button>
+    </div>
+    <template id="group-template">
+      <section class="paper candidates">
+        <header>
+          <h2><span class="dot"></span><span class="group-title"></span></h2>
+          <input class="target" type="text" maxlength="30" placeholder="目标音标（选填）">
+          <button type="button" class="delete-group">删除本组</button>
+        </header>
+        <div class="group-actions">
+          <button type="button" class="record">录音</button>
+          <label class="add">导入文件 <input class="files" type="file" multiple accept=".wav,.mp3,.flac,.ogg,.aif,.aiff"></label>
+        </div>
+        <p class="record-status" role="status" hidden></p>
+        <p class="empty">可多选 WAV、MP3、FLAC、OGG 或 AIFF。</p>
+        <ol class="takes"></ol>
+        <div class="kept" hidden>
+          <p class="kept-name"></p>
+          <a class="save">下载原音</a>
+        </div>
+      </section>
+    </template>
+  </main>
+</body>
+</html>

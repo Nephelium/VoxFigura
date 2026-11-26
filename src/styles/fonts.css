@@ -1,0 +1,68 @@
+/* Bundled IPA & Monospace Fonts — VoxFigura */
+
+@font-face {
+  font-family: "PTBIPAPlus";
+  src: url("/fonts/PTBIPAPlus-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "PTB-Doulos";
+  src: url("/fonts/DoulosSIL-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Doulos SIL";
+  src: url("/fonts/DoulosSIL-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-ui: "VC Noto Serif SC", "Noto Serif CJK SC", "SimSun", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Consolas", "Cascadia Code", monospace;
+  --font-ipa: "PTBIPAPlus", "PTB-Doulos", "Doulos SIL", "Charis SIL", serif;
+  --font-figure: var(--font-ui);
+}
+
+@font-face {
+  font-family: "VC Noto Sans SC";
+  src: url("/fonts/notosanssc.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "VC Noto Serif SC";
+  src: url("/fonts/notoserifsc.woff2") format("woff2");
+  font-weight: 200 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "VC Inter";
+  src: url("/fonts/inter.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "VC Lora";
+  src: url("/fonts/lora.woff2") format("woff2");
+  font-weight: 400 700;
+  font-display: swap;
+}

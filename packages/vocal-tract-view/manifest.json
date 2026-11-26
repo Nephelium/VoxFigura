@@ -1,0 +1,30 @@
+{
+  "name": "@vocalcut/vocal-tract-view",
+  "version": "1.0.0",
+  "license": "GPL-3.0-or-later",
+  "upstream": "D:/PhoneticToolbox/PhoneticToolbox_v3/frontend/public/vocal-tract",
+  "entry": "./embed.mjs",
+  "styles": "./embed.css",
+  "importmap": {
+    "imports": {
+      "three": "./vendor/three.module.js"
+    }
+  },
+  "speakers": ["JD2", "JD2-2D", "W02", "W02-2D"],
+  "exports": {
+    "mountVocalTract": "./embed.mjs#mountVocalTract",
+    "poseOf": "./embed.mjs#poseOf",
+    "snapshot": "./embed.mjs#snapshot"
+  },
+  "dependencies": {
+    "three": "bundled under ./vendor/three.module.js and ./vendor/OrbitControls.js"
+  },
+  "assets": {
+    "head": "./assets/head.json",
+    "nasal": "./assets/nasal.json",
+    "nasalSection": "./assets/nasal-section.mjs",
+    "defaultPresets": "./default-presets.json",
+    "presentationMetadata": "./presentation-metadata.json",
+    "locales": ["en", "ja", "zh-CN"]
+  }
+}

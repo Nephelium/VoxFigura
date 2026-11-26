@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VocalTract View · 独立声道视图演示</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+  <style>
+    :root {
+      --panel: #f7f8fa;
+      --ink: #1e293b;
+      --green: #0f766e;
+      --muted: #64748b;
+      --line: #cbd5e1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #eef2f6;
+      color: var(--ink);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      background: #ffffff;
+      border-bottom: 1px solid var(--line);
+    }
+    .controls { display: flex; gap: 8px; align-items: center; }
+    button, select {
+      padding: 6px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    main { flex: 1; position: relative; padding: 12px; }
+    #stage {
+      width: 100%;
+      height: 100%;
+      min-height: 360px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    #status { font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <strong>VocalTract View 独立镜像演示</strong>
+      <span id="status">正在加载 metadata...</span>
+    </div>
+    <div class="controls">
+      <label>
+        视图：
+        <select id="viewMode">
+          <option value="sagittal">2D 矢状剖面</option>
+          <option value="model">3D 声道模型</option>
+        </select>
+      </label>
+      <button id="resetBtn" type="button">重置视角</button>
+    </div>
+  </header>
+  <main>
+    <div id="stage"></div>
+  </main>
+  <script type="module">
+    import { mountVocalTract } from './embed.mjs';
+
+    const statusEl = document.getElementById('status');
+    const stageEl = document.getElementById('stage');
+    const viewSel = document.getElementById('viewMode');
+    const resetBtn = document.getElementById('resetBtn');
+
+    try {
+      const [metadata, presets] = await Promise.all([
+        fetch('./presentation-metadata.json').then((r) => r.json()),
+        fetch('./default-presets.json').then((r) => r.json()),
+      ]);
+      const samplePose = presets.presets?.a || Object.values(presets.presets || {})[0];
+      let initialState = null;
+
+      // 尝试连接本地 VTL 引擎；无后端时以默认参数构建只读占位态说明
+      try {
+        const res = await fetch('/api/vtl/pose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speaker: 'JD2', ...samplePose }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          initialState = data.state || data;
+          statusEl.textContent = '已连接 /api/vtl/pose 实时几何引擎';
+        }
+      } catch {
+        // Ignore offline fallback
+      }
+
+      const view = await mountVocalTract(stageEl, {
+        metadata,
+        state: initialState,
+        view: 'sagittal',
+        locale: 'zh-CN',
+        pose: initialState
+          ? async (nextPose) => {
+              const r = await fetch('/api/vtl/pose', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ speaker: 'JD2', ...nextPose }),
+              });
+              const d = await r.json();
+              return d.state || d;
+            }
+          : null,
+      });
+
+      if (!initialState) {
+        statusEl.textContent = '静态预览已就绪（传入引擎 state 后可实时渲染与拖拽）';
+      }
+
+      viewSel.addEventListener('change', () => view.setView(viewSel.value));
+      resetBtn.addEventListener('click', () => view.resetView());
+    } catch (err) {
+      statusEl.textContent = '加载失败：' + (err?.message || String(err));
+    }
+  </script>
+</body>
+</html>
