@@ -112,8 +112,12 @@ const emit = defineEmits<{
   'update:keyLabelMode': [mode: PianoKeyLabelMode];
 }>();
 
-const KEY_W = 76;
-const rulerH = computed(() => 24 + (props.lyricTimes?.length ? 18 : 0) + (props.phones?.length ? rowH.value : 0));
+const KEY_W = 104;
+const cornerTools=ref<HTMLElement>();
+const cornerHeight=ref(48);
+const tierHeight=computed(()=>(props.lyricTimes?.length ? 18 : 0) + (props.phones?.length ? rowH.value : 0));
+const rulerH=computed(()=>Math.max(cornerHeight.value,26+tierHeight.value));
+const barHeight=computed(()=>rulerH.value-tierHeight.value);
 const black = new Set([1, 3, 6, 8, 10]);
 const pitchNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const noteName = (midi: number) => pitchNames[midi % 12] + (Math.floor(midi / 12) - 1);
@@ -529,8 +533,14 @@ function centerPitch(midi?: number) {
 onMounted(() => {
   const target = scroller.value;
   if (!target) return;
-  observer = new ResizeObserver(() => { width.value = target.clientWidth; });
+  const measure=()=>{
+    width.value=target.clientWidth;
+    if(cornerTools.value) cornerHeight.value=cornerTools.value.offsetHeight+2;
+  };
+  measure();
+  observer = new ResizeObserver(measure);
   observer.observe(target);
+  if(cornerTools.value) observer.observe(cornerTools.value);
   centerPitch();
 });
 onBeforeUnmount(() => observer?.disconnect());
@@ -705,6 +715,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
         '--key-width': KEY_W + 'px',
         '--key-height': rowH + 'px',
         '--ruler-height': rulerH + 'px',
+        '--bar-height': barHeight + 'px',
         '--beat-width': pxPerBeat + 'px',
         '--measure-width': measureWidth + 'px',
         '--first-beat': leadPixels + 'px',
@@ -712,8 +723,9 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
       }"
     >
       <div class="piano-corner">
+        <div ref="cornerTools" class="corner-tools">
         <div class="corner-caption">琴键 · 小节</div>
-        <div class="key-mode-pills" role="group" aria-label="琴键刻度切换">
+        <div class="key-mode-pills seg control-seg xs" role="group" aria-label="琴键刻度切换">
           <button
             v-for="mode in keyModes"
             :key="mode.id"
@@ -726,6 +738,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           >
             {{ mode.short }}
           </button>
+        </div>
         </div>
       </div>
       <div class="piano-ruler" :aria-label="`时间标尺，每小节 ${beatsPerMeasure} 拍`" title="点击跳播，横向拖动选段"
@@ -892,66 +905,39 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .piano-corner {
   left: 0;
   z-index: 6;
-  display: flex;
-  flex-direction: column;
+  display: grid;
   align-items: center;
-  justify-content: center;
-  gap: 2px;
-  padding: 2px 3px;
   border: 1px solid var(--border);
+}
+.corner-tools {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  padding: 4px;
 }
 .corner-caption {
-  font-size: 0.791667rem;
-  line-height: 1.1;
   color: var(--muted);
-  letter-spacing: 0.01em;
+  font-size: var(--fs-micro);
+  line-height: 1.2;
   white-space: nowrap;
 }
-.key-mode-pills {
-  display: inline-flex;
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--app) 68%, var(--panel));
-}
-.key-mode-pill {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 16px;
-  padding: 0 1px;
-  border: 0;
-  border-right: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.766667rem;
-  line-height: 1;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.key-mode-pill:last-child {
-  border-right: 0;
-}
-.key-mode-pill:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--selected) 65%, transparent);
-}
-.key-mode-pill.active {
-  background: var(--accent);
-  color: var(--on-accent, #ffffff);
-  font-weight: 600;
-}
+.key-mode-pills { width: 100%; }
+.key-mode-pills .key-mode-pill { flex: 1 1 0; min-width: 0; padding-inline: 1px; }
 .piano-ruler {
   z-index: 4;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  border-block: 1px solid var(--border);
 }
-.piano-ruler span {
+.piano-ruler > span {
   position: absolute;
   z-index: 2;
-  top: 11px;
+  top: 0;
+  height: calc(var(--bar-height) - 2px);
+  display: flex;
+  align-items: center;
   margin-left: 7px;
-  font: 11.5px var(--font-mono, monospace);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--control-font-size-sm);
+  line-height: 1;
 }
 .piano-ruler { cursor: crosshair; touch-action: none; user-select: none; }
 .expressive-grid .piano-ruler::before,
@@ -976,7 +962,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .lyric-selection-tool {cursor:crosshair;}
 .lyric-selection-tool .roll-note {pointer-events:none;}
 .lyric-box {position:absolute;z-index:8;pointer-events:none;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 22%,transparent);}
-.sung-tier {position:absolute;left:0;right:0;top:24px;height:18px;overflow:hidden;}
+.sung-tier {position:absolute;left:0;right:0;top:var(--bar-height);height:18px;overflow:hidden;}
 .phone-tier {
   position: absolute;
   inset: auto 0 0;

@@ -590,7 +590,7 @@ const active = computed(() => parts.value.find(part => part.id === activeId.valu
 const lyricsOpen=ref(false);
 const allTracks=ref(true);
 const rangeLyrics=ref(false);
-const trackColors=['#549de3','#eb995c','#65bd92','#b393de','#d37f9f','#54b6bc'];
+const trackColors=['var(--accent)','var(--warning)','var(--teal)','var(--danger)','var(--success)','color-mix(in srgb,var(--accent),var(--danger))'];
 function trackColor(index:number) {return trackColors[index % trackColors.length];}
 const dampingRate = computed(() => active.value.dampingRate ?? PORTAMENTO_RATE.initial);
 const scoreInput = computed({
@@ -1063,9 +1063,19 @@ const lyricPencil = ref(false);
 const verticalPencil = ref(false);
 
 const referencePart = computed(()=>parts.value.find(p=>p.id===referencePartId.value && p!==active.value));
-const referenceTimeline = computed(()=>referencePart.value ? timingForPart(referencePart.value) : undefined);
+const trackTimelines=computed(()=>new Map(parts.value.map(part=>[part.id,part===active.value ? timing.value : timingForPart(part)])));
+const referenceTimeline=computed(()=>trackTimelines.value.get(referencePartId.value));
+const trackRows=computed(()=>parts.value.map((part,index)=>{
+  const timeline=trackTimelines.value.get(part.id)!;
+  const source=part.midiSource;
+  const label=part.midiTrackName || part.name;
+  const type=source ? '通道 '+source.channel+' · 音色 '+((part.midiProgram ?? source.program)+1)
+    : part.rows.length ? '人声 · '+part.rows.length+' 音节' : part.events ? '器乐' : '人声';
+  const duration=timeline.notes.length ? (Math.max(0,timeline.endSmp-leadingSmp)/SAMPLE_RATE_HZ).toFixed(2)+' 秒' : '';
+  return {part,label,type,count:timeline.notes.length,duration,color:trackColor(index)};
+}));
 const ghostNotes = computed(()=>allTracks.value ? parts.value.flatMap((part,index)=>
-  part===active.value ? [] : timingForPart(part).notes.map(n=>({...n,overlayTrack:part.id,overlayColor:trackColor(index)})))
+  part===active.value ? [] : trackTimelines.value.get(part.id)!.notes.map(n=>({...n,overlayTrack:part.id,overlayColor:trackColor(index)})))
   : referenceTimeline.value?.notes ?? []);
 const visibleEndSmp=computed(()=>ghostNotes.value.reduce((end,n)=>Math.max(end,n.endSmp),timing.value.endSmp));
 const referenceBeats = computed(()=>referencePart.value?.beatMap ?? referenceTimeline.value?.gridBeats?.slice(0,-1).map((sample,i)=>({
@@ -1174,11 +1184,13 @@ async function importMidi(input: HTMLInputElement) {
   input.value = '';
   if (!file) return;
   const request=++scoreImportRequest;
+  const draftKey=currentDraftKey.value;
+  const current=()=>alive && request===scoreImportRequest && draftKey===currentDraftKey.value;
   pendingMidi.value=undefined;
   try {
     if (/\.(vsqx|svp)$/i.test(file.name)) {
       const result=await readSingingProject(file,standard.value,voice.value?.speaker ?? 'JD2',leadingSmp);
-      if(!alive || request!==scoreImportRequest) return;
+      if(!current()) return;
       editArranger('导入歌声工程',()=>{
         if(parts.value.every(isEmptyPart) && result.bpm>=40 && result.bpm<=240) bpm.value=result.bpm;
         const imported=result.parts.map(p=>({...newEventPart(p.name),...p,scoreSource:file.name}));
@@ -1191,10 +1203,10 @@ async function importMidi(input: HTMLInputElement) {
       return;
     }
     const result = readMidiParts(new Uint8Array(await file.arrayBuffer()));
-    if(!alive || request!==scoreImportRequest) return;
+    if(!current()) return;
     pendingMidi.value=result;
     importIndexes.value=result.parts.map((_,i)=>i);
-  } catch (error) {store.pushToast(error instanceof Error ? error.message : '乐谱导入失败','warning');}
+  } catch (error) {if(current()) store.pushToast(error instanceof Error ? error.message : '乐谱导入失败','warning');}
 }
 function confirmMidi() {
   const result=pendingMidi.value;
@@ -2687,27 +2699,8 @@ onBeforeUnmount(() => {
             <span>删除当前声部</span>
           </button>
         </div>
-        <div class="part-strip" aria-label="声部">
-          <button
-            v-for="(part,i) in parts"
-            :key="part.id"
-            type="button"
-            class="btn sm part-tab"
-            :class="{
-              primary: part === active,
-              'part-reconstruct': part.reconstructedRef && part.useReconstructedPose !== false,
-              'part-ipa': !(part.reconstructedRef && part.useReconstructedPose !== false),
-            }"
-            :aria-pressed="part === active"
-            @click="selectPart(part)"
-          >
-            <span class="part-kind-dot" aria-hidden="true" :style="{background:trackColor(i)}" />
-            <span>{{ part.name }}{{ part.muted ? " · 静音" : "" }}{{ part.locked ? " · 锁定" : "" }}</span>
-          </button>
-        </div>
-
-        <label v-if="parts.length>1" class="overlay-control"><input v-model="allTracks" type="checkbox"> 同屏显示全部声部</label>
-        <div class="midi-examples"><span>MIDI 示例</span>
+        <div class="midi-examples">
+          <span>MIDI 示例</span>
           <a :href="exampleBase+'逐字旋律与和弦.mid'" download>逐字旋律与和弦</a>
           <a :href="exampleBase+'长恨歌.mid'" download>长恨歌</a>
         </div>
@@ -2719,21 +2712,37 @@ onBeforeUnmount(() => {
           <button class="btn xs primary" :disabled="!importIndexes.length" @click="confirmMidi">导入选中声部</button>
           <button class="btn xs" @click="pendingMidi=undefined">取消</button>
         </section>
-        <details v-if="active.events?.length" class="track-info" open>
-          <summary>当前轨道 · {{active.events.length}} 音</summary>
-          <dl>
-            <template v-if="active.scoreSource"><dt>工程</dt><dd>{{active.scoreSource}}</dd></template>
-            <template v-if="active.midiSource"><dt>MIDI</dt><dd>通道 {{active.midiSource.channel}} · 音色 {{(active.midiProgram ?? active.midiSource.program)+1}}</dd></template>
-            <dt>歌词</dt><dd>{{active.rows.length}} 音节</dd>
-            <dt>时长</dt><dd>{{(Math.max(0,timing.endSmp-leadingSmp)/SAMPLE_RATE_HZ).toFixed(2)}} 秒</dd>
-          </dl>
-        </details>
+        <section v-if="parts.length" class="tracks-section" aria-label="声部管理">
+          <div class="tracks-header">
+            <strong>声部</strong>
+            <label v-if="parts.length>1"><input v-model="allTracks" type="checkbox"> 同屏显示全部声部</label>
+          </div>
+          <div class="part-strip" aria-label="声部">
+            <button v-for="row in trackRows" :key="row.part.id" type="button" class="btn sm part-tab"
+              :class="{active:row.part===active}" :aria-pressed="row.part===active"
+              :title="[row.label,row.part.scoreSource,row.type].filter(Boolean).join(' · ')"
+              @click="selectPart(row.part)">
+              <span class="part-identity">
+                <i class="part-kind-dot" :style="{background:row.color}" aria-hidden="true" />
+                <span class="part-label">{{row.label}}</span>
+                <small v-if="row.part.muted">静音</small><small v-if="row.part.locked">锁定</small>
+              </span>
+              <span class="part-facts">
+                <span>{{row.count}} 音<span v-if="row.duration"> · {{row.duration}}</span></span>
+                <span>{{row.type}}</span>
+              </span>
+            </button>
+          </div>
+          <div class="track-controls">
+            <label><input type="checkbox" :checked="!active.muted" @change="editArranger('启用或静音声部',()=>{active.muted=!active.muted})"> 参与合奏与导出</label>
+            <label><input type="checkbox" :checked="active.locked" @change="editArranger('切换轨道锁定',()=>{active.locked=!active.locked})"> 锁定编辑</label>
+          </div>
+        </section>
         <audio v-if="active.referenceAssetId && sessionMedia.get(active.referenceAssetId)" controls :src="sessionMedia.get(active.referenceAssetId)?.url" aria-label="原始录音参考" />
-        <div v-if="parts.length" class="track-controls">
-          <label><input type="checkbox" :checked="!active.muted" @change="editArranger('启用或静音声部',()=>{active.muted=!active.muted})"> 参与合奏与导出</label>
-          <label><input type="checkbox" :checked="active.locked" @change="editArranger('切换轨道锁定',()=>{active.locked=!active.locked})"> 锁定编辑</label>
-        </div>
-        <button v-if="parts.length" class="lyrics-disclosure" :aria-expanded="lyricsOpen" aria-controls="arranger-lyric-editors" @click="lyricsOpen=!lyricsOpen">{{lyricsOpen?'▾':'▸'}} 歌词与逐字简谱 <small v-if="active.rows.length">{{active.rows.length}} 音节</small></button>
+        <button v-if="parts.length" class="btn sm lyrics-disclosure" :aria-expanded="lyricsOpen" aria-controls="arranger-lyric-editors" @click="lyricsOpen=!lyricsOpen">
+          <IconSvg name="chevron-right" :size="12" class="disclosure-chevron" />
+          歌词与逐字简谱 <small v-if="active.rows.length">{{active.rows.length}} 音节</small>
+        </button>
         <div v-if="parts.length && lyricsOpen" id="arranger-lyric-editors" class="track-editors" :inert="active.locked">
         <div class="editor-actions">
           <label class="edit-label" for="arranger-lyrics">歌词</label>
@@ -2952,7 +2961,7 @@ onBeforeUnmount(() => {
           <button v-if="unscored && nextLyric && active.events?.length" class="btn xs" :disabled="active.locked" :aria-pressed="rangeLyrics" :class="{primary:rangeLyrics}" @click="rangeLyrics=!rangeLyrics;lyricPencil=false;pencil=false;pitchTool='notes'">拖选音符配词</button>
           <span v-if="lyricPencil || rangeLyrics">下一字 · {{nextLyric?.char}}</span>
           <template v-if="lyricPencil"><label><input v-model="verticalPencil" type="checkbox"> 允许纵向换音</label></template>
-          <label v-if="parts.length>1">参考轨 <select v-model="referencePartId" aria-label="参考轨"><option value="">无</option><option v-for="part in parts.filter(p=>p.id!==active.id)" :key="part.id" :value="part.id">{{part.name}}</option></select></label>
+          <label v-if="parts.length>1">参考轨 <select v-model="referencePartId" aria-label="参考轨" @change="allTracks=false"><option value="">无</option><option v-for="part in parts.filter(p=>p.id!==active.id)" :key="part.id" :value="part.id">{{part.name}}</option></select></label>
           <label v-if="referencePart && unscored && !active.events?.some(n=>n.lyricId)">配词移调 <select v-model.number="fitTranspose" aria-label="配词移调"><option :value="0">原调</option><option :value="-12">低八度</option><option :value="12">高八度</option></select></label>
           <button v-if="fitSource && unscored && !active.events?.some(n=>n.lyricId)" class="btn xs" :disabled="active.locked" @click="fitReferenceMelody">{{ referencePart ? '按参考旋律配词' : '按本轨旋律配词' }}</button>
           <button v-if="activeRow?.phoneBoundaries" class="btn xs" @click="saveRowToUserLexicon(activeRow)">音素比例存入词典 · {{activeRow.char}}</button>
@@ -3197,36 +3206,28 @@ onBeforeUnmount(() => {
   padding: 9px;
 }
 .lyrics-panel, .roll-panel { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
-.lyrics-panel { gap: 7px; padding: 10px; }
-.velocity-input { width:4em; }
-.midi-examples {display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; font-size:.82rem;}
-.track-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; }
-.track-actions button {width:100%; justify-content:center; margin:0;}
-.part-strip { max-height:96px; overflow-y:auto; flex-shrink:0; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.midi-selection { display:grid; gap:4px; max-height:190px; overflow:auto; flex:none; }
+.lyrics-panel { gap:var(--gap-layout); padding:var(--pad-shell); overflow-y:auto; }
+.track-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:var(--gap-layout); }
+.track-actions button { width:100%; justify-content:center; margin:0; }
+.midi-examples { display:flex; flex-wrap:wrap; gap:var(--gap-layout); align-items:center; color:var(--muted); font-size:var(--control-font-size-sm); }
+.midi-selection { display:grid; gap:var(--gap-layout); max-height:190px; overflow:auto; flex:none; }
+.tracks-section { display:flex; flex-direction:column; gap:var(--gap-layout); border-top:var(--border-w) solid var(--panel-border); padding-top:var(--pad-shell); min-width:0; flex:none; }
+.tracks-header, .track-controls { display:flex; align-items:center; flex-wrap:wrap; gap:var(--gap-layout); }
+.tracks-header { justify-content:space-between; }
+.tracks-header label, .track-controls label { display:inline-flex; align-items:center; gap:4px; font-size:var(--control-font-size-sm); }
+.tracks-section input[type=checkbox] { margin:0; accent-color:var(--accent); }
+.part-strip { display:grid; gap:var(--gap-layout); align-content:start; max-height:clamp(125px,30vh,360px); overflow-y:auto; padding:2px 5px 5px 2px; }
+.btn.part-tab { width:100%; height:auto; min-height:var(--control-height); display:grid; grid-template-columns:minmax(0,1fr) auto; gap:var(--gap-layout); align-items:center; padding:5px 8px; text-align:left; }
+.part-identity { display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; }
+.part-label { overflow-wrap:anywhere; white-space:normal; }
+.part-kind-dot { flex:none; width:6px; height:6px; border-radius:50%; }
+.part-facts { display:grid; gap:1px; text-align:right; color:var(--muted); font-size:var(--fs-micro); line-height:1.25; font-variant-numeric:tabular-nums; font-weight:normal; }
+.part-identity small { font-size:var(--fs-micro); }
 .track-editors { display:contents; }
-.lyrics-disclosure {display:flex;align-items:center;gap:.6em;text-align:left;background:var(--panel);color:var(--text);border:0;border-top:1px solid var(--border);padding:9px 2px;cursor:pointer;font-weight:600;}
-.lyrics-disclosure small {color:var(--muted);}
-.overlay-control {font-size:.9rem;}
-.track-info {padding:6px 8px;border:1px solid var(--border);border-radius:5px;font-size:.9rem;}
-.track-info summary {cursor:pointer;}
-.track-info dl {display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:6px 0 0;}
-.track-info dt {color:var(--muted);}
-.track-info dd {margin:0;overflow-wrap:anywhere;}
-.empty-arrangement {padding:12px;color:var(--muted);}
-.lyrics-panel {overflow-y:auto;}
-.part-strip {overflow-y:auto;max-height:40%; flex-shrink:0;}
-.track-controls { display:flex; gap:8px; flex-wrap:wrap; font-size:12px; }
-.part-tab { gap: 5px; }
-.part-kind-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-.part-tab.primary .part-kind-dot { background: currentColor; }
-.part-tab.part-reconstruct:not(.primary) { border-color: color-mix(in srgb, var(--teal) 52%, var(--border)); }
-.part-tab.part-reconstruct:not(.primary) .part-kind-dot { background: var(--teal); }
+.btn.lyrics-disclosure { justify-content:flex-start; flex:none; gap:6px; }
+.lyrics-disclosure small { margin-inline-start:auto; color:var(--muted); font-size:var(--fs-micro); }
+.lyrics-disclosure[aria-expanded=true] .disclosure-chevron { transform:rotate(90deg); }
+.empty-arrangement {padding:var(--pad-shell);color:var(--muted);}
 .part-delete-btn {
   margin-left: auto;
   color: var(--danger);
