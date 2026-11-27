@@ -52,13 +52,10 @@ function rewriteHtmlBase(base: string): Plugin {
 export default defineConfig(({ mode }) => {
   const base = resolveBaseUrl();
   const contest = mode === 'hackathon';
-  const friends = mode === 'friends';
   const edition = contest
     ? { name: 'hackathon', entry: './src/editions/hackathon/index.ts', devPort: 5174, previewPort: 4174, proxyPort: 3002 }
-    : friends
-      ? { name: 'friends', entry: './src/editions/friends.ts', devPort: 5175, previewPort: 4175, proxyPort: 3003 }
-      : { name: 'public', entry: './src/editions/public.ts', devPort: 5173, previewPort: 4173, proxyPort: 3001 };
-  const restrictedEditionPaths = contest ? [] : friends ? ['**/editions/hackathon/assets/**'] : ['**/editions/hackathon/**'];
+    : { name: 'public', entry: './src/editions/public.ts', devPort: 5173, previewPort: 4173, proxyPort: 3001 };
+  const restrictedEditionPaths = contest ? [] : ['**/editions/hackathon/assets/**'];
   return {
     base,
     envDir: false,

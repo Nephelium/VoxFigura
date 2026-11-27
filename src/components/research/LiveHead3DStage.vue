@@ -32,7 +32,7 @@ interface VtlHeadModules {
     tips: number[][][];
     outline: number[][];
   };
-  displayLips: (state: any, opts?: { surface?: boolean }) => any;
+  displayLips: (state: any, opts?: { surface?: boolean; sectionPreview?: boolean }) => any;
   velumModel: (state: any, opts?: { surface?: boolean }) => { vertices: number[]; triangles: number[]; profile: number[][] };
   registerNose: (nose: any) => any;
   planeSegments: (vertices: ArrayLike<number>, triangles: ArrayLike<number>, z?: number) => number[][][];
@@ -170,6 +170,7 @@ import {
   defaultAppearanceProfile,
   defaultFaceExpression,
   defaultVisualLipMetrics,
+  deformLipPairForExpression,
   listCameraDevices,
   type CameraDeviceOption,
   type FaceAppearanceProfile,
@@ -862,9 +863,9 @@ function syncMaterialsAndTheme(): void {
       m.depthWrite = false;
     } else if (name.includes('lip')) {
       m.color.set(pal.lip);
-      m.transparent = true;
-      m.opacity = Math.min(0.92, op + 0.48);
-      m.depthWrite = false;
+      m.transparent = !halfCut.value && op < 0.35;
+      m.opacity = halfCut.value ? 0.96 : Math.min(0.94, op + 0.62);
+      m.depthWrite = true;
     } else if (name === 'epiglottis') {
       m.color.set(pal.epiglottis);
       m.transparent = false;
@@ -1049,7 +1050,7 @@ function rebuildRefinedTractCache(frame: DecodedTract3DFrame): void {
     nasal: { port_area: Math.max(0, frame.nasalPortArea) },
   };
 
-  const refinedState = vtlMods.displayLips(rawState, { surface: false });
+  const refinedState = vtlMods.displayLips(rawState, { surface: true, sectionPreview: false });
   const uLip = refinedState.meshes.find((m: any) => m.name === 'upper_lip');
   const lLip = refinedState.meshes.find((m: any) => m.name === 'lower_lip');
   const lTeeth = refinedState.meshes.find((m: any) => m.name === 'lower_teeth');
@@ -1240,23 +1241,16 @@ function poseHeadAndFacialExpressionsFrame(): void {
   const aperture = st.lipApertureColumn ?? 13;
 
   if (trackingActive) {
-    const deformLip = (verts: Float32Array, ribs: number, points: number, isUpper: boolean) => {
-      for (let r = 0; r < ribs; r++) {
-        const cornerSin = Math.sin((Math.PI * r) / Math.max(1, ribs - 1));
-        const upperY = upperRest[(r * uLipMesh.points + aperture) * 3 + 1];
-        const lowerY = lowerRest[(r * lLipMesh.points + aperture) * 3 + 1];
-        const gapDeltaCm = targetGapCm - (upperY - lowerY);
-        const vertShift = (isUpper ? 0.36 : -0.64) * gapDeltaCm * Math.pow(cornerSin, 0.75);
-        for (let p = 0; p < points; p++) {
-          const idx = (r * points + p) * 3;
-          verts[idx] += lipProtrudeDeltaCm * cornerSin;
-          verts[idx + 1] += vertShift;
-          verts[idx + 2] *= lipSpreadScale;
-        }
-      }
-    };
-    deformLip(uVerts, uLipMesh.ribs, uLipMesh.points, true);
-    deformLip(lVerts, lLipMesh.ribs, lLipMesh.points, false);
+    deformLipPairForExpression(
+      uVerts,
+      lVerts,
+      upperRest,
+      lowerRest,
+      Math.min(uLipMesh.ribs, lLipMesh.ribs),
+      Math.min(uLipMesh.points, lLipMesh.points),
+      aperture,
+      { targetGapCm, lipProtrudeDeltaCm, lipSpreadScale },
+    );
   }
 
   const posedFace = vtlMods.poseHead(headModel, {
@@ -1276,8 +1270,10 @@ function poseHeadAndFacialExpressionsFrame(): void {
   ] as const).map(([lipObj, trimmed, side]) => {
     const nCols = lipObj.points;
     for (let rib = 0; rib < lipObj.ribs; rib++) {
-      const stopCol = Math.floor(posedFace.ends[side][rib]) + 1;
-      const tip = posedFace.tips[side][rib];
+      const rawEnd = posedFace.ends?.[side]?.[rib];
+      const tip = posedFace.tips?.[side]?.[rib];
+      if (!Number.isFinite(rawEnd) || !tip) continue;
+      const stopCol = Math.max(0, Math.min(nCols, Math.floor(rawEnd) + 1));
       for (let k = stopCol; k < nCols; k++) {
         const base = (rib * nCols + k) * 3;
         trimmed[base] = tip[0];

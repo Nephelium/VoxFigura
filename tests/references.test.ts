@@ -6,14 +6,14 @@ const LEGACY_MODULE_PATTERN = /^(?:M\d{2}|P\d{2}(?:-.+)?|shared-runtime)$/;
 const LEGACY_CODE_IN_ID_OR_NOTE = /\b(?:M\d{2}|P\d{2})\b/;
 
 describe('method references module classification and importance sorting', () => {
-  it('preserves all 111 base entries and 2 hackathon edition entries with no duplicates', () => {
+  it('preserves all 113 base entries and 2 hackathon edition entries with no duplicates', () => {
     const baseIds = METHOD_REFERENCES.map((r) => r.id);
-    expect(METHOD_REFERENCES.length).toBe(111);
-    expect(new Set(baseIds).size).toBe(111);
+    expect(METHOD_REFERENCES.length).toBe(113);
+    expect(new Set(baseIds).size).toBe(113);
 
     const hackIds = hackathonEditionReferences.map((r) => r.id);
     expect(hackathonEditionReferences.length).toBe(2);
-    expect(new Set([...baseIds, ...hackIds]).size).toBe(113);
+    expect(new Set([...baseIds, ...hackIds]).size).toBe(115);
   });
 
   it('maps every entry to VoxFigura modules with no legacy Mxx/Pxx tags or IDs', () => {

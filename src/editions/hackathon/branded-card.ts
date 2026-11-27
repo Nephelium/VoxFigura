@@ -1,9 +1,24 @@
 import type { CardOptions } from '@/components/phonetic-card/card-options';
 import { formattedZhihuSignature, showZhihuSignature, zhihuAuthorNickname } from './card/author-profile';
-import suan from './recordings/suan.mp3?url';
-import swan from './recordings/swan.mp3?url';
-import modal from './recordings/modal.mp3?url';
-import breathy from './recordings/breathy.mp3?url';
+
+const recordingModules = import.meta.glob('./recordings/*.mp3', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+
+const optionalRecordings =
+  recordingModules['./recordings/suan.mp3'] &&
+  recordingModules['./recordings/swan.mp3'] &&
+  recordingModules['./recordings/modal.mp3'] &&
+  recordingModules['./recordings/breathy.mp3']
+    ? {
+        suan: recordingModules['./recordings/suan.mp3'],
+        swan: recordingModules['./recordings/swan.mp3'],
+        modal: recordingModules['./recordings/modal.mp3'],
+        breathy: recordingModules['./recordings/breathy.mp3'],
+      }
+    : undefined;
 
 export const brandedCard: CardOptions = {
   titlePrefix: '知乎',
@@ -15,5 +30,5 @@ export const brandedCard: CardOptions = {
     nickname: zhihuAuthorNickname,
     formatted: formattedZhihuSignature,
   },
-  recordings: { suan, swan, modal, breathy },
+  ...(optionalRecordings ? { recordings: optionalRecordings } : {}),
 };

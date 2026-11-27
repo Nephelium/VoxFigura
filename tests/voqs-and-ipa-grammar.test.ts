@@ -220,12 +220,12 @@ describe('IPA multi-syllable, tone sandhi, VoQS braces & English MOP syllabifica
     expect(stressed.durationScale).toBeCloseTo(1.25);
     expect(stressed.pressureDeltaPa).toBe(100);
 
-    expect(arpaToIpaSyllables('M AO1 R N IH0 NG')).toEqual(['ˈmɔɹ', 'nɪŋ']);
+    expect(arpaToIpaSyllables('M AO1 R N IH0 NG')).toEqual(['ˈmɔɹ̠ʷ', 'nɪŋ']);
     expect(arpaToIpaSyllables('B Y UW1 T AH0 F AH0 L')).toEqual(['ˈbju', 'tə', 'fəl']);
 
     const cmu = parseCmu('MORNING  M AO1 R N IH0 NG\nSING  S IH1 NG\n');
     const rows = reviewText('morning singing', 'Standard Chinese (Beijing)', cmu, new Map());
-    expect(rows.map((r) => r.ipa)).toEqual(['ˈmɔɹ', 'nɪŋ', 'ˈsɪŋ', 'ɪŋ']);
+    expect(rows.map((r) => r.ipa)).toEqual(['ˈmɔɹ̠ʷ', 'nɪŋ', 'ˈsɪŋ', 'ɪŋ']);
   });
 
   it('keeps IPA overrides separate by the Chinese transcription standard', () => {
@@ -274,7 +274,7 @@ describe('IPA multi-syllable, tone sandhi, VoQS braces & English MOP syllabifica
       const fresh = reviewText(lyrics, standard, english, buildPersonalG2pMap(standard));
       expect(fresh).toHaveLength(readings.length);
       expect(fresh.map(row => lookupUserLexiconReading(row, standard)?.ipaJoined ?? row.ipa))
-        .toEqual(['ˈmɔɹ', 'a̰', 'ˈnɪŋ', 'a̰˧˥']);
+        .toEqual(['ˈmɔɹ̠ʷ', 'a̰', 'ˈnɪŋ', 'a̰˧˥']);
       expect(lookupUserLexiconEntry('ka', 'en')).toBeUndefined();
     } finally {
       entries.forEach(entry => removeUserLexiconEntry(entry.key));

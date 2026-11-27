@@ -94,11 +94,10 @@ flowchart TD
 
 ## 4. 版本入口、免安装服务与构建隔离
 
-- 公开版入口：`src/editions/public.ts`（`npm run dev` 5173 + `npm run server` 3001 → `dist-public/`）。默认进入首页，提供通用发音卡排版和导出。`vite.config.ts` 屏蔽 `src/editions/hackathon/**`，`scripts/check-edition.mjs` 验证卡片入口、动卡导出、知乎凭据字符串隔离及赛事品牌隔离。
+- 开源版入口：`src/editions/public.ts`（`npm run dev` 5173 + `npm run server` 3001 → `dist-public/`）。默认进入首页，整合原群友版特性，保留本地作者卡片署名与通用科研导出（`check-edition.mjs` 显式白名单仅允许 `./hackathon/branded-card`，并在缺失本地私有录音时自动回退预热样本以保障 GitHub Actions CI 构建）。
 - 参赛版入口：`src/editions/hackathon/index.ts`（`npm run dev:hackathon` 5174 + `npm run server:hackathon` 3002 → `dist-hackathon/`），单独挂载知乎内容路由（`server/contest-routes.mjs`）与刘看山素材。
-- 群友版入口：`src/editions/friends.ts`（`npm run dev:friends` 5175 + `npm run server:friends` 3003 → `dist-friends/`）。默认进入首页，发音卡保留本地知乎作者署名（`check-edition.mjs` 显式白名单仅允许 `./hackathon/branded-card`）。
-- **免安装桌面版入口（`server/portable.mjs` + `server/portable-cache.mjs`）**：由 Tauri 2 原生壳（`src-tauri/`）隐藏控制台拉起；按 `bundle-manifest.json` 监听固定回环端口（公开版 `26751`、群友版 `26752`）并同时托管静态网页与 `/api/*` 代理；自动以 `ENGINE_PORT=0`、`VOCALCUT_CPU_ONLY=1`、`VOCALCUT_DISABLE_LOCAL_ASR=1`、`VOCALCUT_ENGINE_TOKEN`、`VOCALCUT_ENGINE_PARENT_PIPE=1` 启动包内嵌入式 Python 引擎。发音卡与剪辑媒体编码分别由 `server/card-encoding.mjs`、`server/studio-encoding.mjs` 提供。`server/portable-cache.mjs` 仅在便携态开放 `/api/portable/cache*`（非便携态返回 404），执行白名单清理、`.voxfigura-cache-root` 专属子目录保护与 `.lock` 持锁检测。
-- 三版共用 `src/components/phonetic-card/` 的卡片组件。PNG 由浏览器生成，MP4 与 GIF 由代理调用 FFmpeg。公开版的卡片示例使用 `public/prewarm/` 资源。
+- **免安装桌面版入口（`server/portable.mjs` + `server/portable-cache.mjs`）**：由 Tauri 2 原生壳（`src-tauri/`）隐藏控制台拉起；按 `bundle-manifest.json` 监听固定回环端口（开源版 `26751`，兼顾历史 `friends` 缓存端口 `26752`）并同时托管静态网页与 `/api/*` 代理；自动以 `ENGINE_PORT=0`、`VOCALCUT_CPU_ONLY=1`、`VOCALCUT_DISABLE_LOCAL_ASR=1`、`VOCALCUT_ENGINE_TOKEN`、`VOCALCUT_ENGINE_PARENT_PIPE=1` 启动包内嵌入式 Python 引擎。发音卡与剪辑媒体编码分别由 `server/card-encoding.mjs`、`server/studio-encoding.mjs` 提供。`server/portable-cache.mjs` 仅在便携态开放 `/api/portable/cache*`（非便携态返回 404），执行白名单清理、`.voxfigura-cache-root` 专属子目录保护与 `.lock` 持锁检测。
+- 两版共用 `src/components/phonetic-card/` 的卡片组件。PNG 由浏览器生成，MP4 与 GIF 由代理调用 FFmpeg；开源版在本地含演示音频时优先使用演示音频，云端构建或未随仓附带时回退 `public/prewarm/` 资源。
 - 自定义工作区背景和应用图标按应用地址保存在浏览器 IndexedDB，上次选中项由本地偏好恢复。切回预设背景或默认图标后，已保存图片仍可在设置中选取。
 - 公共代码（`src/` 其余目录、`packages/`、`server/index.mjs`、`server/proxy.mjs`、`server/portable.mjs`）严禁直接导入 `src/editions/hackathon/`，统一经 `@vocalcut/edition` 别名解析。
 
@@ -111,10 +110,10 @@ flowchart TD
 
 | 环境变量 | 适用模块 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `PORT` | `server/{index,hackathon,friends}.mjs` | `3001` / `3002` / `3003` | 开发态 Node 代理监听端口（免安装版固定公开版 `26751`、群友版 `26752`） |
+| `PORT` | `server/{index,hackathon}.mjs` | `3001` / `3002` | 开发态 Node 代理监听端口（免安装版固定开源版 `26751`） |
 | `HOST` | `server/proxy.mjs` | `127.0.0.1` | 代理监听地址；非回环绑定须同时设置 `VOCALCUT_ALLOW_NON_LOOPBACK=1` |
 | `VOCALCUT_ALLOW_NON_LOOPBACK` | `server/proxy.mjs` | 未设置（禁用） | 设为 `1` 允许代理绑定非回环地址 |
-| `VOCALCUT_PROXY_URL` | `vite.config.ts` | 按版本对应 `3001/3002/3003` | 前端开发服务器 `/api` 反向代理目标 |
+| `VOCALCUT_PROXY_URL` | `vite.config.ts` | 按版本对应 `3001/3002` | 前端开发服务器 `/api` 反向代理目标 |
 | `TENSORTRACT_API_URL` | `server/proxy.mjs` | `http://127.0.0.1:8765` | 代理转发本地 Python 推理引擎的基础地址 |
 | `ENGINE_HOST` / `ENGINE_PORT` | `engine/server.py`、`server/portable.mjs` | `127.0.0.1` / `8765` | Python 引擎监听地址与端口；免安装版设为 `0` 分配动态端口 |
 | `VOCALCUT_PYTHON` | `scripts/start-engine.mjs` | 未设置 | 最高优先级指定 `npm run engine` 所用 Python 解释器路径 |

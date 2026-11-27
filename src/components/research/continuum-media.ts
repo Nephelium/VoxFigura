@@ -77,7 +77,7 @@ export const continuumPersisted: ContinuumPersistedState = {
   matrixColumns: 5,
   matrixRows: 4,
   baseMix: 50,
-  synthesis: 'vtl',
+  synthesis: 'neural',
   speakerRefMode: 'endpoint_a',
   regimeA: 'V',
   regimeB: 'V̤',

@@ -8,21 +8,20 @@
 - `packages/g2p-ts/`：无框架耦合的多语文本转 IPA、CMUdict、日文假名与简谱解析纯函数包。
 - `packages/vocal-tract-view/`：零框架耦合的 2D/3D 声道几何可视化独立组件包（`embed.mjs` 镜像，含 `demo.html` 与 `manifest.json`）。
 - `packages/model-adapters/`：标准化模型适配器层（VTL 双传输 `VocalEngineTransport` 与 `Vox2Tract-Lite` / `Tract2Vox-Lite` 适配器 `M27Adapter`）。
-- `server/index.mjs`、`server/hackathon.mjs`、`server/friends.mjs` 共用本地引擎转发、自配 API Key 助手和发音卡编码；参赛入口单独挂载知乎内容接口（`server/contest-routes.mjs`）。公共代理实现位于 `server/proxy.mjs`，发音卡与剪辑编码分别位于 `server/card-encoding.mjs`、`server/studio-encoding.mjs`；免安装版专用入口为 `server/portable.mjs`（公开版 26751、群友版 26752，自动设置 `ENGINE_PORT=0` 与 `VOCALCUT_DISABLE_LOCAL_ASR=1`），便携缓存管理位于 `server/portable-cache.mjs`。
+- `server/index.mjs`、`server/hackathon.mjs` 共用本地引擎转发、自配 API Key 助手和发音卡编码；参赛入口单独挂载知乎内容接口（`server/contest-routes.mjs`）。公共代理实现位于 `server/proxy.mjs`，发音卡与剪辑编码分别位于 `server/card-encoding.mjs`、`server/studio-encoding.mjs`；免安装版专用入口为 `server/portable.mjs`（开源版 26751，自动设置 `ENGINE_PORT=0` 与 `VOCALCUT_DISABLE_LOCAL_ASR=1`），便携缓存管理位于 `server/portable-cache.mjs`。
 - `engine/`：Python 3.11 本地 VTL 2.4 + VoxFigura Core 推理服务（默认监听 `127.0.0.1:8765`；`npm run engine` 依次选用 `VOCALCUT_PYTHON`、仓库 `.venv`、`F:/TensorTract3_Train/.venv`（仅 Windows、只读）、系统 `python`，均以 `-B` 启动），含统一校验器 `engine/validation.py` 与引擎租借池 `engine/dense_channel.py`。
-- `src/` 包含公共科研与剪辑工作台、共享外观及模型设置。`@vocalcut/edition` 在构建时选择 `src/editions/public.ts`、`src/editions/hackathon/index.ts` 或 `src/editions/friends.ts`。
-- `src/components/phonetic-card/` 持有三版共用的发音卡，`src/editions/hackathon/` 持有探索页、专题、知乎凭据与内容显示、刘看山及带品牌的卡片选项。公开入口独立于赛事目录。
-- `schema/` 维护工程格式（`project.schema.json` 以 `packages/core-ts/src/types.ts` 为真源）和工具登记。`public/` 存放三版共享字体、声道资源、IPA 数据与预渲染几何和音频。`.cache/` 仅存运行时缓存，不留存历史构建备份或临时脚本。
+- `src/` 包含公共科研与剪辑工作台、共享外观及模型设置。`@vocalcut/edition` 在构建时选择 `src/editions/public.ts` 或 `src/editions/hackathon/index.ts`（原群友版已并入 `public.ts` 作为唯一开源版，不再单设独立构建；`src/editions/friends.ts` 仅作重导出兼容）。
+- `src/components/phonetic-card/` 持有两版共用的发音卡，`src/editions/hackathon/` 持有探索页、专题、知乎凭据与内容显示、刘看山及卡片署名/本地示例配置。公开入口通过 `scripts/check-edition.mjs` 白名单仅允许导入 `./hackathon/branded-card`。
+- `schema/` 维护工程格式（`project.schema.json` 以 `packages/core-ts/src/types.ts` 为真源）和工具登记。`public/` 存放两版共享字体、声道资源、IPA 数据与预渲染几何和音频。`.cache/` 仅存运行时缓存，不留存历史构建备份或临时脚本。
 
 ## 2. 常用命令
 
 | 版本 | 开发前端 | 本地代理 | 构建产物 |
 | --- | --- | --- | --- |
-| 公开版 | `npm run dev`，端口 5173 | `npm run server`，端口 3001 | `npm run build` → `dist-public/` |
+| 开源版 | `npm run dev`，端口 5173 | `npm run server`，端口 3001 | `npm run build` → `dist-public/` |
 | 参赛版 | `npm run dev:hackathon`，端口 5174 | `npm run server:hackathon`，端口 3002 | `npm run build:hackathon` → `dist-hackathon/` |
-| 群友版 | `npm run dev:friends`，端口 5175 | `npm run server:friends`，端口 3003 | `npm run build:friends` → `dist-friends/` |
 
-各列命令在不同终端运行，各版本可并行。前端默认连接同一行的代理。自定义代理端口时，通过进程环境 `PORT` 和 `VOCALCUT_PROXY_URL` 分别设置代理监听端口与前端目标。预览构建可使用 `npm run preview`（4173）、`npm run preview:hackathon`（4174）或 `npm run preview:friends`（4175）。
+各列命令在不同终端运行，两版可并行。前端默认连接同一行的代理。自定义代理端口时，通过进程环境 `PORT` 和 `VOCALCUT_PROXY_URL` 分别设置代理监听端口与前端目标。预览构建可使用 `npm run preview`（4173）或 `npm run preview:hackathon`（4174）。
 
 - `npm run engine` 启动共享 Python 引擎（8765）。
 - `npm run typecheck` 执行全量类型检查，`npm test` 运行单元测试（含 Schema 校验）。
@@ -40,7 +39,7 @@
 
 ## 4. Windows 打包强制规范
 
-1. **先选版本和目标**。公开、参赛、群友构建彼此独立。Windows 免安装版默认 x64、CPU、Tauri 2 独立桌面窗口（WebView2，默认隐藏后端终端）。公开版、群友版分别运行 `npm run portable:public`、`npm run portable:friends`。包装前端必须重新构建并通过对应版本的 `check-edition.mjs`。后续安装器复用同一套已验收运行文件与依赖清单。
+1. **先选版本和目标**。仓库仅维护开源版（`public`，合并原群友版）与参赛版（`hackathon`）两个管理版本。Windows 免安装版默认 x64、CPU、Tauri 2 独立桌面窗口（WebView2，默认隐藏后端终端），运行 `npm run portable:public` 生成交付包。包装前端必须重新构建并通过对应版本的 `check-edition.mjs`。后续安装器复用同一套已验收运行文件与依赖清单。
 2. **新目录按允许清单组包，使用单文件 EXE 交付**。`scripts/portable/build.py` 持有运行时、原生库、八个核心 Batch-2 ONNX 槽位（含窄标构型库 `canonical_ipa_poses_narrow.json`）、VTL、词表、静态资源与正式参考库的入包规则，由 `src-tauri/` 编译 Tauri 2 原生启动壳（默认内嵌蓝色款 `scripts/portable/VoxFigura.ico` 图标，运行时经 `core:window:allow-set-icon` 随应用配色动态同步任务栏与窗口图标）并拼装 7zr 与 LZMA2 应用归档为单文件 EXE。外部输入由 `scripts/portable/inputs.lock.json` 逐项锁定来源和 SHA-256。每份包须附逐文件长度、SHA-256 和外部输入信息，并单独记录成品 EXE SHA-256。用户双击 EXE 即可直接以独立桌面窗口启动，运行文件自动准备到当前用户缓存，关闭桌面窗口时自动停止本地代理与引擎。禁止用旧包、旧前端产物、全仓拷贝、全量虚拟环境、被新训练版本替代的旧权重或训练目录作为打包输入。
 3. **本地核心功能启动后即用**。包括 VTL、八个 Batch-2 核心 ONNX 模型（`Vox2Tract-Lite` 联合 `Vox2TractAlign v4`、`Tract2Vox-Lite`、`Vox2Spk-Lite`、`IPA2Tract-Lite`、`Text2Prosody-Lite`、`Tract2Area-Proxy`、`DPDFNet`、`SwiftF0`；独立 `Vox2Align-Lite v2` 已并入前者且旧版权重不入包，仅保留运行时可选自训兼容槽位）、参考库、声道动画和本地音视频导出。录音原文支持手动填写、通过配置的在线 API 转写，或在界面按需一键下载本地 `SenseVoice-Small`（int8 ONNX，复用包内现有 `onnxruntime`，按公网出口自动切换国内镜像/ModelScope 与 Hugging Face，权重存于用户持久缓存目录，不随包内置）；普通话与英语引导对齐直接由 `Vox2Tract-Lite`（`Vox2TractAlign v4`）完成，亦支持用户外置挂载 `Vox2Align-Lite v2` 扩展其他语种或方言。免安装和后续安装包禁止随包内置任何本地转写权重，亦禁止装入 CTranslate2、faster-whisper 或专用 PyAV 解码依赖。包内 IPA/VoQS 实录使用 192 kbps MP3，逐条核对解码后的采样率、声道和样本数，仓库保存源 WAV。禁止随包交付 PyTorch、CUDA/cuDNN、GPU Provider、训练权重、被新版本替代的旧权重、开发依赖、密钥、用户配置与存量缓存。
 4. **体积以最终文件实测**。分别记录交付 EXE 大小、用户运行缓存占用，并按网页、原生推理、模型、参考库和媒体编码统计。对新增大文件或体积增长，记录用途、来源、压缩前后字节及对应验收。裁切前查明动态导入、惰性加载、旧工程兼容和导出路径。权重量化、转码、删字库和模型降级必须单独审查其功能影响。

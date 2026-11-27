@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "sources": [
+    {
+      "name": "Rime Cantonese (jyut6ping3.chars + jyut6ping3.words)",
+      "version": "2026.08.10",
+      "url": "https://github.com/rime/rime-cantonese",
+      "license": "CC BY 4.0",
+      "licenseFile": "public/licenses/rime-cantonese-cc-by-4.0.txt",
+      "charsSha256": "9b053a594c80eae76545bcdd83239884a49b1ba48b89ca0ab9e8daac79f33013",
+      "wordsSha256": "54d174ad2bb997e4a678b7b076b84e4dc5914481b32467cdea3b43e88b7d5474"
+    },
+    {
+      "name": "Unicode Unihan Database (Unihan_Readings kCantonese & Unihan_Variants)",
+      "url": "https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip",
+      "license": "Unicode-3.0",
+      "licenseFile": "public/licenses/unicode-license-v3.txt",
+      "unihanZipSha256": "4c93ea9c1f636451729a840978f1667a53886af37ba854fdcce109721c63d43e"
+    }
+  ],
+  "charEntries": 32694,
+  "polyphoneWordEntries": 31952,
+  "totalCompressedBytes": 452797,
+  "files": {
+    "chars.tsv.gz": {
+      "bytes": 162625,
+      "entries": 32694,
+      "sha256": "dd205d200e6738b89ecd354b43eb34e25db67a539d3ae5e735f33b28da74f7ea"
+    },
+    "words.tsv.gz": {
+      "bytes": 290172,
+      "entries": 31952,
+      "sha256": "505b7687096232a07498b6b5f87db1ab9a777b436e96773a700c7e1e67b576d7"
+    }
+  }
+}

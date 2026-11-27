@@ -10,6 +10,29 @@ const TABLE_DELIM_CELL_RE = /^:?-{2,}:?$/;
 const SAFE_LANG_RE = /^[a-zA-Z0-9_+#.-]{1,24}$/;
 const MAX_QUOTE_DEPTH = 4;
 
+export interface RenderMarkdownOptions {
+  allowLinks?: boolean;
+  allowImages?: boolean;
+}
+
+function sanitizeHttpsUrl(escapedRawUrl: string): string {
+  const decoded = escapedRawUrl
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+  if (!decoded) return '';
+  try {
+    const parsed = new URL(decoded);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+      return '';
+    }
+    return escapeHtml(parsed.toString());
+  } catch {
+    return '';
+  }
+}
+
 export function escapeHtml(raw: string): string {
   return raw
     .replace(STRIP_CTRL_RE, '')
@@ -20,21 +43,71 @@ export function escapeHtml(raw: string): string {
     .replace(/'/g, '&#39;');
 }
 
-export function renderInline(escapedLine: string): string {
-  const codeSpans: string[] = [];
-  let text = escapedLine.replace(/``(.+?)``|`([^`]+?)`/g, (_match, doubleTick?: string, singleTick?: string) => {
-    const content = doubleTick !== undefined ? doubleTick.trim() : (singleTick ?? '');
-    const index = codeSpans.push(`<code class="md-inline-code">${content}</code>`) - 1;
-    return `\uE000C${index}\uE001`;
-  });
-
+function formatInlineEmphasis(text: string): string {
   // Bold+Italic (***...***), Bold (**...**), Italic (*...*)
   // Intentionally avoid _..._ / __...__ so Jianpu duration underscores (5_, 5__) stay intact.
-  text = text.replace(/\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*/g, '<strong><em>$1</em></strong>');
-  text = text.replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/(^|[^*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)/g, '$1<em>$2</em>');
+  let formatted = text.replace(/\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*/g, '<strong><em>$1</em></strong>');
+  formatted = formatted.replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '<strong>$1</strong>');
+  formatted = formatted.replace(/(^|[^*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)/g, '$1<em>$2</em>');
+  return formatted;
+}
 
-  return text.replace(/\uE000C(\d+)\uE001/g, (_match, idx: string) => codeSpans[Number(idx)] ?? '');
+export function renderInline(escapedLine: string, options: RenderMarkdownOptions = {}): string {
+  const tokens: string[] = [];
+  const pushToken = (html: string): string => {
+    const index = tokens.push(html) - 1;
+    return `\uE000C${index}\uE001`;
+  };
+  const resolveTokens = (input: string): string =>
+    input.replace(/\uE000C(\d+)\uE001/g, (_match, idx: string) => tokens[Number(idx)] ?? '');
+
+  let text = escapedLine.replace(/``(.+?)``|`([^`]+?)`/g, (_match, doubleTick?: string, singleTick?: string) => {
+    const content = doubleTick !== undefined ? doubleTick.trim() : (singleTick ?? '');
+    return pushToken(`<code class="md-inline-code">${content}</code>`);
+  });
+
+  if (options.allowImages) {
+    text = text.replace(
+      /!\[([^\]]*)\]\(([^\s)]+(?:\([^\s)]*\))?)(?:\s+&quot;((?:(?!&quot;).)*)&quot;)?\)/g,
+      (_match, rawAlt: string, rawUrl: string, rawTitle?: string) => {
+        const safeSrc = sanitizeHttpsUrl(rawUrl);
+        if (!safeSrc) return rawAlt || '';
+        const titleAttr = rawTitle ? ` title="${rawTitle}"` : '';
+        return pushToken(
+          `<span class="md-img-wrap"><img class="md-img" src="${safeSrc}" alt="${rawAlt}"${titleAttr} loading="lazy" decoding="async" /></span>`,
+        );
+      },
+    );
+
+    // Support GitHub-generated escaped <img src="https://..." alt="..." /> snippets safely
+    text = text.replace(/&lt;img\b((?:(?!&gt;).)*?)\/?&gt;/gi, (whole, attrs: string) => {
+      const srcMatch = /\bsrc\s*=\s*(?:&quot;|&#39;)((?:(?!&quot;|&#39;).)+)(?:&quot;|&#39;)/i.exec(attrs);
+      if (!srcMatch) return whole;
+      const safeSrc = sanitizeHttpsUrl(srcMatch[1]);
+      if (!safeSrc) return whole;
+      const altMatch = /\balt\s*=\s*(?:&quot;|&#39;)((?:(?!&quot;|&#39;).)*)(?:&quot;|&#39;)/i.exec(attrs);
+      const alt = altMatch ? altMatch[1] : 'image';
+      return pushToken(
+        `<span class="md-img-wrap"><img class="md-img" src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async" /></span>`,
+      );
+    });
+  }
+
+  if (options.allowLinks) {
+    text = text.replace(
+      /\[([^\]]+)\]\(([^\s)]+(?:\([^\s)]*\))?)(?:\s+&quot;((?:(?!&quot;).)*)&quot;)?\)/g,
+      (_match, rawLabel: string, rawUrl: string) => {
+        const safeHref = sanitizeHttpsUrl(rawUrl);
+        const labelHtml = resolveTokens(formatInlineEmphasis(rawLabel));
+        if (!safeHref) return labelHtml;
+        return pushToken(
+          `<a class="md-link" href="${safeHref}" target="_blank" rel="noopener noreferrer">${labelHtml}</a>`,
+        );
+      },
+    );
+  }
+
+  return resolveTokens(formatInlineEmphasis(text));
 }
 
 function splitTableCells(escapedLine: string): string[] | null {
@@ -115,7 +188,11 @@ interface ListItemNode {
   subItems: string[][];
 }
 
-function renderList(lines: string[], startIdx: number): { html: string; nextIdx: number } {
+function renderList(
+  lines: string[],
+  startIdx: number,
+  options: RenderMarkdownOptions,
+): { html: string; nextIdx: number } {
   const firstLine = lines[startIdx];
   const ulFirst = UL_ITEM_RE.exec(firstLine);
   const olFirst = ulFirst ? null : OL_ITEM_RE.exec(firstLine);
@@ -177,7 +254,7 @@ function renderList(lines: string[], startIdx: number): { html: string; nextIdx:
   const closeTag = `</${listType}>`;
 
   const body = items.map(item => {
-    const mainHtml = item.lines.map(renderInline).join('<br />');
+    const mainHtml = item.lines.map(line => renderInline(line, options)).join('<br />');
     if (!item.subItems.length || !item.subType) {
       return `<li>${mainHtml}</li>`;
     }
@@ -185,14 +262,16 @@ function renderList(lines: string[], startIdx: number): { html: string; nextIdx:
       ? `<ol class="md-list md-sublist" start="${item.subStart}">`
       : `<${item.subType} class="md-list md-sublist">`;
     const subClose = `</${item.subType}>`;
-    const subBody = item.subItems.map(subLines => `<li>${subLines.map(renderInline).join('<br />')}</li>`).join('');
+    const subBody = item.subItems
+      .map(subLines => `<li>${subLines.map(line => renderInline(line, options)).join('<br />')}</li>`)
+      .join('');
     return `<li>${mainHtml}${subOpen}${subBody}${subClose}</li>`;
   }).join('');
 
   return { html: `${openTag}${body}${closeTag}`, nextIdx: i };
 }
 
-function renderBlocks(lines: string[], quoteDepth = 0): string {
+function renderBlocks(lines: string[], quoteDepth = 0, options: RenderMarkdownOptions = {}): string {
   const blocks: string[] = [];
   let i = 0;
 
@@ -240,7 +319,7 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
     const headingMatch = HEADING_RE.exec(line);
     if (headingMatch) {
       const level = Math.min(4, headingMatch[1].length);
-      blocks.push(`<h${level} class="md-h md-h${level}">${renderInline(headingMatch[2])}</h${level}>`);
+      blocks.push(`<h${level} class="md-h md-h${level}">${renderInline(headingMatch[2], options)}</h${level}>`);
       i++;
       continue;
     }
@@ -254,7 +333,7 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
       if (headerCells && alignments) {
         const colCount = headerCells.length;
         const thead = `<thead><tr>${headerCells.map((cell, col) =>
-          `<th class="align-${alignments[col]}">${renderInline(cell)}</th>`).join('')}</tr></thead>`;
+          `<th class="align-${alignments[col]}">${renderInline(cell, options)}</th>`).join('')}</tr></thead>`;
         i += 2;
         const bodyRows: string[] = [];
         while (i < lines.length && lines[i].trim() && !FENCE_OPEN_RE.test(lines[i])) {
@@ -263,7 +342,7 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
           const normalized = Array.from({ length: colCount }, (_, col) => rowCells[col] ?? '');
           bodyRows.push(
             `<tr>${normalized.map((cell, col) =>
-              `<td class="align-${alignments[col]}">${renderInline(cell)}</td>`).join('')}</tr>`,
+              `<td class="align-${alignments[col]}">${renderInline(cell, options)}</td>`).join('')}</tr>`,
           );
           i++;
         }
@@ -283,15 +362,15 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
         i++;
       }
       const inner = quoteDepth < MAX_QUOTE_DEPTH
-        ? renderBlocks(quoteLines, quoteDepth + 1)
-        : `<p>${quoteLines.map(renderInline).join('<br />')}</p>`;
+        ? renderBlocks(quoteLines, quoteDepth + 1, options)
+        : `<p>${quoteLines.map(qLine => renderInline(qLine, options)).join('<br />')}</p>`;
       blocks.push(`<blockquote class="md-quote">${inner}</blockquote>`);
       continue;
     }
 
     // 6. Ordered / Unordered Lists
     if (UL_ITEM_RE.test(line) || OL_ITEM_RE.test(line)) {
-      const { html, nextIdx } = renderList(lines, i);
+      const { html, nextIdx } = renderList(lines, i, options);
       blocks.push(html);
       i = nextIdx;
       continue;
@@ -300,7 +379,7 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
     // 7. Paragraph with preserved line breaks
     const paraLines: string[] = [];
     while (i < lines.length && !isSpecialBlockStart(lines[i], lines[i + 1])) {
-      paraLines.push(renderInline(lines[i]));
+      paraLines.push(renderInline(lines[i], options));
       i++;
     }
     if (paraLines.length) {
@@ -311,9 +390,9 @@ function renderBlocks(lines: string[], quoteDepth = 0): string {
   return blocks.join('');
 }
 
-export function renderMarkdown(source: string): string {
+export function renderMarkdown(source: string, options: RenderMarkdownOptions = {}): string {
   if (!source) return '';
   const escaped = escapeHtml(source.replace(/\r\n?/g, '\n'));
   if (!escaped.trim()) return '';
-  return renderBlocks(escaped.split('\n'));
+  return renderBlocks(escaped.split('\n'), 0, options);
 }

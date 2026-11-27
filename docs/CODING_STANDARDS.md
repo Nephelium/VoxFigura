@@ -69,4 +69,4 @@
 ### 6.2 代码质量与变更验证基线
 
 - **超大文件治理边界**：新编写的 TS/Python 模块单个功能函数保持单一职责、浅层嵌套；对现存 >1000 行的 Vue 单文件组件，新增独立逻辑优先抽入 `.ts` composable 或纯函数工具模块，不继续膨胀单文件。
-- **变更验证基线**：任何实质改动交付前，必须实跑并通过 `npm run typecheck`、`npm test`、Python `unittest`，以及三版完整构建 `npm run build`、`npm run build:hackathon`、`npm run build:friends`（三版均须各自通过 `scripts/check-edition.mjs` 版本隔离检查）。
+- **变更验证基线**：任何实质改动交付前，必须实跑并通过 `npm run typecheck`、`npm test`、Python `unittest`，以及两版完整构建 `npm run build`、`npm run build:hackathon`（均须各自通过 `scripts/check-edition.mjs` 版本隔离检查）。

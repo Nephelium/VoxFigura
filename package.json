@@ -1,28 +1,23 @@
 {
   "name": "vocalcut-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "dev:hackathon": "vite --mode hackathon",
-    "dev:friends": "vite --mode friends",
     "build": "vite build && node scripts/check-edition.mjs public",
     "build:hackathon": "vite build --mode hackathon && node scripts/check-edition.mjs hackathon",
-    "build:friends": "vite build --mode friends && node scripts/check-edition.mjs friends",
     "preview:hackathon": "vite preview --mode hackathon",
-    "preview:friends": "vite preview --mode friends",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "server": "node server/index.mjs",
     "server:hackathon": "node server/hackathon.mjs",
-    "server:friends": "node server/friends.mjs",
     "engine": "node scripts/start-engine.mjs",
     "setup:asr": "node scripts/start-engine.mjs --setup-asr",
-    "portable:public": "py -3.11 -B -X utf8 scripts/portable/build.py --edition public",
-    "portable:friends": "py -3.11 -B -X utf8 scripts/portable/build.py --edition friends"
+    "portable:public": "py -3.11 -B -X utf8 scripts/portable/build.py --edition public"
   },
   "dependencies": {
     "echarts": "^6.1.0",

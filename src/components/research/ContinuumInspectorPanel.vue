@@ -107,13 +107,50 @@ function sampleDynamicParts(samples: readonly DynamicContourSample[] | undefined
   return best.parts;
 }
 
-function buildPolylinePath(pts: readonly [number, number][] | undefined, closed = false): string {
-  if (!pts || pts.length < 2) return '';
-  let d = `M ${pts[0][0].toFixed(3)} ${pts[0][1].toFixed(3)}`;
+function cutCorners(pts: readonly [number, number][]): [number, number][] {
+  if (pts.length < 2) return [...pts];
+  const out: [number, number][] = [pts[0]];
   for (let i = 1; i < pts.length; i++) {
-    d += ` L ${pts[i][0].toFixed(3)} ${pts[i][1].toFixed(3)}`;
+    const a = pts[i - 1];
+    const b = pts[i];
+    out.push(
+      [0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]],
+      [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]],
+    );
   }
-  return closed ? `${d} Z` : d;
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+function buildLipProfiles(parts: TractPartsMap): { upper?: [number, number][]; lower?: [number, number][] } {
+  const uRaw = parts.upper_lip;
+  const lRaw = parts.lower_lip;
+  if (!uRaw || !lRaw || uRaw.length < 5 || lRaw.length < 5) {
+    return { upper: uRaw?.slice(1), lower: lRaw?.slice(1) };
+  }
+  // Match tract-renderer.js m10BuildLips: drop internal attachment point [0], clamp at lip seam, smooth twice
+  const seam = 0.5 * (uRaw[4][1] + lRaw[4][1]);
+  let upper: [number, number][] = uRaw.slice(1).map((p) => [p[0], Math.max(p[1], seam)]);
+  let lower: [number, number][] = lRaw.slice(1).map((p) => [p[0], Math.min(p[1], seam)]);
+  for (let n = 0; n < 2; n++) {
+    upper = cutCorners(upper);
+    lower = cutCorners(lower);
+  }
+  return { upper, lower };
+}
+
+function buildSmoothCurvePath(pts: readonly [number, number][] | undefined): string {
+  if (!pts || pts.length < 2) return '';
+  // Match tract-renderer.js m10Curve exactly (VTL Y-up -> SVG Y-down via -y)
+  const at = (p: readonly [number, number]) => `${p[0].toFixed(3)},${(-p[1]).toFixed(3)}`;
+  if (pts.length < 3) return `M${at(pts[0])}L${at(pts[1])}`;
+  const mid = (a: readonly [number, number], b: readonly [number, number]) =>
+    `${((a[0] + b[0]) * 0.5).toFixed(3)},${(-(a[1] + b[1]) * 0.5).toFixed(3)}`;
+  let d = `M${at(pts[0])}L${mid(pts[0], pts[1])}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    d += `Q${at(pts[i])} ${mid(pts[i], pts[i + 1])}`;
+  }
+  return `${d}L${at(pts[pts.length - 1])}`;
 }
 
 function readTokenColor(name: string, fallback: string): string {
@@ -140,14 +177,15 @@ function appendHighContrastGhosts(svg: SVGSVGElement): void {
 
   const drawParts = (parts: TractPartsMap | undefined, color: string, dash: string) => {
     if (!parts) return;
-    const tongueDorsal = parts.tongue?.slice(0, 34);
-    const segments: Array<{ pts?: readonly [number, number][]; closed: boolean; width: number }> = [
-      { pts: tongueDorsal, closed: false, width: 0.13 },
-      { pts: parts.upper_lip, closed: true, width: 0.09 },
-      { pts: parts.lower_lip, closed: true, width: 0.09 },
+    const tongueDorsal = parts.tongue?.slice(0, Math.min(34, parts.tongue.length));
+    const lips = buildLipProfiles(parts);
+    const segments: Array<{ pts?: readonly [number, number][]; width: number }> = [
+      { pts: tongueDorsal, width: 0.095 },
+      { pts: lips.upper, width: 0.07 },
+      { pts: lips.lower, width: 0.07 },
     ];
     for (const seg of segments) {
-      const d = buildPolylinePath(seg.pts, seg.closed);
+      const d = buildSmoothCurvePath(seg.pts);
       if (!d) continue;
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', d);
@@ -157,7 +195,7 @@ function appendHighContrastGhosts(svg: SVGSVGElement): void {
       path.setAttribute('stroke-linecap', 'round');
       path.setAttribute('stroke-linejoin', 'round');
       path.setAttribute('stroke-dasharray', dash);
-      path.setAttribute('opacity', '0.92');
+      path.setAttribute('opacity', '0.9');
       group.appendChild(path);
     }
   };
@@ -166,7 +204,7 @@ function appendHighContrastGhosts(svg: SVGSVGElement): void {
     drawParts(partsA, readTokenColor('--teal', 'currentColor'), '0.24 0.12');
   }
   if (props.ghostMode === 'both' || props.ghostMode === 'B') {
-    drawParts(partsB, readTokenColor('--warn', 'currentColor'), '0.14 0.10');
+    drawParts(partsB, readTokenColor('--warning', 'currentColor'), '0.14 0.10');
   }
 
   if (group.childNodes.length) {
@@ -239,7 +277,7 @@ function trackColorForBlend(blend: number): string {
     return `color-mix(in srgb, var(--accent) ${t}%, var(--teal))`;
   }
   const t = Math.round(((pctB - 50) / 50) * 100);
-  return `color-mix(in srgb, var(--warn) ${t}%, var(--accent))`;
+  return `color-mix(in srgb, var(--warning) ${t}%, var(--accent))`;
 }
 
 // Dynamic multi-trajectory vowel plot (one full time-varying F1-F2 curve per continuum cell!)
@@ -278,7 +316,8 @@ const dynamicPlot = computed(() => {
   const toX = (f2: number) => Number((padL + ((f2Hi - f2) / Math.max(1, f2Hi - f2Lo)) * plotW).toFixed(1));
   const toY = (f1: number) => Number((padT + ((f1 - f1Lo) / Math.max(1, f1Hi - f1Lo)) * plotH).toFixed(1));
 
-  const tracks = curves.map(({ cell, raw }) => {
+  const placedLabels: Array<{ x: number; y: number }> = [];
+  const rawTracks = curves.map(({ cell, raw }) => {
     const pts = raw.map((p) => ({
       u: p.u,
       f1: Math.round(p.f1_hz),
@@ -287,6 +326,20 @@ const dynamicPlot = computed(() => {
       x: toX(p.f2_hz),
       y: toY(p.f1_hz),
     }));
+    const end = pts[pts.length - 1];
+    const nearRight = end.x > w - padR - 18;
+    const labelAnchor = nearRight ? 'end' : 'start';
+    const lx = nearRight ? end.x - 6 : end.x + 6;
+    let ly = end.y + 3;
+    for (let tries = 0; tries < 6; tries++) {
+      const clash = placedLabels.find((pl) => Math.abs(pl.x - lx) < 13 && Math.abs(pl.y - ly) < 10);
+      if (!clash) break;
+      ly = ly <= clash.y ? clash.y - 10.5 : clash.y + 10.5;
+      if (ly < padT + 9) ly = clash.y + 10.5;
+      if (ly > h - padB - 3) ly = clash.y - 10.5;
+    }
+    ly = Math.max(padT + 9, Math.min(h - padB - 3, ly));
+    placedLabels.push({ x: lx, y: ly });
     const isPlaying = props.activePlaybackKey === cell.key;
     const isSelected = activeCell.value?.key === cell.key;
     return {
@@ -297,11 +350,16 @@ const dynamicPlot = computed(() => {
       pts,
       polyline: pts.map((p) => `${p.x},${p.y}`).join(' '),
       start: pts[0],
-      end: pts[pts.length - 1],
+      end,
+      lx: Number(lx.toFixed(1)),
+      ly: Number(ly.toFixed(1)),
+      labelAnchor,
       isPlaying,
       isSelected,
     };
   });
+  // Paint active/playing track last so it stays crisply on top of peer trajectories
+  const tracks = [...rawTracks].sort((a, b) => Number(a.isSelected || a.isPlaying) - Number(b.isSelected || b.isPlaying));
 
   // Compute live moving playhead marker along the currently playing cell's trajectory
   let cursor: { x: number; y: number; f1: number; f2: number; f3: number; color: string } | null = null;
@@ -310,25 +368,26 @@ const dynamicPlot = computed(() => {
     if (playingTrack && playingTrack.pts.length >= 2) {
       const u = Math.max(0, Math.min(1, props.activePlaybackProgress));
       const pts = playingTrack.pts;
-      let idx = pts.findIndex((p) => p.u >= u);
-      if (idx <= 0) {
-        const p0 = pts[0];
-        cursor = { x: p0.x, y: p0.y, f1: p0.f1, f2: p0.f2, f3: p0.f3, color: playingTrack.color };
-      } else if (idx < 0) {
-        const pLast = pts[pts.length - 1];
-        cursor = { x: pLast.x, y: pLast.y, f1: pLast.f1, f2: pLast.f2, f3: pLast.f3, color: playingTrack.color };
-      } else {
-        const a = pts[idx - 1];
-        const b = pts[idx];
-        const k = (u - a.u) / Math.max(1e-6, b.u - a.u);
-        cursor = {
-          x: Number((a.x + (b.x - a.x) * k).toFixed(1)),
-          y: Number((a.y + (b.y - a.y) * k).toFixed(1)),
-          f1: Math.round(a.f1 + (b.f1 - a.f1) * k),
-          f2: Math.round(a.f2 + (b.f2 - a.f2) * k),
-          f3: Math.round(a.f3 + (b.f3 - a.f3) * k),
-          color: playingTrack.color,
-        };
+      // Show live cursor while playback is inside (or near) this cell's voiced vowel trajectory span
+      if (u >= pts[0].u - 0.04 && u <= pts[pts.length - 1].u + 0.04) {
+        const clampedU = Math.max(pts[0].u, Math.min(pts[pts.length - 1].u, u));
+        const idx = pts.findIndex((p) => p.u >= clampedU);
+        if (idx <= 0) {
+          const p0 = pts[0];
+          cursor = { x: p0.x, y: p0.y, f1: p0.f1, f2: p0.f2, f3: p0.f3, color: playingTrack.color };
+        } else {
+          const a = pts[idx - 1];
+          const b = pts[idx];
+          const k = (clampedU - a.u) / Math.max(1e-6, b.u - a.u);
+          cursor = {
+            x: Number((a.x + (b.x - a.x) * k).toFixed(1)),
+            y: Number((a.y + (b.y - a.y) * k).toFixed(1)),
+            f1: Math.round(a.f1 + (b.f1 - a.f1) * k),
+            f2: Math.round(a.f2 + (b.f2 - a.f2) * k),
+            f3: Math.round(a.f3 + (b.f3 - a.f3) * k),
+            color: playingTrack.color,
+          };
+        }
       }
     }
   }
@@ -564,7 +623,7 @@ const topChangedParams = computed(() => {
             />
             <circle :cx="tr.start.x" :cy="tr.start.y" :r="tr.isSelected || tr.isPlaying ? 3.2 : 2.3" class="ci-dyn-start" :style="{ stroke: tr.color }" />
             <circle :cx="tr.end.x" :cy="tr.end.y" :r="tr.isSelected || tr.isPlaying ? 3.8 : 2.6" :style="{ fill: tr.color }" />
-            <text :x="tr.end.x + 5" :y="tr.end.y + 3" class="ci-plot-step" :style="{ fill: tr.color }">{{ tr.stepA }}</text>
+            <text :x="tr.lx" :y="tr.ly" :text-anchor="tr.labelAnchor" class="ci-plot-step" :style="{ fill: tr.color }">{{ tr.stepA }}</text>
             <title>第 {{ tr.stepA }} 格轨迹 · 起点 F1 {{ tr.start.f1 }}/F2 {{ tr.start.f2 }} → 终点 F1 {{ tr.end.f1 }}/F2 {{ tr.end.f2 }} Hz</title>
           </g>
 
@@ -771,7 +830,7 @@ const topChangedParams = computed(() => {
 
 .ci-swatch.ghost-b {
   border-top-style: dotted;
-  border-top-color: var(--warn);
+  border-top-color: var(--warning);
 }
 
 .ci-plot-box,

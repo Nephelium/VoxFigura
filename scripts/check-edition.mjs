@@ -12,8 +12,8 @@ const zhihuCredentialLeak = /X-Zhihu-BYOK-Secret|zhihu-keyword|ZHIHU_ACCESS_SECR
 const explorationBundle = /(?:ExploreLabView|ExploreExport|KanshanCompanion)-/;
 const contestServerLeak = /\b(?:contest-routes|repo-knowledge|zhihu-cli|zhihu-author-defaults)\.mjs\b/i;
 
-// Explicit allowlist of hackathon modules intentionally shared by the friends edition.
-const FRIENDS_ALLOWED_HACKATHON_IMPORTS = new Set([
+// Explicit allowlist of hackathon modules intentionally shared by the public edition.
+const PUBLIC_ALLOWED_HACKATHON_IMPORTS = new Set([
   './hackathon/branded-card',
   './hackathon/branded-card.ts',
 ]);
@@ -35,24 +35,20 @@ async function inspect(directory) {
     const content = textFormats.has(extname(name)) ? await readFile(file, 'utf8') : '';
     if (name.startsWith('assets/CardHeaderButton-') && name.endsWith('.js')) cardFiles.add('card-entry');
     if (content.includes('/api/explore/card-job')) cardFiles.add('card-encoding');
-    if (edition === 'public') {
-      if (
-        brand.test(name) ||
-        explorationBundle.test(name) ||
-        brand.test(content) ||
-        zhihuCredentialLeak.test(content) ||
-        contestServerLeak.test(content) ||
-        /\/api\/explore\/repo-/.test(content)
-      ) {
-        problems.push(name);
-      }
-    } else if (edition === 'hackathon') {
+    if (edition === 'hackathon') {
       if (name.startsWith('assets/kanshan/')) contestFiles.add(entry.name);
       if (content.includes('/api/zhihu/search')) contestFiles.add('explore-route');
     } else {
-      if (name.startsWith('assets/kanshan/') || explorationBundle.test(name)) problems.push(name);
+      if (
+        name.startsWith('assets/kanshan/') ||
+        explorationBundle.test(name) ||
+        brand.test(name)
+      ) {
+        problems.push(name);
+      }
       if (
         /\/api\/(?:zhihu\/|explore\/repo-)|\/assets\/kanshan\//.test(content) ||
+        /刘看山|kanshan/i.test(content) ||
         zhihuCredentialLeak.test(content) ||
         contestServerLeak.test(content)
       ) {
@@ -62,23 +58,23 @@ async function inspect(directory) {
   }
 }
 
-async function verifyFriendsSourceAllowlist() {
-  const friendsEntry = join(repoRoot, 'src', 'editions', 'friends.ts');
-  const source = await readFile(friendsEntry, 'utf8');
+async function verifyPublicSourceAllowlist() {
+  const publicEntry = join(repoRoot, 'src', 'editions', 'public.ts');
+  const source = await readFile(publicEntry, 'utf8');
   const importRe = /\b(?:import|export)\b[^'"]*?from\s+['"]([^'"]*hackathon[^'"]*)['"]/g;
   let match;
   while ((match = importRe.exec(source)) !== null) {
     const spec = match[1];
-    if (!FRIENDS_ALLOWED_HACKATHON_IMPORTS.has(spec)) {
-      problems.push(`disallowed friends hackathon import: ${spec}`);
+    if (!PUBLIC_ALLOWED_HACKATHON_IMPORTS.has(spec)) {
+      problems.push(`disallowed public hackathon import: ${spec}`);
     }
   }
 }
 
 await inspect(output);
 if (!fileCount) throw new Error('Empty build output.');
-if (edition === 'friends') {
-  await verifyFriendsSourceAllowlist();
+if (edition !== 'hackathon') {
+  await verifyPublicSourceAllowlist();
 }
 if (edition === 'hackathon') {
   for (const name of ['manifest.json', 'idle.gif', 'greet.gif', 'sway.gif', 'computer.gif', 'dribble.gif', 'sleepy.gif', 'sheet-1.jpg', 'sheet-2.jpg', 'sheet-3.jpg', 'explore-route']) {

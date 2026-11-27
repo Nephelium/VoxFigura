@@ -14,7 +14,14 @@ import {
   type LiveLocalModelInfo,
 } from '@/data/local-models';
 import { APP_BRAND_NAME, APP_REPO_SLUG, APP_REPO_URL, APP_VERSION } from '@/data/app-branding';
-import { hasUpdate, latestRelease, openUpdateModal } from '@/data/app-update';
+import {
+  hasUpdate,
+  latestRelease,
+  openUpdateModal,
+  setUpdateSourceMode,
+  updateSourceMode,
+  type UpdateSourceMode,
+} from '@/data/app-update';
 import { openStartupSplashPreview } from '@/data/startup-splash';
 import {
   activeWorkspaceBackground,
@@ -661,6 +668,15 @@ function resetSplitterGroup(items: readonly SplitterSpec[], title: string): void
 }
 
 const shortcutGroups = SHORTCUT_GROUPS;
+const updateSourceSelectModel = computed<UpdateSourceMode>({
+  get: () => updateSourceMode.value,
+  set: (mode) => setUpdateSourceMode(mode, false),
+});
+const updateSourceOptions: SelectOption[] = [
+  { value: 'auto', label: '自动检测 IP（国内服务器 / 海外 GitHub）' },
+  { value: 'server', label: '官方服务器（phonetictoolbox.com）' },
+  { value: 'github', label: 'GitHub Releases（Nephelium/VoxFigura）' },
+];
 
 const activeSpeaker = computed(
   () => store.project.value.voices[store.activeVoiceId.value]?.speaker ?? 'JD2',
@@ -1948,6 +1964,25 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                 <span>{{ APP_REPO_SLUG }}</span>
                 <IconSvg name="external-link" :size="11" />
               </a>
+            </div>
+            <div class="setting-row">
+              <div>
+                <div class="setting-k">应用更新下载源</div>
+                <div class="setting-desc">默认按网络 IP 自动分流（中国大陆优先官方服务器，海外优先 GitHub Releases），也可手动指定下载来源</div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px; flex: none">
+                <CustomSelect
+                  v-model="updateSourceSelectModel"
+                  :options="updateSourceOptions"
+                  size="sm"
+                  style="width: 268px"
+                  aria-label="应用更新下载源"
+                />
+                <button type="button" class="btn sm" @click="openUpdateModal(true)">
+                  <IconSvg name="refresh" :size="12" />
+                  <span>检查更新</span>
+                </button>
+              </div>
             </div>
             <div class="settings-grid-2">
               <div class="setting-row">

@@ -1122,6 +1122,38 @@ export const METHOD_REFERENCES: MethodReference[] = [
     "citation": "HTS Working Group, Nara Institute of Science and Technology, The UniDic Consortium. Open JTalk / NAIST-JDIC & UniDic Japanese Dictionary[DS/OL]. 2008–2017. http://open-jtalk.sourceforge.net/.",
     "reference_note": "由开源 Open JTalk NAIST-JDIC 词典只读提取 408,422 条词形、平假名读音、东京音调核与助词标记并压缩为 16 个前端分片（共 2.34 MB），用于离线日语汉字/假名声调标注与 F0 轮廓生成；源摘要与各分片校验见 public/vocal-tract/assets/ja-accent-v1/manifest.json，完整 BSD 版权声明随包附于 public/licenses/naist-jdic.txt。"
   },
+  {
+    "id": "DATA-CANTONESE-RIME",
+    "title": "Rime Cantonese 粤语拼音词库精简子集 (jyut6ping3)",
+    "modules": ["编曲", "发音字典管理", "语音合成"],
+    "importance": 73,
+    "acknowledgement_group": "software",
+    "authors": "粤语计算语言学基础建设组 (@CanCLID)；Rime Cantonese Contributors",
+    "license": "CC BY 4.0",
+    "urls": {
+      "repo": "https://github.com/rime/rime-cantonese",
+      "license": "https://creativecommons.org/licenses/by/4.0/",
+      "license_local": `${(import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/')}licenses/rime-cantonese-cc-by-4.0.txt`
+    },
+    "citation": "Cantonese Computational Linguistics Infrastructure Development Workgroup (@CanCLID). Rime Cantonese (jyut6ping3) Dictionary v2026.08.10[DS/OL]. 2026. https://github.com/rime/rime-cantonese.",
+    "reference_note": "仅取 CC BY 4.0 协议下的 jyut6ping3.chars.dict.yaml 与 jyut6ping3.words.dict.yaml（不包含 ODbL 的 jyut6ping3.maps），抽取单字频率排序粤拼与 31,952 条多音词消歧表并转为香港粤语窄式 IPA；源摘要与分片校验见 public/vocal-tract/assets/yue-jyutping-v1/manifest.json。"
+  },
+  {
+    "id": "DATA-UNICODE-UNIHAN",
+    "title": "Unicode Unihan Database (kCantonese 与简繁变体表)",
+    "modules": ["编曲", "发音字典管理", "语音合成"],
+    "importance": 71,
+    "acknowledgement_group": "software",
+    "authors": "Unicode, Inc. (The Unicode Consortium)",
+    "license": "Unicode License V3",
+    "urls": {
+      "unihan": "https://www.unicode.org/charts/unihan.html",
+      "license": "https://www.unicode.org/license.txt",
+      "license_local": `${(import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/')}licenses/unicode-license-v3.txt`
+    },
+    "citation": "The Unicode Consortium. Unicode Character Database — Unihan Database (Unihan_Readings kCantonese & Unihan_Variants)[DS/OL]. 1991–2026. https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip.",
+    "reference_note": "结合 Unihan kCantonese 与 kTraditionalVariant/kSimplifiedVariant 补全简繁体全字符集粤语读音（共 32,694 汉字，打包压缩后共 453 KB），完整 Unicode License V3 版权与许可文本随包附于 public/licenses/unicode-license-v3.txt。"
+  },
   ...additionalReferences,
   ...editionReferences,
 ].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));

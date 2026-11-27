@@ -6,6 +6,7 @@ import {
   japaneseKanjiReadingsFor,
   japaneseReadingsFor,
   jyutpingToNarrowIpa,
+  loadCantoneseDictionary,
   loadCmu,
   mappingStandards,
   narrowJapaneseMoraIpa,
@@ -146,21 +147,21 @@ describe('@vocalcut/g2p pure runtime', () => {
 
     // Stressed / word-initial onset stops + stop-sonorant clusters aspirate
     expect(reviewEn('paper')).toEqual(['ˈpʰeɪ', 'pɚ']);
-    expect(reviewEn('apart')).toEqual(['ə', 'ˈpʰɑɹt']);
+    expect(reviewEn('apart')).toEqual(['ə', 'ˈpʰɑɹ̠ʷt']);
     expect(reviewEn('potato')).toEqual(['pʰə', 'ˈtʰeɪ', 'ˌtʰoʊ']);
     expect(reviewEn('campus')).toEqual(['ˈkʰæm', 'pəs']);
     expect(reviewEn('please')).toEqual(['ˈpʰliz']);
-    expect(reviewEn('tree')).toEqual(['ˈtʰɹi']);
+    expect(reviewEn('tree')).toEqual(['ˈtʰɹ̠ʷi']);
     expect(reviewEn('clean')).toEqual(['ˈkʰlin']);
     expect(reviewEn('queen')).toEqual(['ˈkʰwin']);
-    expect(reviewEn('participate')).toEqual(['pʰɑɹ', 'ˈtʰɪ', 'sə', 'ˌpʰeɪt']);
+    expect(reviewEn('participate')).toEqual(['pʰɑɹ̠ʷ', 'ˈtʰɪ', 'sə', 'ˌpʰeɪt']);
     expect(reviewEn('cat')).toEqual(['ˈkʰæt']);
 
     // /s/-cluster, unstressed medial, coda, and non-sonorant loanword clusters stay unaspirated
     expect(reviewEn('stop')).toEqual(['ˈstɑp']);
-    expect(reviewEn('spring')).toEqual(['ˈspɹɪŋ']);
+    expect(reviewEn('spring')).toEqual(['ˈspɹ̠ʷɪŋ']);
     expect(reviewEn('sky')).toEqual(['ˈskaɪ']);
-    expect(reviewEn('extra')).toEqual(['ˈɛk', 'stɹə']);
+    expect(reviewEn('extra')).toEqual(['ˈɛk', 'stɹ̠ʷə']);
     expect(reviewEn('dispute')).toEqual(['dɪ', 'ˈspjut']);
     expect(reviewEn('happy')).toEqual(['ˈhæ', 'pi']);
     expect(arpaToIpaSyllables('T S UW0 N AA1 M IY0')).toEqual(['tsu', 'ˈnɑ', 'mi']);
@@ -280,5 +281,28 @@ describe('@vocalcut/g2p pure runtime', () => {
     // SVP English ARPAbet extras (AX, DX, Q)
     expect(arpaToIpaSyllables('DH AX')).toEqual(['ðə']);
     expect(arpaToIpaSyllables('B AH1 DX ER0')).toEqual(['ˈbʌ', 'ɾɚ']);
+  });
+
+  it('loads offline Rime Cantonese + Unicode Unihan dictionary with polyphone and Simplified Chinese support', async () => {
+    const yueLexicon = await loadCantoneseDictionary();
+    expect(yueLexicon.chars.size).toBeGreaterThan(30000);
+    expect(yueLexicon.words.size).toBeGreaterThan(25000);
+
+    const reviewYue = (text: string) =>
+      reviewText(text, 'Standard Chinese (Beijing)', new Map(), new Map(), undefined, {
+        primaryLang: 'yue',
+        yueLexicon,
+      }).map((r) => r.ipa);
+
+    // Polyphone disambiguation: 音乐/音樂 (ngok6) vs 快乐/快樂 (lok6), 银行/銀行 (hong4)
+    expect(reviewYue('音樂')).toEqual(['jɐm˥˥', 'ŋɔːk̚˨']);
+    expect(reviewYue('音乐')).toEqual(['jɐm˥˥', 'ŋɔːk̚˨']);
+    expect(reviewYue('快樂')).toEqual(['faːi˧˧', 'lɔːk̚˨']);
+    expect(reviewYue('银行')).toEqual(['ŋɐn˨˩', 'hɔːŋ˨˩']);
+
+    // Simplified characters that collide with archaic Kangxi radicals inherit living HK Cantonese readings
+    expect(reviewYue('广州')).toEqual(['kʷɔːŋ˧˥', 't͡sɐu˥˥']);
+    expect(reviewYue('工厂')).toEqual(['kʊŋ˥˥', 't͡sʰɔːŋ˧˥']);
+    expect(reviewYue('树叶')).toEqual(['syː˨˨', 'jiːp̚˨']);
   });
 });

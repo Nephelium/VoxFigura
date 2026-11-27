@@ -2,7 +2,7 @@
 import NavArtwork from '@/components/common/NavArtwork.vue';
 import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { APP_BRAND_NAME } from '@/data/app-branding';
+import { APP_BRAND_NAME, APP_REPO_SLUG, APP_REPO_URL } from '@/data/app-branding';
 import { hasUpdate, latestRelease, openUpdateModal } from '@/data/app-update';
 import { activeWorkspaceBackground, workspaceIconUrl } from '@/data/workspace-images';
 import { EditionCardHeaderAction, exploreLabel } from '@vocalcut/edition';
@@ -244,17 +244,30 @@ onBeforeUnmount(() => {
 
     <!-- Center Unified Workspace Navigation (visible when docked to top) -->
     <nav v-if="isTopNav" class="workspace-tabs" data-tour="nav-top" aria-label="工作台导航">
-      <button
-        v-for="item in WORKBENCH_NAV_ITEMS"
-        :key="item.id"
-        type="button"
-        :aria-current="isWorkbenchNavActive(store, item) ? 'page' : undefined"
-        :title="item.title"
-        @click="selectWorkbenchNav(store, item)"
+      <div class="workspace-tabs-scroll">
+        <button
+          v-for="item in WORKBENCH_NAV_ITEMS"
+          :key="item.id"
+          type="button"
+          :aria-current="isWorkbenchNavActive(store, item) ? 'page' : undefined"
+          :title="item.title"
+          @click="selectWorkbenchNav(store, item)"
+        >
+          <NavArtwork :item="item.artwork" toolbar />
+          <span>{{ item.shortLabel ?? item.label }}</span>
+        </button>
+      </div>
+      <a
+        class="nav-github-link"
+        :href="APP_REPO_URL"
+        target="_blank"
+        rel="noopener noreferrer"
+        :title="`GitHub 开源仓库 · ${APP_REPO_URL}`"
+        :aria-label="`GitHub 开源仓库 ${APP_REPO_SLUG}`"
       >
-        <NavArtwork :item="item.artwork" toolbar />
-        <span>{{ item.shortLabel ?? item.label }}</span>
-      </button>
+        <NavArtwork item="github" toolbar theme-tint />
+        <span class="nav-github-label">GitHub</span>
+      </a>
       <button
         type="button"
         class="nav-dock-toggle"
@@ -301,16 +314,313 @@ onBeforeUnmount(() => {
         <NavArtwork :item="isDarkMode ? 'moon' : 'sun'" toolbar />
       </button>
 
-      <button
-        type="button"
-        class="hdr-icon-btn"
-        aria-label="外观与字号快捷面板"
-        title="外观与字号快捷面板"
-        :aria-expanded="menu === 'appearance'"
-        @click="menu = menu === 'appearance' ? null : 'appearance'"
-      >
-        <NavArtwork item="quick-appearance" toolbar />
-      </button>
+      <div class="hdr-menu-anchor">
+        <button
+          type="button"
+          class="hdr-icon-btn"
+          aria-label="外观与字号快捷面板"
+          title="外观与字号快捷面板"
+          :aria-expanded="menu === 'appearance'"
+          @click="menu = menu === 'appearance' ? null : 'appearance'"
+        >
+          <NavArtwork item="quick-appearance" toolbar />
+        </button>
+
+        <!-- Rich Quick Appearance & Typography Menu (T-37) -->
+        <Transition name="pop-menu">
+          <div
+            v-if="menu === 'appearance'"
+            class="look-menu"
+            role="dialog"
+            aria-label="快速外观设置"
+            data-tauri-drag-region="false"
+          >
+            <div class="menu-heading">
+              <div class="menu-title-group">
+                <strong>外观与排版</strong>
+                <span class="mono look-palette-pill">{{ paletteShortName(store.paletteId.value) }}</span>
+              </div>
+              <div class="seg mode-seg">
+                <button
+                  type="button"
+                  :class="{ active: store.themeMode.value === 'light' }"
+                  @click="store.setThemeMode('light', $event)"
+                >
+                  浅色
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: store.themeMode.value === 'dark' }"
+                  @click="store.setThemeMode('dark', $event)"
+                >
+                  深色
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: store.themeMode.value === 'system' }"
+                  @click="store.setThemeMode('system', $event)"
+                >
+                  跟随系统
+                </button>
+              </div>
+            </div>
+
+            <!-- Saved Day / Night Personal Default Looks (up to 5 each) -->
+            <div class="look-saved-box">
+              <div class="look-saved-head">
+                <div class="seg look-color-seg" role="tablist" aria-label="日间与夜间个人搭配">
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="savedLookTab === 'light'"
+                    :class="{ active: savedLookTab === 'light' }"
+                    @click="savedLookTab = 'light'"
+                  >
+                    日间 {{ store.savedLooks.value.light.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="savedLookTab === 'dark'"
+                    :class="{ active: savedLookTab === 'dark' }"
+                    @click="savedLookTab = 'dark'"
+                  >
+                    夜间 {{ store.savedLooks.value.dark.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  class="btn xs look-save-now"
+                  :disabled="activeSavedLookList.length >= MAX_SAVED_LOOKS_PER_MODE"
+                  :title="`保存当前布局、字号、配色与背景为${savedLookTab === 'dark' ? '夜间' : '日间'}搭配（最多 ${MAX_SAVED_LOOKS_PER_MODE} 份）`"
+                  @click="store.saveCurrentLook(savedLookTab)"
+                >
+                  <IconSvg name="plus" :size="11" />
+                  <span>保存当前</span>
+                </button>
+              </div>
+              <div v-if="activeSavedLookList.length" class="look-saved-list">
+                <div
+                  v-for="look in activeSavedLookList"
+                  :key="look.id"
+                  class="look-saved-pill"
+                  :class="{
+                    active: store.activeSavedLookId.value === look.id,
+                    'is-default': activeSavedDefaultId === look.id,
+                  }"
+                >
+                  <button
+                    type="button"
+                    class="look-saved-apply"
+                    :title="`切换至「${look.name}」（含布局、字号、配色与背景）`"
+                    @click="store.applySavedLook(savedLookTab, look.id, $event)"
+                  >
+                    <span class="look-saved-name">{{ look.name }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="look-saved-icon"
+                    :class="{ active: activeSavedDefaultId === look.id }"
+                    :title="activeSavedDefaultId === look.id ? `当前为${savedLookTab === 'dark' ? '夜间' : '日间'}默认（点击取消）` : `设为${savedLookTab === 'dark' ? '夜间' : '日间'}默认，切换明暗时自动生效`"
+                    @click.stop="store.toggleDefaultSavedLook(savedLookTab, look.id)"
+                  >
+                    <IconSvg name="sparkles" :size="11" />
+                  </button>
+                  <button
+                    type="button"
+                    class="look-saved-icon look-saved-del"
+                    title="删除该搭配"
+                    @click.stop="store.deleteSavedLook(savedLookTab, look.id)"
+                  >
+                    <IconSvg name="close" :size="10" />
+                  </button>
+                </div>
+              </div>
+              <p v-else class="look-saved-empty">
+                暂无{{ savedLookTab === 'dark' ? '夜间' : '日间' }}个人搭配，点击「保存当前」可存最多 {{ MAX_SAVED_LOOKS_PER_MODE }} 份并设为明暗切换默认
+              </p>
+            </div>
+
+            <!-- Surface Skins (Flagships Highlighted) -->
+            <div class="look-sec-lbl">
+              <span>表面风格</span>
+              <div class="seg look-color-seg" role="group" aria-label="切换风格时的配色策略">
+                <button
+                  type="button"
+                  :class="{ active: store.styleColorMode.value === 'current' }"
+                  :aria-pressed="store.styleColorMode.value === 'current'"
+                  title="切换风格时保留当前色板、背景与材质"
+                  @click="store.setStyleColorMode('current')"
+                >
+                  当前配色
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: store.styleColorMode.value === 'original' }"
+                  :aria-pressed="store.styleColorMode.value === 'original'"
+                  title="切换风格时恢复该风格的原始配色"
+                  @click="store.setStyleColorMode('original')"
+                >
+                  原始配色
+                </button>
+              </div>
+            </div>
+            <div class="look-grid">
+              <button
+                v-for="skin in BUILTIN_SKINS"
+                :key="skin.id"
+                type="button"
+                class="look-choice"
+                :class="{ flagship: skin.id === 'neumorphism' || skin.id === 'minimal' }"
+                :data-skin="skin.id"
+                :aria-pressed="store.surfaceStyle.value === skin.id"
+                @click="store.setSurfaceStyle(skin.id)"
+              >
+                <span v-if="skin.id === 'neumorphism'" class="skin-flag">默认</span>
+                <SkinPreviewThumb
+                  :skin-id="skin.id"
+                  :color-mode="store.styleColorMode.value"
+                  :theme-mode="store.resolvedColorMode.value"
+                />
+                <span class="skin-name-row">
+                  <span>{{ skin.shortName }}</span>
+                  <IconSvg v-if="store.surfaceStyle.value === skin.id" name="check" :size="11" />
+                </span>
+              </button>
+            </div>
+
+            <!-- Full 30 Palettes Quick Picker -->
+            <div class="look-sec-lbl">
+              <span>主题色板（{{ palettes.length }} 套）</span>
+              <label class="custom-dot-lbl" title="自定义强调色">
+                <span>自定义主色</span>
+                <input
+                  type="color"
+                  :value="store.accentPickerColor.value"
+                  @input="store.setCustomAccent(($event.target as HTMLInputElement).value)"
+                />
+              </label>
+            </div>
+            <div class="quick-palette-grid" role="group" aria-label="主题色板">
+              <button
+                v-for="pal in palettes"
+                :key="pal.id"
+                type="button"
+                class="quick-pal-card"
+                :class="{ active: store.paletteId.value === pal.id }"
+                :title="paletteShortName(pal.id)"
+                :aria-pressed="store.paletteId.value === pal.id"
+                @click="store.setPalette(pal.id)"
+              >
+                <span class="quick-pal-name">{{ paletteShortName(pal.id) }}</span>
+                <span class="quick-pal-swatches" aria-hidden="true">
+                  <i :style="{ background: pal[store.resolvedColorMode.value][0] }" />
+                  <i :style="{ background: pal[store.resolvedColorMode.value][1] }" />
+                  <i :style="{ background: pal[store.resolvedColorMode.value][2] }" />
+                </span>
+              </button>
+            </div>
+
+            <!-- Backdrop Presets -->
+            <div class="look-sec-lbl">
+              <span>工作区背景</span>
+              <span v-if="isMinimalSkin" class="muted">极简仪器采用纯网格底面</span>
+              <span v-else class="muted">静谧底纹与柔雾壁纸</span>
+            </div>
+            <div class="look-bg-group">
+              <span class="look-bg-sub">静谧底纹</span>
+              <div class="quick-backdrop-pills">
+                <button
+                  v-for="b in ambientBackdrops"
+                  :key="b.id"
+                  type="button"
+                  class="btn xs"
+                  :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
+                  :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
+                  @click="store.setBackdrop(b.id)"
+                >
+                  {{ b.label }}
+                </button>
+              </div>
+              <span class="look-bg-sub">柔雾壁纸</span>
+              <div class="quick-backdrop-pills">
+                <button
+                  v-for="b in photoBackdrops"
+                  :key="b.id"
+                  type="button"
+                  class="btn xs"
+                  :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
+                  :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
+                  @click="store.setBackdrop(b.id)"
+                >
+                  {{ b.label }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Quick Font & Font Size Controls -->
+            <div class="look-font-box">
+              <div class="look-font-row">
+                <span class="look-k">中文字体</span>
+                <CustomSelect
+                  size="xs"
+                  style="flex: 1"
+                  :min-menu-width="196"
+                  :model-value="store.interfaceFonts.value.chinese"
+                  :options="chineseFontOptions"
+                  @update:model-value="(v) => store.setInterfaceFonts({ chinese: v as InterfaceFonts['chinese'] })"
+                />
+              </div>
+              <div class="look-font-row">
+                <span class="look-k">界面字号</span>
+                <input
+                  type="range"
+                  min="11"
+                  max="16"
+                  step="0.5"
+                  :value="store.interfaceFonts.value.fontSizePx"
+                  :style="{ flex: '1', '--fill': fontSizeFill }"
+                  aria-label="界面字号"
+                  @input="store.setInterfaceFonts({ fontSizePx: Number(($event.target as HTMLInputElement).value) })"
+                />
+                <span class="mono look-size-val">{{ store.interfaceFonts.value.fontSizePx }}px</span>
+              </div>
+              <div class="look-size-presets">
+                <button
+                  v-for="preset in FONT_SIZE_PRESETS"
+                  :key="preset.value"
+                  type="button"
+                  class="btn xs"
+                  :class="{ active: store.interfaceFonts.value.fontSizePx === preset.value }"
+                  @click="store.setInterfaceFonts({ fontSizePx: preset.value })"
+                >
+                  {{ preset.label }}
+                </button>
+              </div>
+            </div>
+
+            <div class="look-footer-actions">
+              <button
+                type="button"
+                class="more-looks"
+                @click="store.openOverlay('settings', 'appearance'); menu = null"
+              >
+                <span>全部外观与色彩设置</span>
+                <IconSvg name="chevron-right" :size="13" />
+              </button>
+              <button
+                type="button"
+                class="btn sm look-lab-trigger"
+                title="打开风格实验室 (Alt+Shift+S)"
+                @click="store.styleLabOpen.value = !store.styleLabOpen.value; menu = null"
+              >
+                <IconSvg name="sliders" :size="12" />
+                <span>实验室</span>
+              </button>
+            </div>
+          </div>
+        </Transition>
+      </div>
 
       <button
         type="button"
@@ -333,16 +643,62 @@ onBeforeUnmount(() => {
         <NavArtwork item="settings" toolbar />
       </button>
 
+      <div class="hdr-menu-anchor">
+        <button
+          type="button"
+          class="hdr-icon-btn hdr-help-btn"
+          aria-label="帮助与关于"
+          :title="hasUpdate && latestRelease ? `帮助与关于（发现新版本 v${latestRelease.version}）` : '帮助与关于'"
+          :aria-expanded="menu === 'help'"
+          @click="menu = menu === 'help' ? null : 'help'"
+        >
+          <NavArtwork item="help" toolbar />
+          <i v-if="hasUpdate" class="hdr-update-dot" aria-hidden="true" />
+        </button>
+
+        <!-- Help & About Menu -->
+        <Transition name="pop-menu">
+          <div
+            v-if="menu === 'help'"
+            class="help-menu"
+            role="menu"
+            data-tauri-drag-region="false"
+          >
+            <button type="button" @click="replayCurrentPageTour">
+              <NavArtwork item="getting-started" toolbar />
+              <span>重播本页操作指引</span>
+            </button>
+            <button type="button" @click="store.openOverlay('guide'); menu = null">
+              <NavArtwork item="user-guide" toolbar />
+              <span>使用说明与语法速查</span>
+            </button>
+            <button type="button" @click="store.openOverlay('model-report'); menu = null">
+              <NavArtwork item="technical-report" toolbar />
+              <span>模型训练与技术报告</span>
+            </button>
+            <button type="button" @click="menu = null; openUpdateModal(true)">
+              <NavArtwork item="check-updates" toolbar />
+              <span>检查更新</span>
+              <span v-if="hasUpdate && latestRelease" class="help-upd-pill mono">v{{ latestRelease.version }}</span>
+            </button>
+            <button type="button" @click="store.openOverlay('about'); menu = null">
+              <NavArtwork item="about" toolbar />
+              <span>关于{{ APP_BRAND_NAME }}</span>
+            </button>
+          </div>
+        </Transition>
+      </div>
+
       <button
+        v-if="hasUpdate && latestRelease"
         type="button"
-        class="hdr-icon-btn hdr-help-btn"
-        aria-label="帮助与关于"
-        :title="hasUpdate && latestRelease ? `帮助与关于（发现新版本 v${latestRelease.version}）` : '帮助与关于'"
-        :aria-expanded="menu === 'help'"
-        @click="menu = menu === 'help' ? null : 'help'"
+        class="hdr-text-btn hdr-update-trigger"
+        :title="`查看新版本 v${latestRelease.version} 更新说明与下载`"
+        :aria-label="`发现新版本 v${latestRelease.version}，点击查看更新`"
+        @click="menu = null; openUpdateModal(false)"
       >
-        <NavArtwork item="help" toolbar />
-        <i v-if="hasUpdate" class="hdr-update-dot" aria-hidden="true" />
+        <IconSvg name="sparkles" :size="13" />
+        <span class="mono">v{{ latestRelease.version }}</span>
       </button>
 
       <component :is="EditionCardHeaderAction" v-if="EditionCardHeaderAction" @click="menu = null" />
@@ -387,333 +743,6 @@ onBeforeUnmount(() => {
           <IconSvg name="window-close" :size="13" :stroke-width="1.65" />
         </button>
       </template>
-
-      <!-- Rich Quick Appearance & Typography Menu (T-37) -->
-      <Transition name="pop-menu">
-        <div
-          v-if="menu === 'appearance'"
-          class="look-menu"
-          role="dialog"
-          aria-label="快速外观设置"
-          data-tauri-drag-region="false"
-        >
-          <div class="menu-heading">
-            <div class="menu-title-group">
-              <strong>外观与排版</strong>
-              <span class="mono look-palette-pill">{{ paletteShortName(store.paletteId.value) }}</span>
-            </div>
-            <div class="seg mode-seg">
-              <button
-                type="button"
-                :class="{ active: store.themeMode.value === 'light' }"
-                @click="store.setThemeMode('light', $event)"
-              >
-                浅色
-              </button>
-              <button
-                type="button"
-                :class="{ active: store.themeMode.value === 'dark' }"
-                @click="store.setThemeMode('dark', $event)"
-              >
-                深色
-              </button>
-              <button
-                type="button"
-                :class="{ active: store.themeMode.value === 'system' }"
-                @click="store.setThemeMode('system', $event)"
-              >
-                跟随系统
-              </button>
-            </div>
-          </div>
-
-          <!-- Saved Day / Night Personal Default Looks (up to 5 each) -->
-          <div class="look-saved-box">
-            <div class="look-saved-head">
-              <div class="seg look-color-seg" role="tablist" aria-label="日间与夜间个人搭配">
-                <button
-                  type="button"
-                  role="tab"
-                  :aria-selected="savedLookTab === 'light'"
-                  :class="{ active: savedLookTab === 'light' }"
-                  @click="savedLookTab = 'light'"
-                >
-                  日间 {{ store.savedLooks.value.light.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }}
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  :aria-selected="savedLookTab === 'dark'"
-                  :class="{ active: savedLookTab === 'dark' }"
-                  @click="savedLookTab = 'dark'"
-                >
-                  夜间 {{ store.savedLooks.value.dark.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }}
-                </button>
-              </div>
-              <button
-                type="button"
-                class="btn xs look-save-now"
-                :disabled="activeSavedLookList.length >= MAX_SAVED_LOOKS_PER_MODE"
-                :title="`保存当前布局、字号、配色与背景为${savedLookTab === 'dark' ? '夜间' : '日间'}搭配（最多 ${MAX_SAVED_LOOKS_PER_MODE} 份）`"
-                @click="store.saveCurrentLook(savedLookTab)"
-              >
-                <IconSvg name="plus" :size="11" />
-                <span>保存当前</span>
-              </button>
-            </div>
-            <div v-if="activeSavedLookList.length" class="look-saved-list">
-              <div
-                v-for="look in activeSavedLookList"
-                :key="look.id"
-                class="look-saved-pill"
-                :class="{
-                  active: store.activeSavedLookId.value === look.id,
-                  'is-default': activeSavedDefaultId === look.id,
-                }"
-              >
-                <button
-                  type="button"
-                  class="look-saved-apply"
-                  :title="`切换至「${look.name}」（含布局、字号、配色与背景）`"
-                  @click="store.applySavedLook(savedLookTab, look.id, $event)"
-                >
-                  <span class="look-saved-name">{{ look.name }}</span>
-                </button>
-                <button
-                  type="button"
-                  class="look-saved-icon"
-                  :class="{ active: activeSavedDefaultId === look.id }"
-                  :title="activeSavedDefaultId === look.id ? `当前为${savedLookTab === 'dark' ? '夜间' : '日间'}默认（点击取消）` : `设为${savedLookTab === 'dark' ? '夜间' : '日间'}默认，切换明暗时自动生效`"
-                  @click.stop="store.toggleDefaultSavedLook(savedLookTab, look.id)"
-                >
-                  <IconSvg name="sparkles" :size="11" />
-                </button>
-                <button
-                  type="button"
-                  class="look-saved-icon look-saved-del"
-                  title="删除该搭配"
-                  @click.stop="store.deleteSavedLook(savedLookTab, look.id)"
-                >
-                  <IconSvg name="close" :size="10" />
-                </button>
-              </div>
-            </div>
-            <p v-else class="look-saved-empty">
-              暂无{{ savedLookTab === 'dark' ? '夜间' : '日间' }}个人搭配，点击「保存当前」可存最多 {{ MAX_SAVED_LOOKS_PER_MODE }} 份并设为明暗切换默认
-            </p>
-          </div>
-
-          <!-- Surface Skins (Flagships Highlighted) -->
-          <div class="look-sec-lbl">
-            <span>表面风格</span>
-            <div class="seg look-color-seg" role="group" aria-label="切换风格时的配色策略">
-              <button
-                type="button"
-                :class="{ active: store.styleColorMode.value === 'current' }"
-                :aria-pressed="store.styleColorMode.value === 'current'"
-                title="切换风格时保留当前色板、背景与材质"
-                @click="store.setStyleColorMode('current')"
-              >
-                当前配色
-              </button>
-              <button
-                type="button"
-                :class="{ active: store.styleColorMode.value === 'original' }"
-                :aria-pressed="store.styleColorMode.value === 'original'"
-                title="切换风格时恢复该风格的原始配色"
-                @click="store.setStyleColorMode('original')"
-              >
-                原始配色
-              </button>
-            </div>
-          </div>
-          <div class="look-grid">
-            <button
-              v-for="skin in BUILTIN_SKINS"
-              :key="skin.id"
-              type="button"
-              class="look-choice"
-              :class="{ flagship: skin.id === 'neumorphism' || skin.id === 'minimal' }"
-              :data-skin="skin.id"
-              :aria-pressed="store.surfaceStyle.value === skin.id"
-              @click="store.setSurfaceStyle(skin.id)"
-            >
-              <span v-if="skin.id === 'neumorphism'" class="skin-flag">默认</span>
-              <SkinPreviewThumb
-                :skin-id="skin.id"
-                :color-mode="store.styleColorMode.value"
-                :theme-mode="store.resolvedColorMode.value"
-              />
-              <span class="skin-name-row">
-                <span>{{ skin.shortName }}</span>
-                <IconSvg v-if="store.surfaceStyle.value === skin.id" name="check" :size="11" />
-              </span>
-            </button>
-          </div>
-
-          <!-- Full 30 Palettes Quick Picker -->
-          <div class="look-sec-lbl">
-            <span>主题色板（{{ palettes.length }} 套）</span>
-            <label class="custom-dot-lbl" title="自定义强调色">
-              <span>自定义主色</span>
-              <input
-                type="color"
-                :value="store.accentPickerColor.value"
-                @input="store.setCustomAccent(($event.target as HTMLInputElement).value)"
-              />
-            </label>
-          </div>
-          <div class="quick-palette-grid" role="group" aria-label="主题色板">
-            <button
-              v-for="pal in palettes"
-              :key="pal.id"
-              type="button"
-              class="quick-pal-card"
-              :class="{ active: store.paletteId.value === pal.id }"
-              :title="paletteShortName(pal.id)"
-              :aria-pressed="store.paletteId.value === pal.id"
-              @click="store.setPalette(pal.id)"
-            >
-              <span class="quick-pal-name">{{ paletteShortName(pal.id) }}</span>
-              <span class="quick-pal-swatches" aria-hidden="true">
-                <i :style="{ background: pal[store.resolvedColorMode.value][0] }" />
-                <i :style="{ background: pal[store.resolvedColorMode.value][1] }" />
-                <i :style="{ background: pal[store.resolvedColorMode.value][2] }" />
-              </span>
-            </button>
-          </div>
-
-          <!-- Backdrop Presets -->
-          <div class="look-sec-lbl">
-            <span>工作区背景</span>
-            <span v-if="isMinimalSkin" class="muted">极简仪器采用纯网格底面</span>
-            <span v-else class="muted">静谧底纹与柔雾壁纸</span>
-          </div>
-          <div class="look-bg-group">
-            <span class="look-bg-sub">静谧底纹</span>
-            <div class="quick-backdrop-pills">
-              <button
-                v-for="b in ambientBackdrops"
-                :key="b.id"
-                type="button"
-                class="btn xs"
-                :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
-                :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
-                @click="store.setBackdrop(b.id)"
-              >
-                {{ b.label }}
-              </button>
-            </div>
-            <span class="look-bg-sub">柔雾壁纸</span>
-            <div class="quick-backdrop-pills">
-              <button
-                v-for="b in photoBackdrops"
-                :key="b.id"
-                type="button"
-                class="btn xs"
-                :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
-                :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
-                @click="store.setBackdrop(b.id)"
-              >
-                {{ b.label }}
-              </button>
-            </div>
-          </div>
-
-          <!-- Quick Font & Font Size Controls -->
-          <div class="look-font-box">
-            <div class="look-font-row">
-              <span class="look-k">中文字体</span>
-              <CustomSelect
-                size="xs"
-                style="flex: 1"
-                :min-menu-width="196"
-                :model-value="store.interfaceFonts.value.chinese"
-                :options="chineseFontOptions"
-                @update:model-value="(v) => store.setInterfaceFonts({ chinese: v as InterfaceFonts['chinese'] })"
-              />
-            </div>
-            <div class="look-font-row">
-              <span class="look-k">界面字号</span>
-              <input
-                type="range"
-                min="11"
-                max="16"
-                step="0.5"
-                :value="store.interfaceFonts.value.fontSizePx"
-                :style="{ flex: '1', '--fill': fontSizeFill }"
-                aria-label="界面字号"
-                @input="store.setInterfaceFonts({ fontSizePx: Number(($event.target as HTMLInputElement).value) })"
-              />
-              <span class="mono look-size-val">{{ store.interfaceFonts.value.fontSizePx }}px</span>
-            </div>
-            <div class="look-size-presets">
-              <button
-                v-for="preset in FONT_SIZE_PRESETS"
-                :key="preset.value"
-                type="button"
-                class="btn xs"
-                :class="{ active: store.interfaceFonts.value.fontSizePx === preset.value }"
-                @click="store.setInterfaceFonts({ fontSizePx: preset.value })"
-              >
-                {{ preset.label }}
-              </button>
-            </div>
-          </div>
-
-          <div class="look-footer-actions">
-            <button
-              type="button"
-              class="more-looks"
-              @click="store.openOverlay('settings', 'appearance'); menu = null"
-            >
-              <span>全部外观与色彩设置</span>
-              <IconSvg name="chevron-right" :size="13" />
-            </button>
-            <button
-              type="button"
-              class="btn sm look-lab-trigger"
-              title="打开风格实验室 (Alt+Shift+S)"
-              @click="store.styleLabOpen.value = !store.styleLabOpen.value; menu = null"
-            >
-              <IconSvg name="sliders" :size="12" />
-              <span>实验室</span>
-            </button>
-          </div>
-        </div>
-      </Transition>
-
-      <!-- Help & About Menu -->
-      <Transition name="pop-menu">
-        <div
-          v-if="menu === 'help'"
-          class="help-menu"
-          role="menu"
-          data-tauri-drag-region="false"
-        >
-          <button type="button" @click="replayCurrentPageTour">
-            <NavArtwork item="getting-started" toolbar />
-            <span>重播本页操作指引</span>
-          </button>
-          <button type="button" @click="store.openOverlay('guide'); menu = null">
-            <NavArtwork item="user-guide" toolbar />
-            <span>使用说明与语法速查</span>
-          </button>
-          <button type="button" @click="store.openOverlay('model-report'); menu = null">
-            <NavArtwork item="technical-report" toolbar />
-            <span>模型训练与技术报告</span>
-          </button>
-          <button type="button" @click="menu = null; openUpdateModal(true)">
-            <NavArtwork item="check-updates" toolbar />
-            <span>检查更新</span>
-            <span v-if="hasUpdate && latestRelease" class="help-upd-pill mono">v{{ latestRelease.version }}</span>
-          </button>
-          <button type="button" @click="store.openOverlay('about'); menu = null">
-            <NavArtwork item="about" toolbar />
-            <span>关于{{ APP_BRAND_NAME }}</span>
-          </button>
-        </div>
-      </Transition>
     </div>
   </header>
 </template>
@@ -741,6 +770,25 @@ onBeforeUnmount(() => {
   max-width: 170px;
 }
 
+.workspace-tabs {
+  overflow: hidden;
+}
+
+.workspace-tabs-scroll {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workspace-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 .workspace-tabs button {
   transition:
     color var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1)),
@@ -763,6 +811,54 @@ onBeforeUnmount(() => {
 
 .workspace-tabs button[aria-current]::after {
   transform: scaleX(1);
+}
+
+.workspace-tabs .nav-github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  margin-left: 4px;
+  border-radius: var(--r-ctrl);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.916667rem;
+  white-space: nowrap;
+  flex: none;
+  opacity: 0.84;
+  transition:
+    color var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1)),
+    background-color var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1)),
+    opacity var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.workspace-tabs .nav-github-link:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--header-selected-bg);
+}
+
+.workspace-tabs .nav-github-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.workspace-tabs .nav-github-link > .nav-art {
+  width: 18px;
+  height: 18px;
+}
+
+@container desktop (max-width: 1620px) {
+  .workspace-tabs .nav-github-link {
+    width: 28px;
+    padding: 0;
+  }
+
+  .workspace-tabs .nav-github-label {
+    display: none;
+  }
 }
 
 .workspace-tabs .nav-dock-toggle {
@@ -788,7 +884,7 @@ onBeforeUnmount(() => {
   height: 18px;
 }
 
-.header-tools > .hdr-icon-btn {
+:is(.header-tools, .hdr-menu-anchor) > .hdr-icon-btn {
   width: var(--header-action-size);
   padding: 0;
   transition:
@@ -798,7 +894,7 @@ onBeforeUnmount(() => {
     transform var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
-.header-tools > .hdr-icon-btn.active {
+:is(.header-tools, .hdr-menu-anchor) > .hdr-icon-btn.active {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--selected);
@@ -810,6 +906,18 @@ onBeforeUnmount(() => {
     background-color var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1)),
     border-color var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1)),
     transform var(--dur-fast, 165ms) var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.header-tools > .hdr-update-trigger {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--ctrl-bg));
+  border: var(--border-w, 1px) solid color-mix(in srgb, var(--accent) 42%, var(--panel-border));
+  border-radius: var(--r-ctrl);
+}
+
+.header-tools > .hdr-update-trigger:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--ctrl-bg));
+  border-color: var(--accent);
 }
 
 .work-header.is-desktop-shell {

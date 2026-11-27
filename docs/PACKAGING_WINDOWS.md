@@ -1,14 +1,13 @@
 # VoxFigura Windows 打包规范
 
-适用于公开版、群友版的 Windows x64 CPU 免安装包。以后增加安装器时沿用此规范中的运行文件、版本隔离、依赖锁定和验收门槛。
+适用于开源版（已合并原群友版特性）的 Windows x64 CPU 免安装包。以后增加安装器时沿用此规范中的运行文件、版本隔离、依赖锁定和验收门槛。
 
 ## 1. 确认可交付范围
 
 | 项目 | 免安装包约定 |
 | --- | --- |
 | 目标平台 | Windows x64，普通用户，可写的解压目录和系统自带 Microsoft Edge WebView2 运行时。最低支持版本及普通 CPU 性能以干净机实测记录为准。 |
-| 公开版 | 构建模式 `public`，端口 26751。标准工作台和发音卡。 |
-| 群友版 | 构建模式 `friends`，端口 26752。标准工作台和群友版发音卡署名。 |
+| 开源版 | 构建模式 `public`（合并原群友版），端口 26751。标准工作台与保留作者署名的发音卡工坊。 |
 | 本地默认 | VTL 物理声道、八个 Batch-2 核心 ONNX 模型（含 `canonical_ipa_poses_narrow.json`）、正式 IPA/VoQS 参考库含 TextGrid、词表、工作台工程、联合反演引导对齐、发音卡和常用音视频导出。 |
 | 转写 | 支持手动填写原文、配置 DeepSeek API 在线转写，或在界面按需一键下载本地 `SenseVoice-Small`（int8 ONNX，复用包内 `onnxruntime`，按地区自动选国内镜像/ModelScope 或 Hugging Face）。Windows 发包不内置任何转写权重，也不装入 CTranslate2、faster-whisper 或 PyAV。 |
 | 联网能力 | 在线 AI/BYOK 需要网络、有效服务配置及用户自备凭据。外置 ONNX 继续走输入输出契约校验。 |
@@ -47,7 +46,7 @@ npm run typecheck
 npm test
 & 'F:/TensorTract3_Train/.venv/Scripts/python.exe' -B -m unittest discover -s engine/tests
 npm run portable:public -- --stage-only
-npm run portable:friends
+npm run portable:public
 ```
 
 - 包装脚本只读取锁定输入，下载及核验缓存位于 `build/portable-inputs/`。`--offline` 要求缓存已完整。`--stage-only` 仅组装目录（并产出 `size-report.json`）。`build_tauri_shell` 使用 `cargo build --release --locked`，仅在图标/启动页缺失或哈希不同时临时同步并在 `try/finally` 中安全还原，避免污染工作区。原历史 ASR 编译脚本（`build_asr_cpu.py`）与构建输入（`asr_build_wheels`）及旧启动器（`Launcher.cs`）已清理移除。

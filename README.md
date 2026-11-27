@@ -6,7 +6,7 @@
 
 **物理声道驱动的实验语音学、发音标注、声道重建与声乐编曲工作台**
 
-[![Version](https://img.shields.io/badge/version-v0.2.0-2563eb.svg)](https://github.com/Nephelium/VoxFigura)
+[![Version](https://img.shields.io/badge/version-v0.2.1-2563eb.svg)](https://github.com/Nephelium/VoxFigura)
 [![Live Demo](https://img.shields.io/badge/Online%20Preview-GitHub%20Pages-6366f1.svg)](https://nephelium.github.io/VoxFigura/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL--3.0--or--later-10b981.svg)](./LICENSE)
 [![Frontend](https://img.shields.io/badge/Frontend-Vue%203%20%2B%20TypeScript%20%2B%20Three.js-42b883.svg)](./package.json)
@@ -135,7 +135,7 @@ VoxFigura/
 ├── src/                         # Vue 3 + TypeScript 工作台主界面与状态管理
 │   ├── components/              # 科研模块、编曲剪辑、发音卡工坊、技术报告矢量图与图表
 │   ├── data/                    # 32D/27D 契约、模型训练报告、111 条 GB/T 7714 文献致谢
-│   ├── editions/                # 构建时版本隔离 (@vocalcut/edition: public / friends / hackathon)
+│   ├── editions/                # 构建时版本隔离 (@vocalcut/edition: public / hackathon)
 │   └── views/                   # 首页、关于、使用说明、技术报告与设置中心
 ├── packages/
 │   ├── core-ts/                 # 纯函数声学与编曲内核 (48 kHz 整数采样、qTA、VoQS、TextGrid、RFC 6902)

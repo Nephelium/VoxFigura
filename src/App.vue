@@ -47,6 +47,7 @@ const onboarding = useOnboardingStore();
 const imageColors = ref<ArtworkImageColors>();
 let autoTourTimer: number | undefined;
 let autoUpdateTimer: number | undefined;
+let periodicUpdateTimer: number | undefined;
 let startupUpdateChecked = false;
 
 const backdropColorSource = computed(() => activeWorkspaceBackground.value?.url
@@ -286,6 +287,7 @@ watch(workspaceIconUrl, (icon) => {
 onBeforeUnmount(() => {
   window.clearTimeout(autoTourTimer);
   window.clearTimeout(autoUpdateTimer);
+  window.clearInterval(periodicUpdateTimer);
   cancelUpdateCheck();
   window.removeEventListener('keydown', onGlobalKeyDown);
   window.removeEventListener('resize', updateDesktop);
@@ -299,6 +301,10 @@ watch(
     autoUpdateTimer = window.setTimeout(() => {
       void checkForAppUpdate({ silent: true });
     }, 2200);
+    window.clearInterval(periodicUpdateTimer);
+    periodicUpdateTimer = window.setInterval(() => {
+      void checkForAppUpdate({ silent: true });
+    }, 6 * 60 * 60 * 1000);
   },
   { immediate: true },
 );

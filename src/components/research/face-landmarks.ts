@@ -964,3 +964,99 @@ export class WebcamFaceTracker {
     this.inFlight = false;
   }
 }
+
+export interface LipExpressionDeformParams {
+  targetGapCm: number;
+  lipProtrudeDeltaCm: number;
+  lipSpreadScale: number;
+}
+
+/**
+ * Anatomically safe, non-intersecting visual expression deformation for the 68x29 refined
+ * VTL upper/lower lip pair. Guarantees:
+ *   1. No out-of-bounds reads regardless of lip grid dimensions.
+ *   2. Smooth falloff across both mouth corners and inner/outer lip columns so facial skin
+ *      transitions stay seamless and lips never retract backward through the incisors.
+ *   3. Strict per-rib upper/lower half-space separation (upper.y >= seamY >= lower.y),
+ *      eliminating bowtie inversions and self-intersection dark creases when closing lips.
+ */
+export function deformLipPairForExpression(
+  uVerts: Float32Array,
+  lVerts: Float32Array,
+  upperRest: Float32Array,
+  lowerRest: Float32Array,
+  ribs: number,
+  points: number,
+  aperture: number,
+  params: LipExpressionDeformParams,
+): void {
+  if (ribs < 2 || points < 2) return;
+  const expectedLen = ribs * points * 3;
+  if (
+    uVerts.length < expectedLen ||
+    lVerts.length < expectedLen ||
+    upperRest.length < expectedLen ||
+    lowerRest.length < expectedLen
+  ) {
+    return;
+  }
+
+  const safeAp = Math.max(0, Math.min(points - 1, Math.round(aperture)));
+  const targetGap = Number.isFinite(params.targetGapCm) ? Math.max(0, Math.min(3.2, params.targetGapCm)) : 0;
+  // Prevent smile retraction from pulling the lip surface backward through the labial face of the incisors.
+  const protrudeCm = Number.isFinite(params.lipProtrudeDeltaCm)
+    ? Math.max(-0.08, Math.min(0.45, params.lipProtrudeDeltaCm))
+    : 0;
+  const spreadScale = Number.isFinite(params.lipSpreadScale)
+    ? Math.max(0.82, Math.min(1.18, params.lipSpreadScale))
+    : 1.0;
+
+  // Precompute smooth column weights so mouth aperture moves cleanly while far skin border eases into poseHead.
+  const vertColW = new Float32Array(points);
+  const protColW = new Float32Array(points);
+  for (let p = 0; p < points; p++) {
+    const outerSpan = Math.max(1, points - 1 - safeAp);
+    const outerU = p > safeAp ? (p - safeAp) / outerSpan : 0;
+    const innerU = p < safeAp ? (safeAp - p) / Math.max(1, safeAp) : 0;
+    // Keep inner-to-aperture contour cohesive; gently taper outer skin margin so head-shell border stays crease-free.
+    vertColW[p] = 1 - 0.35 * outerU * outerU;
+    protColW[p] = (1 - 0.45 * outerU * outerU) * (1 - 0.25 * innerU * innerU);
+  }
+
+  for (let r = 0; r < ribs; r++) {
+    const cornerSin = Math.sin((Math.PI * r) / (ribs - 1));
+    const cornerGapProfile = Math.pow(cornerSin, 0.82);
+    const apBase = (r * points + safeAp) * 3;
+    const restUpperY = upperRest[apBase + 1];
+    const restLowerY = lowerRest[apBase + 1];
+    const curGap = Math.max(0, restUpperY - restLowerY);
+    const desiredGap = targetGap * cornerGapProfile;
+    const gapDelta = Math.max(-curGap, Math.min(2.2, desiredGap - curGap));
+
+    const upperShift = 0.36 * gapDelta;
+    const lowerShift = -0.64 * gapDelta;
+    const protShift = protrudeCm * cornerSin;
+
+    for (let p = 0; p < points; p++) {
+      const idx = (r * points + p) * 3;
+      const vw = vertColW[p];
+      const pw = protColW[p];
+
+      uVerts[idx] = upperRest[idx] + protShift * pw;
+      uVerts[idx + 1] = upperRest[idx + 1] + upperShift * vw;
+      uVerts[idx + 2] = upperRest[idx + 2] * spreadScale;
+
+      lVerts[idx] = lowerRest[idx] + protShift * pw;
+      lVerts[idx + 1] = lowerRest[idx + 1] + lowerShift * vw;
+      lVerts[idx + 2] = lowerRest[idx + 2] * spreadScale;
+    }
+
+    // Strict half-space separation along the lip aperture seam (matching geometry.mjs displayLips invariant)
+    const seamY = 0.5 * (uVerts[apBase + 1] + lVerts[apBase + 1]);
+    for (let p = 0; p < points; p++) {
+      const idx = (r * points + p) * 3;
+      if (uVerts[idx + 1] < seamY) uVerts[idx + 1] = seamY;
+      if (lVerts[idx + 1] > seamY) lVerts[idx + 1] = seamY;
+    }
+  }
+}

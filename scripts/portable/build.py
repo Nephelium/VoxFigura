@@ -317,6 +317,17 @@ def stage_application(stage: Path, web: Path, lock: dict) -> None:
         if not shard_path.is_file() or sha256(shard_path) != meta.get("sha256"):
             raise RuntimeError(f"Missing or corrupted Japanese pitch-accent shard: {shard_path}")
     stage_file(stage, "licenses/NAIST-JDIC-COPYING.txt", ROOT / "public/licenses/naist-jdic.txt")
+    yue_dir = stage / "public" / "vocal-tract" / "assets" / "yue-jyutping-v1"
+    yue_manifest = yue_dir / "manifest.json"
+    if not yue_manifest.is_file():
+        raise RuntimeError(f"Missing Cantonese Jyutping dictionary manifest: {yue_manifest}")
+    yue_manifest_data = json_file(yue_manifest)
+    for fname, meta in yue_manifest_data.get("files", {}).items():
+        shard_path = yue_dir / fname
+        if not shard_path.is_file() or sha256(shard_path) != meta.get("sha256"):
+            raise RuntimeError(f"Missing or corrupted Cantonese Jyutping shard: {shard_path}")
+    stage_file(stage, "licenses/RIME-CANTONESE-CC-BY-4.0.txt", ROOT / "public/licenses/rime-cantonese-cc-by-4.0.txt")
+    stage_file(stage, "licenses/UNICODE-LICENSE-V3.txt", ROOT / "public/licenses/unicode-license-v3.txt")
     for name in ("card-encoding", "portable", "portable-cache", "proxy", "studio-encoding"):
         stage_file(stage, f"server/{name}.mjs")
     for name in ENGINE_FILES:
@@ -592,7 +603,7 @@ def build(edition: str, offline: bool, stage_only: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--edition", choices=("public", "friends"), required=True)
+    parser.add_argument("--edition", choices=("public",), default="public")
     parser.add_argument("--offline", action="store_true", help="require all pinned downloads in the local build cache")
     parser.add_argument("--stage-only", action="store_true", help="assemble a directory without creating an EXE")
     args = parser.parse_args()

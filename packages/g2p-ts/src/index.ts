@@ -161,6 +161,12 @@ export {
 } from './romaji-readings.ts';
 
 export {
+  loadCantoneseDictionary,
+  lookupCantoneseHanRun,
+  type CantoneseLexicon,
+} from './cantonese-dictionary.ts';
+
+export {
   LYRICS_LANGUAGE_OPTIONS,
   isLyricsLanguage,
   jyutpingToNarrowIpa,

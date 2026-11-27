@@ -40,7 +40,7 @@ describe('pronunciation dictionary management', () => {
     const entry = personalEntryForReading('morning', 'en', 'nuŋ', scope)!;
     expect(writeUserLexiconEntries(id, [entry])).toBe(true);
     const book = userLexiconBooks.value.find(item => item.id === id)!;
-    expect(effectiveBuiltinRow(morning, source, book).ipa).toBe('ˈmɔɹ.nuŋ');
+    expect(effectiveBuiltinRow(morning, source, book).ipa).toBe('ˈmɔɹ̠ʷ.nuŋ');
     const oneSyllable = personalEntryForReading('morning', 'en', 'mɔɹn')!;
     expect(effectiveBuiltinRow(morning, source, { ...book, entries: { ...book.entries, [oneSyllable.key]: oneSyllable } }).ipa)
       .toBe('mɔɹn');

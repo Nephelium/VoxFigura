@@ -955,8 +955,8 @@ const rollMorePopoverRef = ref<HTMLElement | null>(null);
 const rollMoreOpen = ref(false);
 const rollToolbarWidth = ref(1200);
 let rollToolbarObserver: ResizeObserver | undefined;
-const rollCollapseExtras = computed(() => rollToolbarWidth.value < 880);
-const rollCollapseScoreTail = computed(() => rollToolbarWidth.value < 610);
+const rollCollapseExtras = computed(() => rollToolbarWidth.value < 740);
+const rollCollapseScoreTail = computed(() => rollToolbarWidth.value < 580);
 const dictTriggerRef = ref<HTMLElement | null>(null);
 const dictPopoverRef = ref<HTMLElement | null>(null);
 const dictMenuOpen = ref(false);
@@ -1782,7 +1782,7 @@ const activeSecondaryLangOptions = computed(() => [
 function setTrackPrimaryLang(value: string) {
   const next = value as LyricsLanguage;
   if (!LYRICS_LANGUAGE_OPTIONS.some((o) => o.id === next)) return;
-  editArranger('切换轨道主语种', () => {
+  editArranger('切换轨道语言一', () => {
     active.value.primaryLang = next;
     if (active.value.secondaryLang === next) active.value.secondaryLang = '';
   });
@@ -1791,7 +1791,7 @@ function setTrackPrimaryLang(value: string) {
 function setTrackSecondaryLang(value: string) {
   const next = (value === '' ? '' : value) as LyricsLanguage | '';
   if (next && next === (active.value.primaryLang ?? 'zh')) return;
-  editArranger('切换轨道次语种', () => {
+  editArranger('切换轨道语言二', () => {
     active.value.secondaryLang = next;
   });
 }
@@ -4644,23 +4644,23 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="track-lang-bar" role="group" aria-label="轨道歌词语种设置（最多选 2 种）">
-            <label class="track-lang-item" title="主语种优先用于消歧汉字（普通话/日语/粤语）及拉丁词（英语/日语罗马字/西语/粤拼）">
-              <span class="muted">主语</span>
+            <label class="track-lang-item" title="语言一优先用于消歧汉字（普通话/日语/粤语）及拉丁词（英语/日语罗马字/西语/粤拼）">
+              <span class="muted">语言一</span>
               <CustomSelect
                 :model-value="active.primaryLang ?? 'zh'"
                 :options="primaryLangShortOptions"
                 size="xs"
-                aria-label="轨道主语种"
+                aria-label="轨道语言一"
                 @update:model-value="setTrackPrimaryLang(String($event))"
               />
             </label>
-            <label class="track-lang-item" title="可选次语种（双语混唱时用于回退解析，最多 2 种语种）">
-              <span class="muted">次语</span>
+            <label class="track-lang-item" title="可选语言二（双语混唱时用于回退解析，最多 2 种语言）">
+              <span class="muted">语言二</span>
               <CustomSelect
                 :model-value="active.secondaryLang ?? ''"
                 :options="activeSecondaryLangOptions"
                 size="xs"
-                aria-label="轨道次语种"
+                aria-label="轨道语言二"
                 @update:model-value="setTrackSecondaryLang(String($event))"
               />
             </label>
@@ -4977,20 +4977,6 @@ onBeforeUnmount(() => {
                   />
                   <span>辅音抢拍</span>
                 </label>
-                <div class="damping-slider-wrap">
-                  <CompactSlider
-                    label="滑音 λ"
-                    :model-value="sliderVal('damping-' + active.id, dampingRate)"
-                    :min="PORTAMENTO_RATE.min"
-                    :max="PORTAMENTO_RATE.max"
-                    :step="1"
-                    :decimals="0"
-                    :default-value="PORTAMENTO_RATE.initial"
-                    unit="s⁻¹"
-                    @update:model-value="previewSlider('damping-' + active.id, $event)"
-                    @change="commitSlider('damping-' + active.id, $event, (v) => updateVoiceControl(active, 'dampingRate', v, '调整滑音速率'))"
-                  />
-                </div>
               </template>
 
               <button
@@ -5010,7 +4996,7 @@ onBeforeUnmount(() => {
             :class="{ active: rollMoreOpen }"
             :aria-expanded="rollMoreOpen"
             aria-haspopup="dialog"
-            title="展开网格吸附、参考轨、辅音抢拍与滑音 λ 设置"
+            title="展开网格吸附、参考轨与辅音抢拍设置"
             @click="toggleRollMore"
           >
             <IconSvg name="sliders" :size="12" />
@@ -5097,20 +5083,6 @@ onBeforeUnmount(() => {
                 />
                 <span>辅音抢拍（阻音提前、元音踩拍）</span>
               </label>
-              <div class="roll-more-slider">
-                <CompactSlider
-                  label="滑音 λ"
-                  :model-value="sliderVal('damping-' + active.id, dampingRate)"
-                  :min="PORTAMENTO_RATE.min"
-                  :max="PORTAMENTO_RATE.max"
-                  :step="1"
-                  :decimals="0"
-                  :default-value="PORTAMENTO_RATE.initial"
-                  unit="s⁻¹"
-                  @update:model-value="previewSlider('damping-' + active.id, $event)"
-                  @change="commitSlider('damping-' + active.id, $event, (v) => updateVoiceControl(active, 'dampingRate', v, '调整滑音速率'))"
-                />
-              </div>
             </template>
 
             <button
@@ -5447,6 +5419,20 @@ onBeforeUnmount(() => {
           </span>
 
           <div class="footer-zooms">
+            <div v-if="vocalRows.length" class="zoom-slider-item" title="调整音符间基频滑音过渡速率 λ（越高切音越干脆，越低滑音越柔和）">
+              <CompactSlider
+                label="滑音 λ"
+                :model-value="sliderVal('damping-' + active.id, dampingRate)"
+                :min="PORTAMENTO_RATE.min"
+                :max="PORTAMENTO_RATE.max"
+                :step="1"
+                :decimals="0"
+                :default-value="PORTAMENTO_RATE.initial"
+                unit="s⁻¹"
+                @update:model-value="previewSlider('damping-' + active.id, $event)"
+                @change="commitSlider('damping-' + active.id, $event, (v) => updateVoiceControl(active, 'dampingRate', v, '调整滑音速率'))"
+              />
+            </div>
             <div class="zoom-slider-item">
               <CompactSlider
                 label="横缩"
@@ -5618,24 +5604,24 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="singing-lang-grid" role="group" aria-label="导入歌词语种设置（最多选 2 种）">
+          <div class="singing-lang-grid" role="group" aria-label="导入歌词语言设置（最多选 2 种）">
             <label class="dict-field">
-              <span>主语种（优先识别）</span>
+              <span>语言一（优先识别）</span>
               <CustomSelect
                 :model-value="singingPrimaryLang"
                 :options="primaryLangOptions"
                 size="sm"
-                aria-label="导入主语种"
+                aria-label="导入语言一"
                 @update:model-value="singingPrimaryLang = $event as LyricsLanguage; if (singingSecondaryLang === singingPrimaryLang) singingSecondaryLang = ''"
               />
             </label>
             <label class="dict-field">
-              <span>次语种（可选，双语混唱回退）</span>
+              <span>语言二（可选，双语混唱回退）</span>
               <CustomSelect
                 :model-value="singingSecondaryLang"
                 :options="singingSecondaryLangOptions"
                 size="sm"
-                aria-label="导入次语种"
+                aria-label="导入语言二"
                 @update:model-value="singingSecondaryLang = $event as LyricsLanguage | ''"
               />
             </label>
@@ -5708,7 +5694,7 @@ onBeforeUnmount(() => {
           <div class="midi-modal-head">
             <div>
               <h3>批量填入歌词（覆盖写入）</h3>
-              <p class="muted">按语种自动分词并从指定音符起顺序覆盖填词，保留原有音高、时值与手绘基频</p>
+              <p class="muted">按语言自动分词并从指定音符起顺序覆盖填词，保留原有音高、时值与手绘基频</p>
             </div>
             <button type="button" class="btn xs icon-only" aria-label="关闭" @click="batchFillOpen = false">
               <IconSvg name="close" :size="13" />
@@ -5727,22 +5713,22 @@ onBeforeUnmount(() => {
               />
             </label>
             <label class="dict-field">
-              <span>主语种</span>
+              <span>语言一</span>
               <CustomSelect
                 :model-value="batchFillPrimaryLang"
                 :options="primaryLangShortOptions"
                 size="sm"
-                aria-label="批量填词主语种"
+                aria-label="批量填词语言一"
                 @update:model-value="batchFillPrimaryLang = $event as LyricsLanguage; if (batchFillSecondaryLang === batchFillPrimaryLang) batchFillSecondaryLang = ''"
               />
             </label>
             <label class="dict-field">
-              <span>次语种</span>
+              <span>语言二</span>
               <CustomSelect
                 :model-value="batchFillSecondaryLang"
                 :options="batchFillSecondaryLangOptions"
                 size="sm"
-                aria-label="批量填词次语种"
+                aria-label="批量填词语言二"
                 @update:model-value="batchFillSecondaryLang = $event as LyricsLanguage | ''"
               />
             </label>
@@ -6596,6 +6582,11 @@ onBeforeUnmount(() => {
 }
 .roll-shortcuts {
   font-size: var(--fs-micro);
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .track-lang-bar {
   display: flex;
@@ -6626,10 +6617,12 @@ onBeforeUnmount(() => {
 .footer-zooms {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 14px;
+  flex-shrink: 0;
 }
 .zoom-slider-item {
-  width: 122px;
+  width: clamp(152px, 12vw, 188px);
 }
 </style>
 

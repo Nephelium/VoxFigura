@@ -64,7 +64,7 @@ const ARCHITECTURE_PACKAGES = [
     pkg: 'packages/g2p-ts/',
     role: '多语文本转 IPA 与简谱解析包',
     detail:
-      '封装 10 套汉语注音标准（含 UntPhesoca 宽/严式）、CMUdict 英语词典、日语假名读音与通用键盘简谱解析，完全脱离前端框架耦合。',
+      '封装 10 套汉语注音标准（含 UntPhesoca 宽/严式）、CMUdict 英语词典、日语假名/汉字/罗马字、开源粤语词典（Rime Cantonese + Unihan）、西班牙语正字法音系规则与通用键盘简谱解析，完全脱离前端框架耦合。',
   },
   {
     pkg: 'packages/vocal-tract-view/',
@@ -121,11 +121,11 @@ const LICENSE_LAYERS = [
   { scope: '主工程与独立核心包', license: 'GPL-3.0-or-later', detail: '含前端工作台、Node 代理、core-ts / g2p-ts / vocal-tract-view 与 VTL 2.4 桥接代码' },
   { scope: '专用音标与界面字体', license: 'SIL OFL 1.1', detail: 'PTBIPAPlus、Doulos SIL、Noto Sans/Serif SC、Inter、Lora 与 JetBrains Mono 随 public/fonts/ 同原许可文本分发' },
   {
-    scope: exploreLabel ? '前端渲染与数学排版' : '前端渲染与推理组件',
-    license: 'MIT / Apache-2.0 / BSD-2-Clause',
+    scope: exploreLabel ? '前端渲染与多语词典' : '前端渲染、推理与词典',
+    license: 'MIT / Apache-2.0 / BSD / CC BY 4.0 / Unicode',
     detail: exploreLabel
-      ? 'Three.js / KaTeX / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict (BSD-2-Clause)'
-      : 'Three.js / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict (BSD-2-Clause)',
+      ? 'Three.js / KaTeX / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict / NAIST-JDIC (BSD)，Rime Cantonese (CC BY 4.0)，Unicode Unihan (Unicode-3.0)'
+      : 'Three.js / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict / NAIST-JDIC (BSD)，Rime Cantonese (CC BY 4.0)，Unicode Unihan (Unicode-3.0)',
   },
   { scope: '语料与版本素材边界', license: '原语料协议 / 版本授权', detail: editionCorpusBoundary },
 ] as const;
@@ -454,7 +454,7 @@ onBeforeUnmount(() => {
 
             <div class="editorial-card selectable" style="box-shadow: none; gap: 8px">
               <p class="muted about-p">
-                本项目依托 VocalTractLab 2.4（Peter Birkholz 等）、PhoneticToolbox v3、Ball / Esling / Dickson (2018) VoQS 体系、Prom-on et al. (2009) qTA 模型、Praat / Parselmouth、SwiftF0、DPDFNet、MediaPipe、Three.js、ECharts 与 CMUdict 等研究成果与开源项目构建。文献、来源链接与已登记的许可信息可在下方弹窗查阅并复制。
+                本项目依托 VocalTractLab 2.4（Peter Birkholz 等）、PhoneticToolbox v3、Ball / Esling / Dickson (2018) VoQS 体系、Prom-on et al. (2009) qTA 模型、Praat / Parselmouth、SwiftF0、DPDFNet、MediaPipe、Three.js、ECharts、CMUdict、Open JTalk / NAIST-JDIC、Rime Cantonese（@CanCLID）与 Unicode Unihan 等研究成果与开源项目构建。文献、来源链接与已登记的许可信息可在下方弹窗查阅并复制。
               </p>
               <div>
                 <button type="button" class="btn primary sm" @click="store.referencesModalOpen.value = true">

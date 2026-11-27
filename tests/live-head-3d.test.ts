@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   FaceAppearanceCalibrator,
@@ -6,6 +8,7 @@ import {
   applyDynamicExpressionToPosedHead,
   defaultAppearanceProfile,
   defaultFaceExpression,
+  deformLipPairForExpression,
 } from '../src/components/research/face-landmarks';
 import { FACE_BOUNDS_INDICES, FACE_MESH_EDGE_PAIRS } from '../src/components/research/face-mesh-topology';
 import { decodeTract3DFrame, decodeTract3DTopology } from '../src/components/research/m27-realtime';
@@ -178,5 +181,73 @@ describe('Live 3D head & vocal-tract joint reconstruction utilities', () => {
       tracker.stop();
       vi.unstubAllGlobals();
     }
+  });
+
+  it('keeps refined 68x29 upper/lower lips strictly separated and finite across extreme expressions', () => {
+    const ribs = 68;
+    const points = 29;
+    const aperture = 13;
+    const upperRest = new Float32Array(ribs * points * 3);
+    const lowerRest = new Float32Array(ribs * points * 3);
+
+    for (let r = 0; r < ribs; r++) {
+      const u = r / (ribs - 1);
+      const z = (u - 0.5) * 4.6;
+      const arch = Math.sin(u * Math.PI);
+      for (let p = 0; p < points; p++) {
+        const t = p / (points - 1);
+        const idx = (r * points + p) * 3;
+        const x = 5.0 + 0.9 * Math.sin(t * Math.PI * 0.75) * (0.25 + 0.75 * arch);
+        // Simulate an acoustically open lip posture (gap ~1.1 cm at midline)
+        upperRest[idx] = x;
+        upperRest[idx + 1] = -0.5 + 0.55 * arch + 0.35 * Math.max(0, t - 0.45);
+        upperRest[idx + 2] = z;
+
+        lowerRest[idx] = x;
+        lowerRest[idx + 1] = -0.5 - 0.55 * arch - 0.35 * Math.max(0, t - 0.45);
+        lowerRest[idx + 2] = z;
+      }
+    }
+
+    const scenarios = [
+      { targetGapCm: 0.0, lipProtrudeDeltaCm: -0.35, lipSpreadScale: 1.35 }, // hard close + wide smile
+      { targetGapCm: 2.4, lipProtrudeDeltaCm: 0.45, lipSpreadScale: 0.72 },  // wide open + pucker
+      { targetGapCm: 0.12, lipProtrudeDeltaCm: -0.20, lipSpreadScale: 1.15 }, // narrow slit + smile
+    ];
+
+    for (const sc of scenarios) {
+      const uVerts = upperRest.slice();
+      const lVerts = lowerRest.slice();
+      deformLipPairForExpression(uVerts, lVerts, upperRest, lowerRest, ribs, points, aperture, sc);
+
+      for (let i = 0; i < uVerts.length; i++) {
+        expect(Number.isFinite(uVerts[i])).toBe(true);
+        expect(Number.isFinite(lVerts[i])).toBe(true);
+      }
+
+      for (let r = 0; r < ribs; r++) {
+        let minUpperY = Infinity;
+        let maxLowerY = -Infinity;
+        for (let p = 0; p < points; p++) {
+          const idx = (r * points + p) * 3;
+          minUpperY = Math.min(minUpperY, uVerts[idx + 1]);
+          maxLowerY = Math.max(maxLowerY, lVerts[idx + 1]);
+          // Smile retraction must never push lips deep into the incisors
+          expect(uVerts[idx]).toBeGreaterThanOrEqual(upperRest[idx] - 0.10);
+          expect(lVerts[idx]).toBeGreaterThanOrEqual(lowerRest[idx] - 0.10);
+        }
+        // Strict upper/lower half-space separation prevents bowtie crossing
+        expect(minUpperY).toBeGreaterThanOrEqual(maxLowerY - 1e-5);
+      }
+    }
+
+    // Regression guard: LiveHead3DStage must always refine 3D lip surfaces (`surface: true`) so
+    // poseHead (RIBS=68) and FaceSurfaceTransfer (aperture=13) never read out-of-bounds on 18x9 native ribs.
+    const liveHeadSource = readFileSync(
+      resolve(__dirname, '../src/components/research/LiveHead3DStage.vue'),
+      'utf8',
+    );
+    expect(liveHeadSource).toMatch(/displayLips\s*\(\s*rawState\s*,\s*\{\s*surface:\s*true/);
+    expect(liveHeadSource).not.toMatch(/displayLips\s*\(\s*rawState\s*,\s*\{\s*surface:\s*false/);
   });
 });

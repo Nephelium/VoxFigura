@@ -23,10 +23,12 @@ import {reviewKana,type KanaLexicon} from './kana-readings.ts';
 import {reviewRomajiWord,romajiToHiragana} from './romaji-readings.ts';
 import {
   cantoneseHanziChoices,
+  jyutpingToNarrowIpa,
   reviewJyutpingToken,
   reviewSpanishWord,
   type LyricsLanguage,
 } from './multilang-g2p.ts';
+import { lookupCantoneseHanRun, type CantoneseLexicon } from './cantonese-dictionary.ts';
 import type {JapaneseKanjiSegment} from './japanese-accent.ts';
 import {tr} from './shims.ts';
 
@@ -46,12 +48,14 @@ export interface ReviewTextOptions {
   splitEnglishSyllables?: boolean;
   /** Singing mode disables Japanese Tokyo high-vowel devoicing. */
   singing?: boolean;
-  /** Track primary lyrics language for disambiguating Hanzi & Latin words. */
+  /** Track language 1 for disambiguating Hanzi & Latin words. */
   primaryLang?: LyricsLanguage;
-  /** Optional track secondary lyrics language (at most 2 languages per track). */
+  /** Optional track language 2 (at most 2 languages per track). */
   secondaryLang?: LyricsLanguage | '';
   /** Pre-segmented Japanese Kanji -> Kana map from `japaneseKanjiReadingsFor()`. */
   jaKanji?: ReadonlyMap<string, readonly JapaneseKanjiSegment[]>;
+  /** Offline Cantonese Jyutping character & polyphone lexicon from `loadCantoneseDictionary()`. */
+  yueLexicon?: CantoneseLexicon;
 }
 
 const key=(word:string)=>word.normalize('NFC').toLowerCase().replace(/’/gu,"'").trim().replace(/\s+/gu,' ');
@@ -60,10 +64,10 @@ export function needsEnglishDictionary(words:readonly string[]){
 }
 
 const arpa:Record<string,string>={
-  AA:'ɑ',AE:'æ',AH:'ʌ',AO:'ɔ',AW:'aʊ',AX:'ə',AY:'aɪ',B:'b',CH:'t͡ʃʰ',D:'d',DH:'ð',DR:'dɹ',DX:'ɾ',
+  AA:'ɑ',AE:'æ',AH:'ʌ',AO:'ɔ',AW:'aʊ',AX:'ə',AY:'aɪ',B:'b',CH:'t͡ʃʰ',D:'d',DH:'ð',DR:'dɹ̠ʷ',DX:'ɾ',
   EH:'ɛ',ER:'ɝ',EY:'eɪ',F:'f',G:'ɡ',HH:'h',IH:'ɪ',IY:'i',JH:'d͡ʒ',K:'k',
-  L:'l',M:'m',N:'n',NG:'ŋ',OW:'oʊ',OY:'ɔɪ',P:'p',Q:'ʔ',R:'ɹ',S:'s',SH:'ʃ',
-  T:'t',TH:'θ',TR:'tʰɹ',UH:'ʊ',UW:'u',V:'v',W:'w',Y:'j',Z:'z',ZH:'ʒ',
+  L:'l',M:'m',N:'n',NG:'ŋ',OW:'oʊ',OY:'ɔɪ',P:'p',Q:'ʔ',R:'ɹ̠ʷ',S:'s',SH:'ʃ',
+  T:'t',TH:'θ',TR:'tʰɹ̠ʷ',UH:'ʊ',UW:'u',V:'v',W:'w',Y:'j',Z:'z',ZH:'ʒ',
 };
 
 const VOWEL_ARPA = new Set([
@@ -73,11 +77,11 @@ const VOWEL_ARPA = new Set([
 const onsets=new Set(
   'bl br bj by dr dw fl fr fj fy gl gr gj gy kl kr kw kj ky mj my nj ny pl pr pj py sk sl sm sn sp st sw spj stj skj tr tw tj ty θr ʃr skl skr skw spl spr str fj vj hj'
     .split(' ')
-    .map(s=>s.replace(/r/g,'ɹ').replace(/y/g,'j').replace(/g/g,'ɡ'))
+    .map(s=>s.replace(/r/g,'ɹ̠ʷ').replace(/y/g,'j').replace(/g/g,'ɡ'))
 );
 
 const ASPIRATED_STOPS = new Set(['p', 't', 'k']);
-const SONORANT_ONSET_C2 = new Set(['l', 'ɹ', 'w', 'j']);
+const SONORANT_ONSET_C2 = new Set(['l', 'ɹ̠ʷ', 'w', 'j']);
 
 /**
  * Convert ARPAbet pronunciation string into an array of per-syllable IPA strings
@@ -278,7 +282,7 @@ function lookupEnglishDirectOrInflected(normWord: string, english: Lexicon): str
         const joined = syls.join('');
         // Re-syllabify with -ɪŋ via MOP: move final single consonant (except ŋ) to onset of -ɪŋ
         const last = syls.at(-1) ?? '';
-        const m = /^(.*?)([pbtdkɡfvθðszʃʒmnlɹwj])$/u.exec(last);
+        const m = /^(.*?)([pbtdkɡfvθðszʃʒmnlwj]|ɹ̠ʷ)$/u.exec(last);
         if (m && m[1] && joined.length > 1) {
           return [...syls.slice(0, -1), m[1], m[2] + 'ɪŋ'];
         }
@@ -316,7 +320,7 @@ function lookupEnglishSyllablesWithFallback(normWord: string, english: Lexicon):
       .replace(/g/gu, 'ɡ')
       .replace(/j/gu, 'd͡ʒ')
       .replace(/q/gu, 'k')
-      .replace(/r/gu, 'ɹ')
+      .replace(/r/gu, 'ɹ̠ʷ')
       .replace(/x/gu, 'ks')
       .replace(/^([ptk])(?=[iɪeɛæɑɔuʌəɝlɹw])/u, '$1ʰ');
     return basic ? [[`ˈ${basic}`]] : [];
@@ -550,6 +554,32 @@ export function reviewText(
     if(/^['’"“”‘’()（）《》「」\-—]$/u.test(word))continue;
     if(/^\p{Script=Han}$/u.test(word)){
       if (prefersYueHanzi) {
+        if (options?.yueLexicon) {
+          let j = i;
+          while (j < words.length && /^\p{Script=Han}$/u.test(words[j])) j++;
+          const hanChars = words.slice(i, j);
+          const jpPerChar = lookupCantoneseHanRun(hanChars.join(''), options.yueLexicon);
+          for (let k = 0; k < hanChars.length; k++) {
+            const ch = hanChars[k];
+            const jps = jpPerChar[k] ?? [];
+            const ipaChoices = jps
+              .map((jp) => jyutpingToNarrowIpa(jp, true))
+              .filter((v): v is string => Boolean(v));
+            if (ipaChoices.length) {
+              row(ch, ipaChoices, 'yue');
+            } else {
+              const fallbackYue = cantoneseHanziChoices(ch);
+              if (fallbackYue.length) {
+                row(ch, fallbackYue, 'yue');
+              } else {
+                const token = convertText(ch, standard)[0];
+                row(ch, token.kind === 'mapped' ? [token.value, ...variantsFor(token, standard).map((v) => v.value)] : [], 'zh');
+              }
+            }
+          }
+          i = j - 1;
+          continue;
+        }
         const yueChoices = cantoneseHanziChoices(word);
         if (yueChoices.length) {
           row(word, yueChoices, 'yue');

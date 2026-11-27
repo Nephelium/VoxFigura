@@ -16,6 +16,7 @@ import {
 import {
   japaneseKanjiReadingsFor,
   japaneseReadingsFor,
+  loadCantoneseDictionary,
   loadCmu,
   mappingStandards,
   mixedSpeechTokens,
@@ -23,6 +24,7 @@ import {
   reviewText,
   romajiToHiragana,
   startsIpa,
+  type CantoneseLexicon,
   type LyricsLanguage,
   type MappingStandard,
   type ReadingRow,
@@ -328,6 +330,15 @@ export async function analyzeLyrics(
   const english = useEnDict ? await loadCmu() : new Map<string, string[]>();
   const wantsJaKanji = (primaryLang === 'ja' || secondaryLang === 'ja') && /[一-龯々]/u.test(text);
   const jaKanji = wantsJaKanji ? await japaneseKanjiReadingsFor(text) : undefined;
+  const wantsYueDict = (primaryLang === 'yue' || secondaryLang === 'yue') && /\p{Script=Han}/u.test(text);
+  let yueLexicon: CantoneseLexicon | undefined;
+  if (wantsYueDict) {
+    try {
+      yueLexicon = await loadCantoneseDictionary();
+    } catch {
+      /* Fall back to compact built-in Cantonese character map if offline asset is unavailable. */
+    }
+  }
   const romajiHira = tokens
     .filter((t) => !startsIpa(t) && /\p{Script=Latin}/u.test(t) && !/^(br|cl)$/iu.test(t))
     .map((t) => romajiToHiragana(t))
@@ -343,6 +354,7 @@ export async function analyzeLyrics(
     primaryLang,
     secondaryLang,
     jaKanji,
+    yueLexicon,
   });
   if (dictionary && (!primaryLang || primaryLang === 'zh')) {
     const selected = tokenizeDialect(text, dictionary.lexicon);

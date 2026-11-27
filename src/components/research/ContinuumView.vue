@@ -1111,16 +1111,20 @@ function paintAllRealHdCells(): void {
 let batchAbort: AbortController | null = null;
 let cellAbort: AbortController | null = null;
 
-function activeVoicedRange(source: typeof audioA.value): [number, number] | null {
+function strongVoicedRange(source: typeof audioA.value): [number, number] | null {
   const rows = source?.m27RowsPa;
   if (!rows?.length) return null;
   const peakPr = Math.max(...rows.map((r) => r[18]));
-  if (peakPr < 30) return null;
-  const voicedIndices = rows.flatMap((r, i) => (r[18] > Math.max(40, peakPr * 0.25) && r[23] > 0.02 ? [i] : []));
-  if (voicedIndices.length < 2) return null;
-  const lo = Math.max(0, (voicedIndices[0] - 0.5) / rows.length);
-  const hi = Math.min(1, (voicedIndices[voicedIndices.length - 1] + 0.5) / rows.length);
-  return hi > lo + 0.04 ? [lo, hi] : null;
+  if (peakPr < 60) return null;
+  // Isolate strongly voiced nucleus + glide frames (exclude silence, voiceless fricatives [s], and weak coda tail)
+  const strong = rows.flatMap((r, i) => (r[18] > Math.max(120, peakPr * 0.42) && r[23] > 0.18 ? [i] : []));
+  const fallback = strong.length >= 2
+    ? strong
+    : rows.flatMap((r, i) => (r[18] > Math.max(60, peakPr * 0.3) && r[23] > 0.06 ? [i] : []));
+  if (fallback.length < 2) return null;
+  const lo = Math.max(0, (fallback[0] + 0.5) / rows.length);
+  const hi = Math.min(1, (fallback[fallback.length - 1] + 0.5) / rows.length);
+  return hi > lo + 0.03 ? [lo, hi] : null;
 }
 
 async function fetchDynamicAnalysisTracks(
@@ -1144,29 +1148,28 @@ async function fetchDynamicAnalysisTracks(
   const rowCells = dualAxis.value ? cells.filter((c) => c.stepB === targetRow) : cells;
   if (!rowCells.length) return;
 
-  // Focus vowel-space trajectory sampling on the voiced span so leading/trailing silence doesn't flatten the curve
-  const rangeA = activeVoicedRange(aSrc);
-  const rangeB = activeVoicedRange(bSrc);
-  const uStart = rangeA && rangeB ? Math.min(rangeA[0], rangeB[0]) : (rangeA?.[0] ?? rangeB?.[0] ?? 0.1);
-  const uEnd = rangeA && rangeB ? Math.max(rangeA[1], rangeB[1]) : (rangeA?.[1] ?? rangeB?.[1] ?? 0.9);
+  // Compute each endpoint's true voiced nucleus range and interpolate [uStart, uEnd] per cell!
+  const rangeA = strongVoicedRange(aSrc) ?? [0.2, 0.8];
+  const rangeB = strongVoicedRange(bSrc) ?? rangeA;
   const samplesPerCell = rowCells.length <= 5 ? 12 : rowCells.length <= 10 ? 8 : 6;
 
   interface SampleTask {
+    kind: 'track' | 'ghostA' | 'ghostB';
     cellKey: string;
-    isFirst: boolean;
-    isLast: boolean;
     u: number;
-    pose19Oral: number[];
+    pose19: number[];
     extras: TractPoseExtras;
   }
   const tasks: SampleTask[] = [];
   const selAlign = alignment.value;
 
-  rowCells.forEach((cell, cIdx) => {
+  rowCells.forEach((cell) => {
     const warp = timeWarp(selAlign, cell.blend);
+    const cellU0 = mix(rangeA[0], rangeB[0], cell.blend);
+    const cellU1 = mix(rangeA[1], rangeB[1], cell.blend);
     for (let s = 0; s < samplesPerCell; s++) {
       const frac = s / (samplesPerCell - 1);
-      const u = uStart + (uEnd - uStart) * frac;
+      const u = cellU0 + (cellU1 - cellU0) * frac;
       const [atA, atB] = warp(u);
       const left = interpolatePose(trajA, atA);
       const right = interpolatePose(trajB, atB);
@@ -1177,17 +1180,38 @@ async function fetchDynamicAnalysisTracks(
       // preventing fixed nasal-branch poles (~330/630 Hz) from masking oral vowel movement.
       pose19Oral[7] = 0;
       tasks.push({
+        kind: 'track',
         cellKey: cell.key,
-        isFirst: cIdx === 0,
-        isLast: cIdx === rowCells.length - 1,
         u,
-        pose19Oral,
+        pose19: pose19Oral,
         extras: cell.extras,
       });
     }
   });
 
-  const nextTracks: Record<string, FormantTrackPoint[]> = {};
+  // Also sample full-timeline [0..1] endpoint A & B contours for live playback ghost sync
+  const ghostSamples = 14;
+  const firstCell = rowCells[0];
+  const lastCell = rowCells[rowCells.length - 1];
+  for (let g = 0; g < ghostSamples; g++) {
+    const u = g / (ghostSamples - 1);
+    tasks.push({
+      kind: 'ghostA',
+      cellKey: firstCell.key,
+      u,
+      pose19: interpolatePose(trajA, u),
+      extras: firstCell.extras,
+    });
+    tasks.push({
+      kind: 'ghostB',
+      cellKey: lastCell.key,
+      u,
+      pose19: interpolatePose(trajB, u),
+      extras: lastCell.extras,
+    });
+  }
+
+  const rawTracks: Record<string, Array<FormantTrackPoint & { amin: number }>> = {};
   const dynA: DynamicContourSample[] = [];
   const dynB: DynamicContourSample[] = [];
   const spk = normalizeFactorySpeaker(activeSpeaker.value);
@@ -1199,7 +1223,7 @@ async function fetchDynamicAnalysisTracks(
     const res = await defaultVtlTransport.requestBatchContours<BatchContoursApiResponse>(
       {
         speaker: spk,
-        poses: chunk.map((t) => t.pose19Oral),
+        poses: chunk.map((t) => t.pose19),
         lip_width_frames: chunk.map((t) => t.extras.lip_width),
         larynx_height_frames: chunk.map((t) => t.extras.larynx_height),
         tongue_shape_frames: chunk.map((t) => t.extras.tongue_shape),
@@ -1214,18 +1238,41 @@ async function fetchDynamicAnalysisTracks(
     chunk.forEach((task, idx) => {
       const it = items[idx];
       if (!it) return;
-      (nextTracks[task.cellKey] ??= []).push({
-        u: task.u,
-        f1_hz: it.f1_hz,
-        f2_hz: it.f2_hz,
-        f3_hz: it.f3_hz,
-      });
-      if ((task.isFirst || task.isLast) && Array.isArray(it.pts)) {
+      if (task.kind === 'track') {
+        (rawTracks[task.cellKey] ??= []).push({
+          u: task.u,
+          f1_hz: it.f1_hz,
+          f2_hz: it.f2_hz,
+          f3_hz: it.f3_hz,
+          amin: it.amin_cm2,
+        });
+      } else if (Array.isArray(it.pts)) {
         const parsedParts = splitM27TractParts(it.pts, parts, partSizes);
-        if (task.isFirst) dynA.push({ u: task.u, parts: parsedParts });
-        if (task.isLast) dynB.push({ u: task.u, parts: parsedParts });
+        if (task.kind === 'ghostA') dynA.push({ u: task.u, parts: parsedParts });
+        else dynB.push({ u: task.u, parts: parsedParts });
       }
     });
+  }
+
+  // Keep the longest contiguous open-tract vowel/approximant run (amin >= 0.22 cm^2) per cell,
+  // excluding alveolar/bilabial nasal or stop closures ([n]/[m]/[d]) whose occluded F1 plunges to ~210 Hz.
+  const nextTracks: Record<string, FormantTrackPoint[]> = {};
+  for (const [key, pts] of Object.entries(rawTracks)) {
+    const runs: Array<Array<FormantTrackPoint & { amin: number }>> = [];
+    let cur: Array<FormantTrackPoint & { amin: number }> = [];
+    for (const pt of pts) {
+      const validOral = pt.amin >= 0.22 && pt.f1_hz >= 160 && pt.f1_hz <= 1300 && pt.f2_hz >= 420 && pt.f2_hz <= 3200;
+      if (validOral) {
+        cur.push(pt);
+      } else if (cur.length) {
+        runs.push(cur);
+        cur = [];
+      }
+    }
+    if (cur.length) runs.push(cur);
+    const best = runs.sort((a, b) => b.length - a.length)[0];
+    const chosen = best && best.length >= 2 ? best : pts;
+    nextTracks[key] = chosen.map(({ u, f1_hz, f2_hz, f3_hz }) => ({ u, f1_hz, f2_hz, f3_hz }));
   }
 
   if (signal.aborted || seq !== batchReqSeq) return;
@@ -2628,13 +2675,13 @@ watchEffect(() => {
   margin: 0;
   font-size: 0.875rem;
   line-height: 1.45;
-  color: var(--warn);
+  color: var(--warning);
 }
 
 .cont-missing-hint {
   font-size: 0.833333rem;
   line-height: 1.4;
-  color: var(--warn);
+  color: var(--warning);
 }
 
 .cont-shell {

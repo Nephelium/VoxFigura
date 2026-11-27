@@ -19,6 +19,10 @@ const ENGINE_ROUTE_TIMEOUTS_MS = Object.freeze({
   '/api/m27/reconstruct': 185_000,
 });
 const UPDATE_TIMEOUT_MS = 8_000;
+const REGION_DETECT_TIMEOUT_MS = 2_500;
+const REGION_TRACE_URL = 'https://www.cloudflare.com/cdn-cgi/trace';
+export const GITHUB_RELEASE_API_URL = 'https://api.github.com/repos/Nephelium/VoxFigura/releases/latest';
+export const GITHUB_RELEASES_PAGE_URL = 'https://github.com/Nephelium/VoxFigura/releases';
 export const DEFAULT_UPDATE_MANIFEST_URLS = Object.freeze([
   'https://www.phonetictoolbox.com/voxfigura/updates/latest.json',
 ]);
@@ -221,11 +225,30 @@ export function sanitizeUpdateManifest(manifest) {
     } else {
       delete info.page_url;
     }
+    if (typeof info.github_download_url === 'string' && info.github_download_url.trim()) {
+      info.github_download_url = isAllowedUpdateUrl(info.github_download_url)
+        ? new URL(info.github_download_url.trim()).toString()
+        : '';
+    } else {
+      delete info.github_download_url;
+    }
+    if (typeof info.github_page_url === 'string' && info.github_page_url.trim()) {
+      info.github_page_url = isAllowedUpdateUrl(info.github_page_url)
+        ? new URL(info.github_page_url.trim()).toString()
+        : '';
+    } else {
+      delete info.github_page_url;
+    }
     if (typeof info.sha256 === 'string' && !/^[0-9a-f]{64}$/i.test(info.sha256.trim())) {
       delete info.sha256;
     }
     if (Array.isArray(info.notes)) {
       info.notes = info.notes.filter((n) => typeof n === 'string');
+    }
+    if (typeof info.notes_markdown === 'string') {
+      info.notes_markdown = info.notes_markdown.trim().slice(0, 65_536);
+    } else {
+      delete info.notes_markdown;
     }
     cleanChannels[channelKey] = info;
   }
@@ -505,27 +528,115 @@ async function handleEngineProxy(req, res, urlObj) {
   }
 }
 
-async function handleUpdateCheck(req, res) {
-  const override = typeof process.env.VOXFIGURA_UPDATE_URL === 'string' ? process.env.VOXFIGURA_UPDATE_URL.trim() : '';
-  let urls;
-  if (override) {
-    if (!isAllowedUpdateUrl(override)) {
-      return sendJson(res, 400, { ok: false, hint: '更新清单地址须为受信任域名的 HTTPS 链接' });
+export async function detectIpRegion(signal) {
+  try {
+    const signals = signal
+      ? [signal, AbortSignal.timeout(REGION_DETECT_TIMEOUT_MS)]
+      : [AbortSignal.timeout(REGION_DETECT_TIMEOUT_MS)];
+    const resp = await fetch(REGION_TRACE_URL, {
+      method: 'GET',
+      redirect: 'error',
+      headers: { Accept: 'text/plain', 'Cache-Control': 'no-cache' },
+      signal: AbortSignal.any(signals),
+    });
+    if (!resp.ok) {
+      await resp.body?.cancel();
+      return 'unknown';
     }
-    urls = [override];
-  } else {
-    urls = DEFAULT_UPDATE_MANIFEST_URLS;
+    const text = await resp.text();
+    const match = text.match(/^loc=([A-Z]{2})$/m);
+    if (!match) return 'unknown';
+    return match[1] === 'CN' ? 'cn' : 'global';
+  } catch {
+    return 'unknown';
   }
-  const cancel = new AbortController();
-  res.once('close', () => cancel.abort());
+}
 
+export function pickGithubReleaseAssetUrl(assets, channelKey) {
+  if (!Array.isArray(assets) || assets.length === 0) return '';
+  const installers = assets.filter((item) => {
+    const name = typeof item?.name === 'string' ? item.name.trim().toLowerCase() : '';
+    const url = typeof item?.browser_download_url === 'string' ? item.browser_download_url.trim() : '';
+    if (!name || !url || !isAllowedUpdateUrl(url)) return false;
+    return /\.(exe|zip|msi|7z)$/i.test(name);
+  });
+  if (installers.length === 0) return '';
+
+  const pickByMatcher = (pred) => {
+    const found = installers.find((item) => pred(String(item.name).toLowerCase()));
+    return found ? new URL(found.browser_download_url.trim()).toString() : '';
+  };
+
+  if (channelKey === 'friends') {
+    return pickByMatcher((n) => n.includes('friends') || n.includes('群友'))
+      || pickByMatcher((n) => !n.includes('hackathon') && !n.includes('参赛'));
+  }
+  if (channelKey === 'hackathon') {
+    return pickByMatcher((n) => n.includes('hackathon') || n.includes('参赛'))
+      || pickByMatcher((n) => n.includes('public') || n.includes('公开'))
+      || pickByMatcher((n) => !n.includes('friends') && !n.includes('群友'));
+  }
+  return pickByMatcher((n) => n.includes('public') || n.includes('公开'))
+    || pickByMatcher((n) => !n.includes('friends') && !n.includes('群友') && !n.includes('hackathon') && !n.includes('参赛'));
+}
+
+export function githubReleaseToManifest(release) {
+  if (!release || typeof release !== 'object') return null;
+  const tag = typeof release.tag_name === 'string' ? release.tag_name.trim() : '';
+  const versionMatch = tag.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  if (!versionMatch) return null;
+  const version = versionMatch[1];
+  const releasedAt = typeof release.published_at === 'string' ? release.published_at.slice(0, 10) : undefined;
+  const title = typeof release.name === 'string' && release.name.trim()
+    ? release.name.trim()
+    : `VoxFigura ${tag}`;
+  const notesMarkdown = typeof release.body === 'string' ? release.body.trim().slice(0, 65_536) : '';
+  const notes = notesMarkdown
+    ? notesMarkdown
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*•#\s]+/, '').trim())
+      .filter(Boolean)
+      .slice(0, 8)
+    : undefined;
+  const pageUrl = isAllowedUpdateUrl(release.html_url)
+    ? new URL(release.html_url.trim()).toString()
+    : GITHUB_RELEASES_PAGE_URL;
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+
+  const buildChannel = (key) => {
+    const downloadUrl = pickGithubReleaseAssetUrl(assets, key);
+    return {
+      version,
+      ...(releasedAt ? { released_at: releasedAt } : {}),
+      title,
+      ...(notes && notes.length ? { notes } : {}),
+      ...(notesMarkdown ? { notes_markdown: notesMarkdown } : {}),
+      download_url: downloadUrl || pageUrl,
+      page_url: pageUrl,
+      github_download_url: downloadUrl || pageUrl,
+      github_page_url: pageUrl,
+    };
+  };
+
+  return sanitizeUpdateManifest({
+    schema: 'voxfigura/update-manifest',
+    updated_at: typeof release.published_at === 'string' ? release.published_at : undefined,
+    channels: {
+      public: buildChannel('public'),
+      friends: buildChannel('friends'),
+      hackathon: buildChannel('hackathon'),
+    },
+  });
+}
+
+async function fetchServerUpdateManifest(urls, signal) {
   for (const target of urls) {
     try {
       const upstream = await fetch(target, {
         method: 'GET',
         redirect: 'error',
         headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
-        signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(UPDATE_TIMEOUT_MS)]),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(UPDATE_TIMEOUT_MS)]),
       });
       if (!upstream.ok) {
         await upstream.body?.cancel();
@@ -534,13 +645,181 @@ async function handleUpdateCheck(req, res) {
       const rawManifest = await upstream.json();
       const manifest = sanitizeUpdateManifest(rawManifest);
       if (manifest) {
-        return sendJson(res, 200, { ok: true, source: target, manifest });
+        return { source: target, channelSource: 'server', manifest };
       }
     } catch {
-      if (res.destroyed || cancel.signal.aborted) return;
+      if (signal.aborted) return null;
     }
   }
-  return sendJson(res, 502, { ok: false, hint: '暂时无法连接更新服务器，请检查网络后重试' });
+  return null;
+}
+
+async function fetchGithubUpdateManifest(signal) {
+  try {
+    const upstream = await fetch(GITHUB_RELEASE_API_URL, {
+      method: 'GET',
+      redirect: 'follow',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'VoxFigura-Updater/1.0',
+        'Cache-Control': 'no-cache',
+      },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(UPDATE_TIMEOUT_MS)]),
+    });
+    if (!upstream.ok) {
+      await upstream.body?.cancel();
+      return null;
+    }
+    const rawRelease = await upstream.json();
+    const manifest = githubReleaseToManifest(rawRelease);
+    if (!manifest) return null;
+    return {
+      source: GITHUB_RELEASES_PAGE_URL,
+      channelSource: 'github',
+      manifest,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseManifestSemver(version) {
+  const m = String(version || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), pre: m[4] || '' };
+}
+
+function compareManifestSemver(a, b) {
+  const pa = parseManifestSemver(a);
+  const pb = parseManifestSemver(b);
+  if (!pa && !pb) return 0;
+  if (pa && !pb) return 1;
+  if (!pa && pb) return -1;
+  for (const key of ['major', 'minor', 'patch']) {
+    if (pa[key] > pb[key]) return 1;
+    if (pa[key] < pb[key]) return -1;
+  }
+  if (!pa.pre && !pb.pre) return 0;
+  if (!pa.pre && pb.pre) return 1;
+  if (pa.pre && !pb.pre) return -1;
+  return pa.pre === pb.pre ? 0 : pa.pre > pb.pre ? 1 : -1;
+}
+
+function manifestTargetVersion(manifest, edition) {
+  const ch = manifest?.channels?.[edition] || manifest?.channels?.public || Object.values(manifest?.channels || {})[0];
+  return typeof ch?.version === 'string' ? ch.version : '';
+}
+
+async function waitWithGrace(promise, graceMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), graceMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function handleUpdateCheck(req, res, url) {
+  const override = typeof process.env.VOXFIGURA_UPDATE_URL === 'string' ? process.env.VOXFIGURA_UPDATE_URL.trim() : '';
+  const cancel = new AbortController();
+  res.once('close', () => cancel.abort());
+
+  if (override) {
+    if (!isAllowedUpdateUrl(override)) {
+      return sendJson(res, 400, { ok: false, hint: '更新清单地址须为受信任域名的 HTTPS 链接' });
+    }
+    const direct = await fetchServerUpdateManifest([override], cancel.signal);
+    if (res.destroyed || cancel.signal.aborted) return;
+    if (direct) {
+      return sendJson(res, 200, {
+        ok: true,
+        source: direct.source,
+        channel_source: 'server',
+        region: 'unknown',
+        source_mode: 'server',
+        manifest: direct.manifest,
+      });
+    }
+    return sendJson(res, 502, { ok: false, hint: '暂时无法连接更新服务器，请检查网络后重试' });
+  }
+
+  const rawMode = (url?.searchParams?.get('source') || 'auto').trim().toLowerCase();
+  const sourceMode = rawMode === 'server' || rawMode === 'github' ? rawMode : 'auto';
+  const editionParam = (url?.searchParams?.get('edition') || 'public').trim().toLowerCase();
+  const edition = editionParam === 'friends' || editionParam === 'hackathon' ? editionParam : 'public';
+
+  if (sourceMode === 'server' || sourceMode === 'github') {
+    const result = sourceMode === 'github'
+      ? await fetchGithubUpdateManifest(cancel.signal)
+      : await fetchServerUpdateManifest(DEFAULT_UPDATE_MANIFEST_URLS, cancel.signal);
+    if (res.destroyed || cancel.signal.aborted) return;
+    if (result) {
+      return sendJson(res, 200, {
+        ok: true,
+        source: result.source,
+        channel_source: result.channelSource,
+        region: 'unknown',
+        source_mode: sourceMode,
+        manifest: result.manifest,
+      });
+    }
+  } else {
+    const region = await detectIpRegion(cancel.signal);
+    if (res.destroyed || cancel.signal.aborted) return;
+    const primaryKind = region === 'global' ? 'github' : 'server';
+    const serverPromise = fetchServerUpdateManifest(DEFAULT_UPDATE_MANIFEST_URLS, cancel.signal);
+    const githubPromise = fetchGithubUpdateManifest(cancel.signal);
+
+    const primaryResult = await (primaryKind === 'github' ? githubPromise : serverPromise);
+    if (res.destroyed || cancel.signal.aborted) return;
+    const secondaryResult = primaryResult
+      ? await waitWithGrace(primaryKind === 'github' ? serverPromise : githubPromise, 1200)
+      : await (primaryKind === 'github' ? serverPromise : githubPromise);
+    if (res.destroyed || cancel.signal.aborted) return;
+
+    let chosen = primaryResult || secondaryResult;
+    if (primaryResult && secondaryResult) {
+      const cmp = compareManifestSemver(
+        manifestTargetVersion(secondaryResult.manifest, edition),
+        manifestTargetVersion(primaryResult.manifest, edition),
+      );
+      if (cmp > 0) {
+        chosen = secondaryResult;
+      }
+    }
+    if (chosen) {
+      const serverItem = primaryKind === 'server' ? primaryResult : secondaryResult;
+      const githubItem = primaryKind === 'github' ? primaryResult : secondaryResult;
+      return sendJson(res, 200, {
+        ok: true,
+        source: chosen.source,
+        channel_source: chosen.channelSource,
+        region,
+        source_mode: 'auto',
+        manifest: chosen.manifest,
+        ...(serverItem || githubItem
+          ? {
+            alternates: {
+              ...(serverItem ? { server: serverItem } : {}),
+              ...(githubItem ? { github: githubItem } : {}),
+            },
+          }
+          : {}),
+      });
+    }
+  }
+
+  const hint = sourceMode === 'github'
+    ? '暂时无法连接 GitHub Releases，请检查网络或切换为官方服务器'
+    : sourceMode === 'server'
+      ? '暂时无法连接官方更新服务器，请检查网络或切换为 GitHub Releases'
+      : '暂时无法连接更新服务器与 GitHub Releases，请检查网络后重试';
+  return sendJson(res, 502, { ok: false, hint, region, source_mode: sourceMode });
 }
 
 export function createProxyServer(extension, { expectedOrigin, serveStatic, listenPort } = {}) {
@@ -559,7 +838,7 @@ export function createProxyServer(extension, { expectedOrigin, serveStatic, list
       }
       if (serveStatic && !path.startsWith('/api/')) return await serveStatic(req, res, url);
       if (path === '/api/health') return sendJson(res, 200, { ok: true, service: 'vocalcut-node-proxy', engine_url: ENGINE_BASE_URL });
-      if (req.method === 'GET' && path === '/api/app/update-check') return await handleUpdateCheck(req, res);
+      if (req.method === 'GET' && path === '/api/app/update-check') return await handleUpdateCheck(req, res, url);
       if (path.startsWith('/api/portable/cache') && await handlePortableCacheRequest(req, res, url)) return;
       if (path.startsWith('/api/studio/')) return await studioEncoding(req, res, url);
       if (req.method === 'POST' && path === '/api/ai/chat') return await handleAiChat(req, res);

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
 import { CACHE_ROOT_MARKER, DEDICATED_SUBDIR_NAME, buildPickFolderScript, isLockFileHeld, resolveSafeCacheRoot } from '../server/portable-cache.mjs';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
-import { DEFAULT_UPDATE_MANIFEST_URLS, createProxyServer, getEngineTimeoutMs, isAllowedUpdateUrl, sanitizeUpdateManifest } from '../server/proxy.mjs';
+import { DEFAULT_UPDATE_MANIFEST_URLS, createProxyServer, detectIpRegion, getEngineTimeoutMs, githubReleaseToManifest, isAllowedUpdateUrl, pickGithubReleaseAssetUrl, sanitizeUpdateManifest } from '../server/proxy.mjs';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
 import { handleContestRequest } from '../server/contest-routes.mjs';
 
@@ -518,6 +518,162 @@ describe('D-04, D-09 & D-13: HTTPS-only update manifest, route timeouts, and con
     );
     expect(sanitized?.channels.friends.page_url).toBe('');
     expect(sanitized?.channels.friends.sha256).toBe('a'.repeat(64));
+
+    const ghManifest = githubReleaseToManifest({
+      tag_name: 'v0.3.0',
+      name: 'VoxFigura 0.3.0',
+      published_at: '2026-12-01T12:00:00Z',
+      body: '- 发布 0.3.0',
+      html_url: 'https://github.com/Nephelium/VoxFigura/releases/tag/v0.3.0',
+      assets: [
+        {
+          name: 'VoxFigura-0.3.0-public.exe',
+          browser_download_url: 'https://github.com/Nephelium/VoxFigura/releases/download/v0.3.0/VoxFigura-0.3.0-public.exe',
+        },
+        {
+          name: 'VoxFigura-0.3.0-friends.exe',
+          browser_download_url: 'https://github.com/Nephelium/VoxFigura/releases/download/v0.3.0/VoxFigura-0.3.0-friends.exe',
+        },
+      ],
+    });
+    expect(ghManifest?.channels.public.version).toBe('0.3.0');
+    expect(ghManifest?.channels.public.download_url).toBe(
+      'https://github.com/Nephelium/VoxFigura/releases/download/v0.3.0/VoxFigura-0.3.0-public.exe',
+    );
+    expect(ghManifest?.channels.friends.download_url).toBe(
+      'https://github.com/Nephelium/VoxFigura/releases/download/v0.3.0/VoxFigura-0.3.0-friends.exe',
+    );
+    expect(pickGithubReleaseAssetUrl([], 'public')).toBe('');
+  });
+
+  it('routes /api/app/update-check by IP region in auto mode and honors manual source override', async () => {
+    const { port } = await startTestServer();
+    const originalFetch = globalThis.fetch;
+    try {
+      // 1) Mainland China IP -> prefers server
+      globalThis.fetch = async (input, init) => {
+        const u = String(input);
+        if (u.startsWith(`http://127.0.0.1:${port}`)) {
+          return originalFetch(input, init);
+        }
+        if (u.includes('cloudflare.com/cdn-cgi/trace')) {
+          return new Response('fl=1\nloc=CN\n', { status: 200 });
+        }
+        if (u.includes('phonetictoolbox.com/voxfigura/updates/latest.json')) {
+          return Response.json({
+            schema: 'voxfigura/update-manifest',
+            channels: {
+              public: {
+                version: '0.3.0',
+                download_url: 'https://www.phonetictoolbox.com/voxfigura/downloads/v0.3.0.exe',
+              },
+            },
+          });
+        }
+        return new Response('unexpected', { status: 404 });
+      };
+      const cnRes = await originalFetch(`http://127.0.0.1:${port}/api/app/update-check?source=auto`, {
+        headers: { Origin: 'http://127.0.0.1:5173' },
+      });
+      const cnJson = (await cnRes.json()) as {
+        ok: boolean;
+        region: string;
+        channel_source: string;
+        manifest: { channels: { public: { download_url: string } } };
+      };
+      expect(cnRes.status).toBe(200);
+      expect(cnJson.region).toBe('cn');
+      expect(cnJson.channel_source).toBe('server');
+      expect(cnJson.manifest.channels.public.download_url).toContain('phonetictoolbox.com');
+
+      // 2) Global IP -> prefers GitHub Releases
+      globalThis.fetch = async (input, init) => {
+        const u = String(input);
+        if (u.startsWith(`http://127.0.0.1:${port}`)) {
+          return originalFetch(input, init);
+        }
+        if (u.includes('cloudflare.com/cdn-cgi/trace')) {
+          return new Response('fl=2\nloc=US\n', { status: 200 });
+        }
+        if (u.includes('api.github.com/repos/Nephelium/VoxFigura/releases/latest')) {
+          return Response.json({
+            tag_name: 'v0.3.1',
+            html_url: 'https://github.com/Nephelium/VoxFigura/releases/tag/v0.3.1',
+            assets: [
+              {
+                name: 'VoxFigura-0.3.1-public.exe',
+                browser_download_url: 'https://github.com/Nephelium/VoxFigura/releases/download/v0.3.1/VoxFigura-0.3.1-public.exe',
+              },
+            ],
+          });
+        }
+        return new Response('unexpected', { status: 404 });
+      };
+      const globalRes = await originalFetch(`http://127.0.0.1:${port}/api/app/update-check?source=auto`, {
+        headers: { Origin: 'http://127.0.0.1:5173' },
+      });
+      const globalJson = (await globalRes.json()) as {
+        ok: boolean;
+        region: string;
+        channel_source: string;
+        manifest: { channels: { public: { download_url: string } } };
+      };
+      expect(globalRes.status).toBe(200);
+      expect(globalJson.region).toBe('global');
+      expect(globalJson.channel_source).toBe('github');
+      expect(globalJson.manifest.channels.public.download_url).toContain('github.com');
+
+      // 3) Both CN server (0.2.0) and GitHub (0.4.0) succeed -> picks newer 0.4.0 and preserves notes_markdown
+      globalThis.fetch = async (input, init) => {
+        const u = String(input);
+        if (u.startsWith(`http://127.0.0.1:${port}`)) {
+          return originalFetch(input, init);
+        }
+        if (u.includes('cloudflare.com/cdn-cgi/trace')) {
+          return new Response('fl=1\nloc=CN\n', { status: 200 });
+        }
+        if (u.includes('phonetictoolbox.com/voxfigura/updates/latest.json')) {
+          return Response.json({
+            schema: 'voxfigura/update-manifest',
+            channels: { public: { version: '0.2.0' } },
+          });
+        }
+        if (u.includes('api.github.com/repos/Nephelium/VoxFigura/releases/latest')) {
+          return Response.json({
+            tag_name: 'v0.4.0',
+            body: '# 0.4.0\n![图](https://github.com/Nephelium/VoxFigura/raw/main/pic.png)',
+            html_url: 'https://github.com/Nephelium/VoxFigura/releases/tag/v0.4.0',
+            assets: [
+              {
+                name: 'VoxFigura-0.4.0-public.exe',
+                browser_download_url: 'https://github.com/Nephelium/VoxFigura/releases/download/v0.4.0/VoxFigura-0.4.0-public.exe',
+              },
+            ],
+          });
+        }
+        return new Response('unexpected', { status: 404 });
+      };
+      const newerRes = await originalFetch(`http://127.0.0.1:${port}/api/app/update-check?source=auto&edition=public`, {
+        headers: { Origin: 'http://127.0.0.1:5173' },
+      });
+      const newerJson = (await newerRes.json()) as {
+        ok: boolean;
+        region: string;
+        channel_source: string;
+        manifest: { channels: { public: { version: string; notes_markdown?: string } } };
+      };
+      expect(newerRes.status).toBe(200);
+      expect(newerJson.region).toBe('cn');
+      expect(newerJson.channel_source).toBe('github');
+      expect(newerJson.manifest.channels.public.version).toBe('0.4.0');
+      expect(newerJson.manifest.channels.public.notes_markdown).toContain('![图]');
+
+      // 4) Unit check for detectIpRegion fallback on error
+      globalThis.fetch = async () => new Response('err', { status: 503 });
+      expect(await detectIpRegion()).toBe('unknown');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('grants at least 180s timeout for /api/m27/reconstruct (D-09)', () => {

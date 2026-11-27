@@ -1025,9 +1025,9 @@ onBeforeUnmount(() => {
   margin: 0;
   padding: 6px 9px;
   border-radius: var(--r-ctrl);
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
-  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
-  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, var(--panel));
+  color: var(--warning);
   font-size: 0.875rem;
   line-height: 1.45;
 }
@@ -1151,7 +1151,7 @@ onBeforeUnmount(() => {
 }
 
 .arp-status.warn {
-  color: var(--warn);
+  color: var(--warning);
 }
 
 .arp-foot {

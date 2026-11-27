@@ -143,7 +143,7 @@ export function planReading(row:ReadingRow,catalog:string[],ending:EnglishEnding
     if(end>=syllable){
       let start=end;
       while(start>syllable&&nuclei.has(start-1))start--;
-      while(end+1<units.length&&/^[mnŋlɫɹɻ]$/u.test(units[end+1].symbol))end++;
+      while(end+1<units.length&&/^(?:[mnŋlɫɹɻ]|ɹ̠ʷ)$/u.test(units[end+1].symbol))end++;
       units[start].tone=ending==='rise'?[3,5]:[3,1];
       units[start].toneEnd=end;
     }
