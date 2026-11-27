@@ -1799,6 +1799,25 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               </div>
             </div>
 
+            <!-- Offline / Static Web Notice Banner -->
+            <div v-if="!localModelsSummary.online" class="editorial-card model-offline-banner">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                <IconSvg name="download" :size="14" />
+                <strong>当前未连接本地引擎（网页展示模式）</strong>
+                <span class="muted">完整语音合成、声道反演与 8 项本地 ONNX 模型推理请下载离线桌面应用。</span>
+              </div>
+              <a
+                :href="`${APP_REPO_URL}/releases`"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn xs primary"
+                style="text-decoration: none; flex: none"
+              >
+                <IconSvg name="download" :size="11" />
+                <span>下载离线应用</span>
+              </a>
+            </div>
+
             <div class="model-spec-grid">
               <div
                 v-for="m in mergedModelCards"
@@ -1806,39 +1825,43 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                 class="editorial-card model-spec-card selectable"
                 :title="m.cardTooltip || undefined"
                 :class="{
-                  'is-loaded': m.loaded && m.available !== false,
-                  'is-unloaded': !m.loaded,
-                  'is-external': m.source === 'external',
+                  'is-loaded': localModelsSummary.online && m.loaded && m.available !== false,
+                  'is-unloaded': !localModelsSummary.online || !m.loaded,
+                  'is-external': localModelsSummary.online && m.source === 'external',
                   'is-busy': busyModelName === m.name,
                 }"
               >
                 <div class="model-spec-head">
                   <div class="model-spec-title-wrap">
                     <strong class="mono model-spec-name">{{ m.name }}</strong>
-                    <span v-if="m.source === 'external'" class="model-ext-tag mono" :title="m.externalPath || m.externalLabel || ''">外置</span>
+                    <span v-if="localModelsSummary.online && m.source === 'external'" class="model-ext-tag mono" :title="m.externalPath || m.externalLabel || ''">外置</span>
                     <span v-else-if="m.optionalSlot" class="model-ext-tag mono" :title="m.cardTooltip">已合并</span>
                   </div>
                   <span
                     class="model-status-pill mono"
                     :title="m.cardTooltip || undefined"
                     :class="
-                      busyModelName === m.name
-                        ? 'neutral'
-                        : m.available === false
-                          ? 'warn'
-                          : m.loaded
-                            ? 'ok'
-                            : 'muted-pill'
+                      !localModelsSummary.online
+                        ? 'muted-pill'
+                        : busyModelName === m.name
+                          ? 'neutral'
+                          : m.available === false
+                            ? 'warn'
+                            : m.loaded
+                              ? 'ok'
+                              : 'muted-pill'
                     "
                   >
                     {{
-                      busyModelName === m.name
-                        ? '切换中…'
-                        : m.available === false
-                          ? '缺少权重'
-                          : m.loaded
-                            ? (m.inMemory ? '已装载 · 内存中' : '已装载')
-                            : (m.optionalSlot ? '已合并 · 未装载' : '未装载')
+                      !localModelsSummary.online
+                        ? (m.optionalSlot ? '已合并 · 可选' : '需离线应用')
+                        : busyModelName === m.name
+                          ? '切换中…'
+                          : m.available === false
+                            ? '缺少权重'
+                            : m.loaded
+                              ? (m.inMemory ? '已装载 · 内存中' : '已装载')
+                              : (m.optionalSlot ? '已合并 · 未装载' : '未装载')
                     }}
                   </span>
                 </div>
@@ -1943,10 +1966,10 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               </div>
               <div class="setting-row">
                 <div>
-                  <div class="setting-k">PTBIPAPlus / Doulos SIL / Noto SC / Inter / Lora / CMUdict</div>
-                  <div class="setting-desc">随包专业国际音标字体、中英文界面与等宽数字字体及英语发音词典</div>
+                  <div class="setting-k">CMUdict / NAIST-JDIC / Rime Cantonese / Unicode Unihan &amp; 开源字体</div>
+                  <div class="setting-desc">随包专业国际音标与界面字体（PTBIPAPlus / Doulos SIL / Noto SC / Inter / Lora）及英/日/粤多语开源发音词典</div>
                 </div>
-                <span class="mono">OFL / BSD</span>
+                <span class="mono">OFL / BSD / CC BY / Unicode</span>
               </div>
               <div class="setting-row">
                 <div>
@@ -2767,6 +2790,18 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   font-size: 1.041667rem;
   font-weight: 700;
   color: var(--accent);
+}
+.model-offline-banner {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  box-shadow: none;
+  font-size: 0.9rem;
 }
 .onboarding-tour-grid {
   display: grid;

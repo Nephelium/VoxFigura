@@ -16,6 +16,7 @@ import StyleLabBackdoor from '@/components/common/StyleLabBackdoor.vue';
 import StartupSplash from '@/components/common/StartupSplash.vue';
 import SpotlightTourOverlay from '@/components/onboarding/SpotlightTourOverlay.vue';
 import UpdateModal from '@/components/modals/UpdateModal.vue';
+import WebOfflineNoticeModal from '@/components/modals/WebOfflineNoticeModal.vue';
 import ToastHost from '@/components/common/ToastHost.vue';
 import TooltipHost from '@/components/common/TooltipHost.vue';
 import { cancelUpdateCheck, checkForAppUpdate, closeUpdateModal, updateModalOpen } from '@/data/app-update';
@@ -104,8 +105,8 @@ const shellSize = computed(() => ({
   '--nav-art-hue': artworkHue.value ? `hue-rotate(${artworkHue.value}deg)` : undefined,
   ...toolbarArt.value,
 }));
-const isCompactRailGithub = computed(() => (desktop.value.height / store.pageScale.value) < 780);
-const isCompactStatusGithub = computed(() => (desktop.value.width / store.pageScale.value) < 1080);
+const isCompactRailGithub = computed(() => (desktop.value.height / store.pageScale.value) < 840);
+const isCompactStatusGithub = computed(() => viewport.value.width < 1180 || (desktop.value.width / store.pageScale.value) < 1280);
 
 const skinLabel = computed(() => getSkin(store.surfaceStyle.value)?.shortName ?? store.surfaceStyle.value);
 const paletteLabel = computed(() => paletteShortName(store.paletteId.value));
@@ -476,6 +477,7 @@ watch(
     <ModuleGuideModal />
     <SpotlightTourOverlay />
     <UpdateModal />
+    <WebOfflineNoticeModal />
     <component :is="EditionCardModal" v-if="EditionCardModal" />
     <ToastHost />
     <TooltipHost />
