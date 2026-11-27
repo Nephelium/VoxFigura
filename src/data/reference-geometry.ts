@@ -26,7 +26,8 @@ export function loadReferenceGeometry(id: string): Promise<ReferenceClip> {
   if (!/^[a-z][a-z0-9_]*$/.test(id)) return Promise.reject(new Error('无效的样本名'));
   let result = samples.get(id);
   if (!result) {
-    result = fetch(`/prewarm/${id}.json`).then(async response => {
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/');
+    result = fetch(`${base}prewarm/${id}.json`).then(async response => {
       if (!response.ok) throw new Error('预渲染轮廓不可用');
       const clip: ReferenceClip = await response.json();
       if (!clip.geometry_frames?.length) throw new Error('样本没有几何帧');

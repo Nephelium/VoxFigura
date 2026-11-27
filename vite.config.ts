@@ -28,7 +28,29 @@ function contestAssets(): Plugin {
   };
 }
 
+function resolveBaseUrl(): string {
+  const raw = (process.env.VITE_BASE_URL || '/').trim();
+  if (!raw || raw === '/') return '/';
+  const withLead = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLead.endsWith('/') ? withLead : `${withLead}/`;
+}
+
+function rewriteHtmlBase(base: string): Plugin {
+  return {
+    name: 'rewrite-html-base',
+    transformIndexHtml(html) {
+      if (base === '/') return html;
+      return html
+        .replaceAll('"/vocal-tract/vendor/three.module.js"', JSON.stringify(`${base}vocal-tract/vendor/three.module.js`))
+        .replaceAll('url("/fonts/', `url("${base}fonts/`)
+        .replaceAll('href="/app-icon.png"', `href="${base}app-icon.png"`)
+        .replaceAll('src="/app-icon.png"', `src="${base}app-icon.png"`);
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
+  const base = resolveBaseUrl();
   const contest = mode === 'hackathon';
   const friends = mode === 'friends';
   const edition = contest
@@ -38,6 +60,7 @@ export default defineConfig(({ mode }) => {
       : { name: 'public', entry: './src/editions/public.ts', devPort: 5173, previewPort: 4173, proxyPort: 3001 };
   const restrictedEditionPaths = contest ? [] : friends ? ['**/editions/hackathon/assets/**'] : ['**/editions/hackathon/**'];
   return {
+    base,
     envDir: false,
     define: {
       __APP_VERSION__: JSON.stringify(pkgVersion),
@@ -45,7 +68,7 @@ export default defineConfig(({ mode }) => {
       __APP_PORTABLE__: JSON.stringify(process.env.VOCALCUT_PORTABLE === '1'),
     },
     cacheDir: contest ? 'node_modules/.vite-contest' : `node_modules/.vite-${edition.name}`,
-    plugins: [vue(), ...(contest ? [contestAssets()] : [])],
+    plugins: [vue(), rewriteHtmlBase(base), ...(contest ? [contestAssets()] : [])],
     resolve: {
       alias: {
         '@': localPath('./src'),

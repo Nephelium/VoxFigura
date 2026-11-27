@@ -1117,7 +1117,7 @@ export const METHOD_REFERENCES: MethodReference[] = [
     "license": "BSD-3-Clause（Modified BSD License）",
     "urls": {
       "open_jtalk": "http://open-jtalk.sourceforge.net/",
-      "license_local": "/licenses/naist-jdic.txt"
+      "license_local": `${(import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/')}licenses/naist-jdic.txt`
     },
     "citation": "HTS Working Group, Nara Institute of Science and Technology, The UniDic Consortium. Open JTalk / NAIST-JDIC & UniDic Japanese Dictionary[DS/OL]. 2008–2017. http://open-jtalk.sourceforge.net/.",
     "reference_note": "由开源 Open JTalk NAIST-JDIC 词典只读提取 408,422 条词形、平假名读音、东京音调核与助词标记并压缩为 16 个前端分片（共 2.34 MB），用于离线日语汉字/假名声调标注与 F0 轮廓生成；源摘要与各分片校验见 public/vocal-tract/assets/ja-accent-v1/manifest.json，完整 BSD 版权声明随包附于 public/licenses/naist-jdic.txt。"

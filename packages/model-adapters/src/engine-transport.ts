@@ -197,9 +197,11 @@ export class VocalEngineTransport {
   private cachedMeta = new Map<string, Record<string, unknown>>();
 
   constructor(config?: TransportConfig) {
-    this.wasmManifestUrl = config?.wasmManifestUrl ?? '/vocal-wasm/manifest.json';
+    const base =
+      ((typeof import.meta !== 'undefined' ? (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL : undefined) || '/').replace(/\/?$/, '/');
+    this.wasmManifestUrl = config?.wasmManifestUrl ?? `${base}vocal-wasm/manifest.json`;
     this.apiBaseUrl = config?.apiBaseUrl ?? '/api/vtl';
-    this.prewarmBaseUrl = config?.prewarmBaseUrl ?? '/prewarm';
+    this.prewarmBaseUrl = config?.prewarmBaseUrl ?? `${base}prewarm`;
     this.speaker = config?.defaultSpeaker ?? 'JD2';
     this.computeDevice = config?.computeDevice ?? 'wasm-cpu';
     this.fetchFn = config?.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));

@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { SAMPLE_RATE_HZ } from '@vocalcut/core';
-import { readSingingProject } from '../src/components/studio/singing-project';
+import { inspectSingingProject, readSingingProject } from '../src/components/studio/singing-project';
 import { exportSvpProject, exportVsqxProject, type SingingExportTrack } from '../src/components/studio/singing-project-export';
 
-vi.mock('../src/components/studio/arranger-edit', () => ({
-  analyzeLyrics: vi.fn(async () => [{ char: '唱', ipa: 'tʂʰaŋ', score: '', choices: [], restBefore: 0 }]),
-}));
+vi.mock('../src/components/studio/arranger-edit', async () => {
+  const actual = await vi.importActual<typeof import('../src/components/studio/arranger-edit')>('../src/components/studio/arranger-edit');
+  return {
+    ...actual,
+    analyzeLyrics: vi.fn(async (word: string) => [{ id: 'mock', char: word || '唱', ipa: 'tʂʰaŋ', score: '', choices: [], restBefore: 0 }]),
+  };
+});
 
 const quarter = 705600000;
 const note = (onset: number, lyrics: string, phonemes = '') => ({
@@ -232,5 +236,83 @@ describe('歌声工程双向导出（VSQX / SVP）', () => {
   it('rejects exporting when no tracks contain notes', () => {
     expect(() => exportVsqxProject([], beatMap, meters)).toThrow('没有可导出的音符');
     expect(() => exportSvpProject([], beatMap, meters)).toThrow('没有可导出的音符');
+  });
+
+  it('strictly keeps SVP 5-language phonesets, br breath, and cl closure separate from VOCALOID VSQX', async () => {
+    const multiTracks: SingingExportTrack[] = [
+      {
+        name: '普通话 SVP',
+        primaryLang: 'zh',
+        notes: [
+          { midi: 60, startSmp: lead, endSmp: lead + beatSmp120 / 2, velocity: 72, lyric: 'br', ipa: 'h', breath: true },
+          { midi: 64, startSmp: lead + beatSmp120 / 2, endSmp: lead + beatSmp120, velocity: 90, lyric: '唱', ipa: 'tʂʰaŋ', language: 'zh' },
+        ],
+      },
+      {
+        name: '粤语 SVP',
+        primaryLang: 'yue',
+        notes: [
+          { midi: 62, startSmp: lead, endSmp: lead + beatSmp120, velocity: 88, lyric: '廣', ipa: 'kʷɔːŋ˧˥', language: 'yue' },
+          { midi: 64, startSmp: lead + beatSmp120, endSmp: lead + 2 * beatSmp120, velocity: 88, lyric: '一', ipa: 'jɐt̚˥', language: 'yue' },
+        ],
+      },
+      {
+        name: '日本語 SVP',
+        primaryLang: 'ja',
+        notes: [
+          { midi: 65, startSmp: lead, endSmp: lead + beatSmp120, velocity: 86, lyric: 'き', ipa: 'kʲi', language: 'ja' },
+          { midi: 65, startSmp: lead + beatSmp120, endSmp: lead + beatSmp120 * 1.5, velocity: 86, lyric: 'cl', ipa: 't̚', clClosure: true },
+          { midi: 67, startSmp: lead + beatSmp120 * 1.5, endSmp: lead + beatSmp120 * 2.5, velocity: 86, lyric: 'て', ipa: 'te̞', language: 'ja' },
+        ],
+      },
+      {
+        name: 'Español SVP',
+        primaryLang: 'es',
+        notes: [
+          { midi: 60, startSmp: lead, endSmp: lead + beatSmp120, velocity: 86, lyric: 'to', ipa: 'ˈto', language: 'es' },
+          { midi: 62, startSmp: lead + beatSmp120, endSmp: lead + 2 * beatSmp120, velocity: 86, lyric: 'do', ipa: 'ð̞o', language: 'es' },
+        ],
+      },
+    ];
+
+    const svpJson = exportSvpProject(multiTracks, beatMap, meters, '五语种工程');
+    const parsed = JSON.parse(svpJson);
+    // SVP Mandarin uses `ts\`h` (no `_h`), strictly distinct from VSQX `ts\`_h`
+    expect(parsed.tracks[0].mainRef.database).toMatchObject({ language: 'mandarin', phoneset: 'xsampa' });
+    expect(parsed.tracks[0].mainGroup.notes[0]).toMatchObject({ lyrics: 'br', phonemes: 'br' });
+    expect(parsed.tracks[0].mainGroup.notes[1].phonemes).toBe('ts`h a N');
+
+    // SVP Cantonese uses exact `:t_}` unreleased stop
+    expect(parsed.tracks[1].mainRef.database).toMatchObject({ language: 'cantonese', phoneset: 'xsampa' });
+    expect(parsed.tracks[1].mainGroup.notes[1].phonemes).toBe('j 6 :t_}');
+
+    // SVP Japanese uses `romaji` phoneset + `cl`
+    expect(parsed.tracks[2].mainRef.database).toMatchObject({ language: 'japanese', phoneset: 'romaji' });
+    expect(parsed.tracks[2].mainGroup.notes[1]).toMatchObject({ lyrics: 'cl', phonemes: 'cl' });
+
+    // SVP Spanish uses `spanish` + `xsampa` (`D` for `ð̞`)
+    expect(parsed.tracks[3].mainRef.database).toMatchObject({ language: 'spanish', phoneset: 'xsampa' });
+    expect(parsed.tracks[3].mainGroup.notes[1].phonemes).toBe('D o');
+
+    // Inspect summary detects format & languages without mutating anything
+    const svpFile = new File([svpJson], 'five-langs.svp');
+    const summary = await inspectSingingProject(svpFile);
+    expect(summary.format).toBe('svp');
+    expect(summary.tracks.map((t) => t.detectedLang)).toEqual(['zh', 'yue', 'ja', 'es']);
+    expect(summary.tracks[0].hasBreath).toBe(true);
+
+    // Full re-import round-trips all 5 languages, breath flag, and contextual `cl` -> `t̚`
+    const reimported = await readSingingProject(svpFile, 'standard', 'JD2', lead);
+    expect(reimported.parts[0].rows[0]).toMatchObject({ char: 'br', ipa: 'h', breath: true });
+    expect(reimported.parts[0].rows[1].ipa).toBe('tʂʰaŋ');
+    expect(reimported.parts[1].rows.map((r) => r.ipa)).toEqual(['kʷɔːŋ', 'jɐt̚']);
+    expect(reimported.parts[2].rows.map((r) => r.ipa)).toEqual(['kʲi', 't̚', 'te̞']);
+    expect(reimported.parts[2].rows[1].clClosure).toBe(true);
+    expect(reimported.parts[3].rows.map((r) => r.ipa)).toEqual(['to', 'ð̞o']);
+
+    // VSQX export remains strictly VOCALOID 4 XML (`ts`_h`, `<bs>4</bs>`, `<bs>0</bs>`, `<bs>3</bs>`)
+    const vsqxXml = exportVsqxProject(multiTracks, beatMap, meters, '五语种工程');
+    expect(vsqxXml).toContain('<p><![CDATA[ts`_h a N]]></p>');
+    expect(vsqxXml).toContain('<bs>3</bs>');
   });
 });

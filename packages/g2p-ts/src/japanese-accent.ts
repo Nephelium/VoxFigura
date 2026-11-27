@@ -34,7 +34,9 @@ export interface JapaneseAccentPlan {
   dictionaryHits: number;
 }
 
-const DIR = '/vocal-tract/assets/ja-accent-v1/';
+const ASSET_BASE =
+  ((typeof import.meta !== 'undefined' ? (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL : undefined) || '/').replace(/\/?$/, '/');
+const DIR = `${ASSET_BASE}vocal-tract/assets/ja-accent-v1/`;
 const shardCache = new Map<number, Promise<Map<string, JapaneseAccentEntry>>>();
 
 const JA_RUN_RE = /[ぁ-ゖァ-ヶー々一-龯]+/gu;
@@ -202,6 +204,131 @@ export function computeTokyoMoraContour(
     out.push({ tone, pitchSt: Math.round(st * 100) / 100 });
   }
   return out;
+}
+
+export interface JapaneseKanjiSegment {
+  surface: string;
+  reading: string;
+  fromDict: boolean;
+}
+
+/**
+ * Segment Japanese Kanji+Kana text offline via `ja-accent-v1` (408k Open JTalk / NAIST-JDIC entries)
+ * and return a surface-run -> `{ surface, reading }` segment list map for synchronous G2P consumption.
+ */
+export async function japaneseKanjiReadingsFor(
+  text: string,
+): Promise<Map<string, JapaneseKanjiSegment[]>> {
+  const result = new Map<string, JapaneseKanjiSegment[]>();
+  const cleaned = text.normalize('NFKC');
+  const runs = cleaned.match(JA_RUN_RE) ?? [];
+  const kanjiRuns = [...new Set(runs.filter((run) => /[一-龯々]/u.test(run)))];
+  if (!kanjiRuns.length) return result;
+
+  const neededShards = new Set<number>();
+  for (const run of kanjiRuns) {
+    for (const ch of run) {
+      neededShards.add(japaneseAccentShard(ch));
+      const h = toHira(ch);
+      if (h !== ch) neededShards.add(japaneseAccentShard(h));
+    }
+  }
+  const shards = new Map(
+    await Promise.all([...neededShards].map(async (idx) => [idx, await loadAccentShard(idx)] as const)),
+  );
+  const lookup = (word: string): JapaneseAccentEntry | undefined => {
+    if (!word) return undefined;
+    const direct = shards.get(japaneseAccentShard(word[0]))?.get(word);
+    if (direct) return direct;
+    const hira = toHira(word);
+    return hira !== word ? shards.get(japaneseAccentShard(hira[0]))?.get(hira) : undefined;
+  };
+
+  for (const part of kanjiRuns) {
+    const n = part.length;
+    const bestCost = new Array<number>(n + 1).fill(Infinity);
+    const bestPrev = new Array<number>(n + 1).fill(-1);
+    const bestTok = new Array<RawToken | null>(n + 1).fill(null);
+    bestCost[0] = 0;
+
+    for (let i = 0; i < n; i++) {
+      if (!Number.isFinite(bestCost[i])) continue;
+      const maxLen = Math.min(16, n - i);
+      let anyHit = false;
+      for (let len = 1; len <= maxLen; len++) {
+        const sub = part.slice(i, i + len);
+        const hit = lookup(sub);
+        if (!hit) continue;
+        anyHit = true;
+        const prevTok = bestTok[i];
+        const particleBonus = hit.isParticle && prevTok ? -0.6 : 0;
+        const kanjiToCoreParticleTrap =
+          !hit.isParticle && len >= 2 && prevTok && /[一-龯々]/u.test(prevTok.surface)
+          && /^[はがをにでともの][ぁ-ゖー]+$/u.test(sub)
+            ? 0.75
+            : 0;
+        const stepCost = 1.0 - Math.min(0.45, (len - 1) * 0.1) + particleBonus + kanjiToCoreParticleTrap;
+        const nextCost = bestCost[i] + stepCost;
+        if (nextCost < bestCost[i + len]) {
+          bestCost[i + len] = nextCost;
+          bestPrev[i + len] = i;
+          bestTok[i + len] = {
+            surface: sub,
+            reading: hit.reading,
+            accent: hit.accent,
+            isParticle: hit.isParticle,
+            fromDict: true,
+          };
+        }
+      }
+      if (!anyHit || bestCost[i + 1] === Infinity) {
+        const ch = part[i];
+        const h = toHira(ch);
+        if (/^[ぁ-ゖー]$/u.test(h)) {
+          const nextH = i + 1 < n ? toHira(part[i + 1]) : '';
+          const takeTwo = SMALL_YOOON.has(nextH);
+          const step = takeTwo ? 2 : 1;
+          const nextCost = bestCost[i] + 3.0;
+          if (nextCost < bestCost[i + step]) {
+            bestCost[i + step] = nextCost;
+            bestPrev[i + step] = i;
+            bestTok[i + step] = {
+              surface: part.slice(i, i + step),
+              reading: takeTwo ? h + nextH : h,
+              accent: 0,
+              isParticle: false,
+              fromDict: false,
+            };
+          }
+        } else {
+          const nextCost = bestCost[i] + 6.0;
+          if (nextCost < bestCost[i + 1]) {
+            bestCost[i + 1] = nextCost;
+            bestPrev[i + 1] = i;
+            bestTok[i + 1] = {
+              surface: ch,
+              reading: '',
+              accent: 0,
+              isParticle: false,
+              fromDict: false,
+            };
+          }
+        }
+      }
+    }
+
+    const segments: JapaneseKanjiSegment[] = [];
+    for (let pos = n; pos > 0;) {
+      const tok = bestTok[pos];
+      const prevPos = bestPrev[pos];
+      if (!tok || prevPos < 0) break;
+      segments.push({ surface: tok.surface, reading: tok.reading, fromDict: tok.fromDict });
+      pos = prevPos;
+    }
+    segments.reverse();
+    result.set(part, segments);
+  }
+  return result;
 }
 
 /**

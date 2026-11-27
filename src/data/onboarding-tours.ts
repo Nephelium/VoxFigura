@@ -103,7 +103,7 @@ export const BASE_TOUR_DEFINITIONS: Record<Exclude<TourPageId, 'explore'>, TourD
         id: 'home-engine',
         selector: '[data-tour="home-engine"]',
         title: '本地引擎状态、外观致谢与随时重播指引',
-        body: '此处实时显示 VTL 2.4 本地物理引擎连接状态（点击可直达模型矩阵），旁侧提供「外观与背景」「开源与学术致谢」，页面底部另可快速打开系统使用说明与端侧 9 模技术报告；随时可从右上角帮助菜单重播任意页操作指引。',
+        body: '此处实时显示 VTL 2.4 本地物理引擎连接状态（点击可直达模型矩阵），旁侧提供「外观与背景」「开源与学术致谢」，页面底部另可快速打开系统使用说明与端侧 8 模技术报告；随时可从右上角帮助菜单重播任意页操作指引。',
         placement: 'bottom',
         padding: 10,
       },

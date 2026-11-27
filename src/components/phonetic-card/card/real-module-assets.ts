@@ -130,7 +130,8 @@ const svgBitmapCache = new Map<string, Promise<RasterCardImage | null>>();
 
 function loadIpaCatalog(): Promise<RawCatalogPayload | null> {
   if (!catalogPromise) {
-    catalogPromise = fetch('/data/ipa-plus-catalog.json')
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/');
+    catalogPromise = fetch(`${base}data/ipa-plus-catalog.json`)
       .then(async (r) => (r.ok ? ((await r.json()) as RawCatalogPayload) : null))
       .catch(() => null);
   }

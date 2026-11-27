@@ -57,7 +57,7 @@ export const exportOptions = [
       format: 'Synthesizer V Studio JSON 工程文件（705,600,000 blicks/拍），UTF-8 编码。',
       data: [
         '保存全部启用轨道的音符起止、音高、轨道混音增益/静音/独奏、速度变化与拍号变化。',
-        '人声轨自动保留一字多音拖腔（续音记为 -），按语种设置数据库语言与音标集，并将中文 IPA 映射为 X-SAMPA、英语 IPA 映射为 ARPAbet（未改音标时原样保留导入的原始音素）。',
+        '人声轨自动保留一字多音拖腔（-）、换气（br）与促音/喉塞（cl），按语种写入数据库语言与音标集，支持普通话/粤语/西语 X-SAMPA、英语 ARPAbet 与日语 Romaji 音素映射。',
       ],
       use: '可直接在 Synthesizer V Studio 中打开，挂接任意 AI 声库继续调校音高、气声与唱法。',
       reimport: '在编曲页左栏顶部点击「导入乐谱」，选择 .svp 文件即可完整恢复多轨音符、歌词与音素。',

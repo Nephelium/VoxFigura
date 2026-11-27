@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch 
 import { backdropArtworkUrl, computeDesktopViewportSize, getSkin, listBackdrops } from '@/styles/skin-registry';
 import { paletteShortName } from '@/styles/themes';
 import { artworkHueShift, colorHue, sampleArtworkImage, toolbarArtworkTokens, type ArtworkImageColors } from '@/styles/artwork-hue';
-import { APP_WINDOW_TITLE } from '@/data/app-branding';
+import { APP_REPO_SLUG, APP_REPO_URL, APP_WINDOW_TITLE } from '@/data/app-branding';
 import { describeEngineStatus } from '@/data/engine-status';
 import { activeWorkspaceBackground, activeWorkspaceIcon, loadWorkspaceImages, workspaceIconUrl } from '@/data/workspace-images';
 import { setDesktopWindowIcon } from '@/utils/desktop-window';
@@ -104,6 +104,8 @@ const shellSize = computed(() => ({
   '--nav-art-hue': artworkHue.value ? `hue-rotate(${artworkHue.value}deg)` : undefined,
   ...toolbarArt.value,
 }));
+const isCompactRailGithub = computed(() => (desktop.value.height / store.pageScale.value) < 780);
+const isCompactStatusGithub = computed(() => (desktop.value.width / store.pageScale.value) < 1080);
 
 const skinLabel = computed(() => getSkin(store.surfaceStyle.value)?.shortName ?? store.surfaceStyle.value);
 const paletteLabel = computed(() => paletteShortName(store.paletteId.value));
@@ -383,15 +385,29 @@ watch(
             </span>
             <span v-else class="act-label">{{ item.shortLabel ?? item.label }}</span>
           </button>
-          <button
-            type="button"
-            class="act-dock-toggle"
-            title="将导航按钮移至顶部"
-            aria-label="将导航按钮移至顶部"
-            @click="store.setLayoutPrefs({ navPlacement: 'top' })"
-          >
-            <NavArtwork item="dock-toggle" toolbar />
-          </button>
+          <div class="actbar-footer">
+            <a
+              class="act-github-link"
+              :class="{ 'is-compact': isCompactRailGithub }"
+              :href="APP_REPO_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              :title="`GitHub 仓库 · ${APP_REPO_URL}`"
+              :aria-label="`GitHub 开源仓库 ${APP_REPO_SLUG}`"
+            >
+              <NavArtwork item="github" toolbar theme-tint />
+              <span v-if="!isCompactRailGithub" class="act-label">GitHub</span>
+            </a>
+            <button
+              type="button"
+              class="act-dock-toggle"
+              title="将导航按钮移至顶部"
+              aria-label="将导航按钮移至顶部"
+              @click="store.setLayoutPrefs({ navPlacement: 'top' })"
+            >
+              <NavArtwork item="dock-toggle" toolbar />
+            </button>
+          </div>
         </aside>
         <component :is="ExploreWorkspace" v-if="ExploreWorkspace && store.activeWorkspace.value === 'explore'" />
         <HomeView v-else-if="store.activeWorkspace.value === 'home'" />
@@ -436,6 +452,19 @@ watch(
         <span>{{ paletteLabel }} · {{ skinLabel }} · {{ backdropLabel }}</span>
         <span>{{ ['webgpu-high', 'cuda'].includes(store.computeDevice.value) ? '本地 GPU' : '本地 CPU' }}</span>
         <span>{{ store.interfaceFonts.value.fontSizePx }}px · {{ Math.round(store.pageScale.value * 100) }}%</span>
+        <i class="status-sep" aria-hidden="true" />
+        <a
+          class="status-github-link"
+          :class="{ 'is-compact': isCompactStatusGithub }"
+          :href="APP_REPO_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          :title="`GitHub 开源仓库 · ${APP_REPO_URL}`"
+          :aria-label="`GitHub 开源仓库 ${APP_REPO_SLUG}`"
+        >
+          <NavArtwork item="github" toolbar theme-tint class="status-github-art" />
+          <span v-if="!isCompactStatusGithub">GitHub</span>
+        </a>
       </div>
     </footer>
 
@@ -544,5 +573,106 @@ watch(
   gap: 10px;
   flex: none;
   white-space: nowrap;
+}
+
+.actbar-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  flex: none;
+}
+
+.actbar-footer .act-dock-toggle {
+  margin-top: 0;
+}
+
+.act-github-link {
+  width: 60px;
+  padding: 6px 3px;
+  border: var(--border-w, 1px) solid transparent;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  color: var(--muted);
+  text-decoration: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  transition:
+    color var(--dur-fast, 165ms) var(--ease-out-expo, ease),
+    background-color var(--dur-fast, 165ms) var(--ease-out-expo, ease),
+    border-color var(--dur-fast, 165ms) var(--ease-out-expo, ease),
+    box-shadow var(--dur-fast, 165ms) var(--ease-out-expo, ease);
+}
+
+.act-github-link .act-label {
+  min-height: 1lh;
+}
+
+.act-github-link.is-compact {
+  width: 34px;
+  height: 28px;
+  padding: 0;
+}
+
+.act-github-link:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--selected) 72%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--panel-border));
+}
+
+.status-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--panel-border);
+  opacity: 0.7;
+}
+
+.status-github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  border: var(--border-w, 1px) solid color-mix(in srgb, var(--panel-border) 75%, transparent);
+  background: color-mix(in srgb, var(--ctrl-bg) 55%, transparent);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.79rem;
+  line-height: 1;
+  transition:
+    color var(--dur-fast, 165ms) var(--ease-out-expo, ease),
+    background-color var(--dur-fast, 165ms) var(--ease-out-expo, ease),
+    border-color var(--dur-fast, 165ms) var(--ease-out-expo, ease);
+}
+
+.status-github-link.is-compact {
+  width: 22px;
+  padding: 0;
+  justify-content: center;
+}
+
+.status-github-link:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--panel-border));
+}
+
+.status-github-art {
+  width: 14px;
+  height: 14px;
+}
+
+.act-github-link:focus-visible,
+.status-github-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 </style>

@@ -3,14 +3,19 @@ import {
   analyzeJapaneseAccent,
   arpaToIpaSyllables,
   convertText,
+  japaneseKanjiReadingsFor,
   japaneseReadingsFor,
+  jyutpingToNarrowIpa,
   loadCmu,
   mappingStandards,
   narrowJapaneseMoraIpa,
   parseCmu,
   readNumberedScore,
   reviewKana,
+  reviewRomaji,
   reviewText,
+  romajiToHiragana,
+  spanishWordToNarrowIpaSyllables,
 } from './index.ts';
 
 describe('@vocalcut/g2p pure runtime', () => {
@@ -211,5 +216,69 @@ describe('@vocalcut/g2p pure runtime', () => {
     expect(enRows.every((r) => r.pause === 0)).toBe(true);
     const zhRows = reviewText('你 好', 'Standard Chinese (Beijing)', miniCmu, new Map());
     expect(zhRows.every((r) => r.pause === 0)).toBe(true);
+  });
+
+  it('supports Japanese romaji, Kanji reading lookup, and singing mode disabling high-vowel devoicing', async () => {
+    expect(romajiToHiragana('sakura')).toBe('さくら');
+    expect(romajiToHiragana('kitte')).toBe('きって');
+    expect(romajiToHiragana('matcha')).toBe('まっちゃ');
+    expect(romajiToHiragana('shimbun')).toBe('しんぶん');
+    expect(romajiToHiragana("shin'ai")).toBe('しんあい');
+    expect(romajiToHiragana('konnichiwa')).toBe('こんにちわ');
+    expect(romajiToHiragana('tōkyō')).toBe('とーきょー');
+    expect(romajiToHiragana('world')).toBeNull();
+
+    // Singing mode disables Tokyo high-vowel devoicing while speech mode preserves it
+    expect(reviewKana('すき', undefined, { singing: false }).map((r) => r.ipa)).toEqual(['sɯ̥̈ᵝ', 'kʲi']);
+    expect(reviewKana('すき', undefined, { singing: true }).map((r) => r.ipa)).toEqual(['sɯ̈ᵝ', 'kʲi']);
+    expect(reviewRomaji('suki kitte', undefined, { singing: true }).map((r) => r.ipa)).toEqual([
+      'sɯ̈ᵝ', 'kʲi', 'kʲi', 't̚', 'te̞',
+    ]);
+
+    // Japanese Kanji offline lookup + primaryLang='ja' routing in reviewText
+    const jaKanji = await japaneseKanjiReadingsFor('今日は好き');
+    const rows = reviewText('今日は好き sakura', 'Standard Chinese (Beijing)', new Map(), new Map(), undefined, {
+      primaryLang: 'ja',
+      singing: true,
+      jaKanji,
+    });
+    expect(rows.every((r) => r.language === 'ja')).toBe(true);
+    expect(rows.map((r) => r.ipa)).toEqual(['kʲjo̞', 'o̞', 'ɰᵝä', 'sɯ̈ᵝ', 'kʲi', 'sä', 'kɯ̈ᵝ', 'ɾä']);
+  });
+
+  it('supports Cantonese Jyutping/Hanzi narrow IPA, Spanish orthographic narrow allophony, and primary/secondary language disambiguation', async () => {
+    // Cantonese Jyutping -> narrow HK Cantonese IPA (unreleased -p̚/-t̚/-k̚, lax ɪ/ʊ)
+    expect(jyutpingToNarrowIpa('gwong2')).toBe('kʷɔːŋ˧˥');
+    expect(jyutpingToNarrowIpa('jat1')).toBe('jɐt̚˥');
+    expect(jyutpingToNarrowIpa('sing1')).toBe('sɪŋ˥˥');
+    expect(jyutpingToNarrowIpa('m4')).toBe('m̩˨˩');
+
+    const yueRows = reviewText('我愛你 gwong2', 'Standard Chinese (Beijing)', new Map(), new Map(), undefined, {
+      primaryLang: 'yue',
+    });
+    expect(yueRows.map((r) => r.language)).toEqual(['yue', 'yue', 'yue', 'yue']);
+    expect(yueRows.map((r) => r.ipa)).toEqual(['ŋɔː˩˧', 'ɔːi˧˧', 'nei˩˧', 'kʷɔːŋ˧˥']);
+
+    // Spanish orthographic G2P -> narrow IPA (intervocalic spirantization β̞/ð̞/ɣ̞, trill r vs tap ɾ, stress, Castilian θ choice)
+    const corazon = spanishWordToNarrowIpaSyllables('corazón');
+    expect(corazon?.syllables).toEqual(['ko', 'ɾa', 'ˈson']);
+    expect(corazon?.castilian).toEqual(['ko', 'ɾa', 'ˈθon']);
+    expect(spanishWordToNarrowIpaSyllables('todo')?.syllables).toEqual(['ˈto', 'ð̞o']);
+    expect(spanishWordToNarrowIpaSyllables('saber')?.syllables).toEqual(['sa', 'ˈβ̞eɾ']);
+    expect(spanishWordToNarrowIpaSyllables('perro')?.syllables).toEqual(['ˈpe', 'ro']);
+    expect(spanishWordToNarrowIpaSyllables('niño')?.syllables).toEqual(['ˈni', 'ɲo']);
+
+    // Primary + Secondary disambiguation: ja primary + en secondary
+    const cmu = await loadCmu();
+    const jaEnRows = reviewText('sakura world', 'Standard Chinese (Beijing)', cmu, new Map(), undefined, {
+      primaryLang: 'ja',
+      secondaryLang: 'en',
+      singing: true,
+    });
+    expect(jaEnRows.map((r) => r.language)).toEqual(['ja', 'ja', 'ja', 'en']);
+
+    // SVP English ARPAbet extras (AX, DX, Q)
+    expect(arpaToIpaSyllables('DH AX')).toEqual(['ðə']);
+    expect(arpaToIpaSyllables('B AH1 DX ER0')).toEqual(['ˈbʌ', 'ɾɚ']);
   });
 });

@@ -12,7 +12,7 @@ import type { MappingStandard, ReadingRow } from '@vocalcut/g2p';
 import { normalizeJapaneseWord } from '@vocalcut/g2p';
 import type { TractPoseExtras } from './ptb-ipa-presets';
 
-export type LexiconLang = 'zh' | 'en' | 'ja' | 'ipa';
+export type LexiconLang = 'zh' | 'en' | 'ja' | 'yue' | 'es' | 'ipa';
 
 interface LexiconScope {
   standard?: string;
@@ -71,7 +71,7 @@ export const DEFAULT_USER_BOOK_ID = 'user-default';
 
 function normalizeWordKey(word: string, lang: LexiconLang): string {
   const clean = word.normalize('NFC').trim().replace(/\s+/gu, ' ');
-  return `${lang}:${lang === 'en' ? clean.toLowerCase() : clean}`;
+  return `${lang}:${lang === 'en' || lang === 'es' || lang === 'yue' ? clean.toLowerCase() : clean}`;
 }
 
 export function detectWordLanguage(word: string): LexiconLang {
@@ -346,7 +346,7 @@ export function importUserLexiconJson(raw: string): UserLexiconBook | null {
     const b = parsed.book ?? parsed;
     if (!b || typeof b.name !== 'string' || !b.name.trim() || !b.entries || typeof b.entries !== 'object' || Array.isArray(b.entries)) return null;
     if (Object.values(b.entries).some(entry => !entry || typeof entry.key !== 'string' || typeof entry.word !== 'string'
-      || !['zh', 'en', 'ja', 'ipa'].includes(entry.language) || typeof entry.ipaJoined !== 'string'
+      || !['zh', 'en', 'ja', 'yue', 'es', 'ipa'].includes(entry.language) || typeof entry.ipaJoined !== 'string'
       || !Array.isArray(entry.ipaPhones) || !entry.ipaPhones.every(phone => typeof phone === 'string'))) return null;
     const id = `ubook_${crypto.randomUUID()}`;
     let name = b.name.trim();

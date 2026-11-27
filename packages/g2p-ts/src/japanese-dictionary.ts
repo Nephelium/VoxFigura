@@ -1,7 +1,8 @@
 /** Offline, lazily loaded pure-kana subset of Japanese MFA dictionary v3.0.0 (normalized to narrow Tokyo IPA). */
 import {narrowJapaneseMoraIpa} from './kana-readings.ts';
 export type JapaneseEntry={word:string;readings:string[];moras:string[][];probabilities:(number|null)[]};
-const DIR='/vocal-tract/assets/ja-mfa-v3/';
+const ASSET_BASE=((typeof import.meta!=='undefined'?(import.meta as {env?:{BASE_URL?:string}}).env?.BASE_URL:undefined)||'/').replace(/\/?$/,'/');
+const DIR=`${ASSET_BASE}vocal-tract/assets/ja-mfa-v3/`;
 const cache=new Map<number,Promise<Map<string,string>>>();
 const kanaOnly=/^[ぁ-ゖー]+$/u;
 const sourceWord=/^[ぁ-ゖァ-ヶーゟヿ\u3099\u309a\uff66-\uff9f]+$/u;

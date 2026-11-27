@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
 import { editionCorpusBoundary, editionDisplayLabel, editionIsolationNote, exploreLabel } from '@vocalcut/edition';
-import { APP_BRAND_NAME, APP_BRAND_TAGLINE, APP_VERSION } from '@/data/app-branding';
+import { APP_BRAND_NAME, APP_BRAND_TAGLINE, APP_REPO_SLUG, APP_REPO_URL, APP_VERSION } from '@/data/app-branding';
 import { workspaceIconUrl } from '@/data/workspace-images';
 import { hasUpdate, latestRelease, openUpdateModal } from '@/data/app-update';
 import { METHOD_REFERENCES } from '@/data/references';
@@ -209,6 +209,17 @@ onBeforeUnmount(() => {
           <IconSvg name="sliders" :size="12" />
           <span>引擎与模型管理</span>
         </button>
+        <a
+          class="btn sm"
+          style="width: 100%; text-decoration: none"
+          :href="APP_REPO_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          :title="APP_REPO_URL"
+        >
+          <IconSvg name="github" :size="12" />
+          <span>{{ APP_REPO_SLUG }}</span>
+        </a>
       </div>
     </aside>
 
@@ -260,8 +271,36 @@ onBeforeUnmount(() => {
                     {{ hasUpdate && latestRelease ? `发现新版本 v${latestRelease.version}` : '检查更新' }}
                   </span>
                 </button>
+                <a
+                  class="btn sm"
+                  style="text-decoration: none"
+                  :href="APP_REPO_URL"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="APP_REPO_URL"
+                >
+                  <IconSvg name="github" :size="13" />
+                  <span>GitHub 仓库</span>
+                </a>
               </div>
             </div>
+
+            <a
+              :href="APP_REPO_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="ptb-link-card"
+            >
+              <div class="ptb-link-top">
+                <strong style="display: inline-flex; align-items: center; gap: 6px">
+                  <IconSvg name="github" :size="15" />
+                  <span>{{ APP_BRAND_NAME }} GitHub 开源仓库（{{ APP_REPO_SLUG }}）</span>
+                </strong>
+                <span class="tree-tag mono">GitHub ↗</span>
+              </div>
+              <span class="mono ptb-link-url">{{ APP_REPO_URL }}</span>
+              <span class="muted ptb-link-desc">查阅完整源代码、工程规范文档、提交 Issue 反馈与查看版本发布档案（GPL-3.0-or-later）</span>
+            </a>
 
             <div class="editorial-card selectable" style="box-shadow: none; gap: 6px">
               <strong>三版本构建隔离设计</strong>

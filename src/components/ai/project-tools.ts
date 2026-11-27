@@ -254,7 +254,9 @@ export async function resolveClipSyllableRows(
     const dictionary = needsEnglishDictionary(tokens) ? await loadCmu() : new Map<string, string[]>();
     const readings = reviewText(tokens, 'Standard Chinese (Beijing)', dictionary, new Map());
     rows = readings.map(row => ({ char: row.word, ipa: row.ipa }));
-    const languages = new Set(readings.map(row => row.language === 'zh' ? 'cmn' : row.language ?? 'ipa'));
+    const languages = new Set<'cmn' | 'en' | 'ja' | 'ipa'>(
+      readings.map(row => (row.language === 'zh' ? 'cmn' : row.language === 'en' || row.language === 'ja' ? row.language : 'ipa')),
+    );
     language = languages.size > 1 ? 'mixed' : languages.values().next().value;
   }
   return { lyrics, rows, language };

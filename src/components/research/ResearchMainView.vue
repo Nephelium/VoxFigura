@@ -457,7 +457,8 @@ function buildFallbackQuickIpaGroups(): QuickIpaGroup[] {
 
 onMounted(async () => {
   try {
-    const res = await fetch('/data/ipa-plus-catalog.json');
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/');
+    const res = await fetch(`${base}data/ipa-plus-catalog.json`);
     if (!res.ok) throw new Error();
     catalogGroups.value = buildQuickIpaGroups(await res.json() as QuickIpaCatalog);
   } catch {
@@ -1595,8 +1596,10 @@ async function compileRuleSentence(
       gapMs === 0 ? speechRows[idx + 1]?.phonemes[0] : undefined,
     );
   });
+  const speechLangOf = (lang: ReadingRow['language']): 'zh' | 'en' | 'ja' | 'ipa' | undefined =>
+    lang === 'zh' || lang === 'en' || lang === 'ja' || lang === 'ipa' ? lang : (lang ? 'ipa' : undefined);
   const naturalDurationWeightsMs = speechRows.map(({ row, supraseg, phonemes }, idx) => {
-    const effectiveScale = connectedRuleDurationScale(phonemes, supraseg.durationScale, row.language);
+    const effectiveScale = connectedRuleDurationScale(phonemes, supraseg.durationScale, speechLangOf(row.language));
     return estimateSyllableNaturalDurationMs(
       phonemes,
       effectiveScale,
@@ -1615,7 +1618,7 @@ async function compileRuleSentence(
     const runs = extractMixedProsodyRuns(
       speechRows.map(({ row, voqsState, userEntry, supraseg, phonemes }) => ({
         word: row.word,
-        language: row.language,
+        language: speechLangOf(row.language),
         ipaPhones: row.language === 'ipa' ? phonemes : undefined,
         sourceWord: row.sourceWord,
         syllableIndex: row.syllableIndex,

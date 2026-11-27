@@ -1,4 +1,5 @@
 import { SAMPLE_RATE_HZ } from '@vocalcut/core';
+import type { LyricsLanguage } from '@vocalcut/g2p';
 import { gridBeat, type BeatChange, type MeterChange } from './midi-score';
 
 export interface SingingExportNote {
@@ -13,6 +14,8 @@ export interface SingingExportNote {
   sourceAlphabet?: string;
   continuation?: boolean;
   instrumental?: boolean;
+  breath?: boolean;
+  clClosure?: boolean;
 }
 
 export interface SingingExportTrack {
@@ -20,10 +23,11 @@ export interface SingingExportTrack {
   muted?: boolean;
   solo?: boolean;
   gain?: number;
+  primaryLang?: LyricsLanguage;
   notes: readonly SingingExportNote[];
 }
 
-type SingingLang = 'zh' | 'en' | 'ja';
+type SingingLang = LyricsLanguage;
 
 interface BarMeter {
   bar: number;
@@ -58,7 +62,11 @@ const SVP_TRACK_COLORS = [
   'ff14b8a6',
 ] as const;
 
-const IPA_TO_ZH_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+/* -------------------------------------------------------------------------- */
+/*  VOCALOID VSQX Tables (strictly VOCALOID 4 XML conventions)                */
+/* -------------------------------------------------------------------------- */
+
+const IPA_TO_VSQX_ZH_XSAMPA: ReadonlyArray<readonly [string, string]> = [
   ['tɕʰ', 'ts\\_h'],
   ['tʂʰ', 'ts`_h'],
   ['tsʰ', 'ts_h'],
@@ -91,7 +99,8 @@ const IPA_TO_ZH_XSAMPA: ReadonlyArray<readonly [string, string]> = [
   ['y', 'y'],
 ];
 
-const IPA_TO_EN_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+const IPA_TO_VSQX_EN_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['tʃʰ', 'tS'],
   ['tʃ', 'tS'],
   ['dʒ', 'dZ'],
   ['pʰ', 'ph'],
@@ -133,7 +142,138 @@ const IPA_TO_EN_XSAMPA: ReadonlyArray<readonly [string, string]> = [
   ['ɡ', 'g'],
 ];
 
-const IPA_TO_EN_ARPABET: ReadonlyArray<readonly [string, string]> = [
+const IPA_TO_VSQX_JA_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['tɕ', 'tS'],
+  ['dʑ', 'dZ'],
+  ['ts', 'ts'],
+  ['dz', 'dz'],
+  ['ɯ̈ᵝ', 'M'],
+  ['ɯᵝ', 'M'],
+  ['ɯ', 'M'],
+  ['ɰᵝ', 'w'],
+  ['ɰ̩̃', 'N\\'],
+  ['ɲ̩', 'J'],
+  ['ŋ̩', 'N'],
+  ['ɴ̩', 'N\\'],
+  ['m̩', 'm'],
+  ['n̩', 'n'],
+  ['ɲ', 'J'],
+  ['ŋ', 'N'],
+  ['ɴ', 'N\\'],
+  ['ɕ', 'S'],
+  ['ʑ', 'Z'],
+  ['ç', 'C'],
+  ['ɸ', 'p\\'],
+  ['ɾ', '4'],
+  ['ɡ', 'g'],
+  ['ä', 'a'],
+  ['e̞', 'e'],
+  ['o̞', 'o'],
+];
+
+const IPA_TO_VSQX_ES_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['tʃ', 'tS'],
+  ['β̞', 'B'],
+  ['ð̞', 'D'],
+  ['ɣ̞', 'G'],
+  ['β', 'B'],
+  ['ð', 'D'],
+  ['ɣ', 'G'],
+  ['ɲ', 'J'],
+  ['ʎ', 'L'],
+  ['θ', 'T'],
+  ['ʝ', 'j'],
+  ['ɾ', '4'],
+  ['r', 'rr'],
+  ['ɡ', 'g'],
+];
+
+/* -------------------------------------------------------------------------- */
+/*  Synthesizer V SVP Tables (strictly SVP 5-language phoneset conventions)   */
+/* -------------------------------------------------------------------------- */
+
+/** SVP Mandarin X-SAMPA (`ph/th/kh/tsh/ts\h/ts\`h` without `_h`). */
+const IPA_TO_SVP_ZH_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['tɕʰ', 'ts\\h'],
+  ['tʂʰ', 'ts`h'],
+  ['tsʰ', 'tsh'],
+  ['tɕ', 'ts\\'],
+  ['tʂ', 'ts`'],
+  ['ts', 'ts'],
+  ['pʰ', 'ph'],
+  ['tʰ', 'th'],
+  ['kʰ', 'kh'],
+  ['ɻ̩', 'i\\`'],
+  ['ɹ̩', 'i\\'],
+  ['ɕ', 's\\'],
+  ['ʂ', 's`'],
+  ['ʐ', 'z`'],
+  ['ɻ', 'r\\`'],
+  ['ɹ', 'r\\'],
+  ['ʋ', 'w'],
+  ['ɨ', 'i\\'],
+  ['ɚ', 'r\\`'],
+  ['ɑʊ', 'AU'],
+  ['əʊ', '@U'],
+  ['jɑʊ', 'iAU'],
+  ['jəʊ', 'i@U'],
+  ['joʊ', 'iU'],
+  ['jɑ', 'iA'],
+  ['jɛ', 'iE'],
+  ['je', 'ie'],
+  ['ja', 'ia'],
+  ['ɥɛ', 'yE'],
+  ['ɥæ', 'y{'],
+  ['wɑ', 'uA'],
+  ['wə', 'u@'],
+  ['we', 'ue'],
+  ['wo', 'uo'],
+  ['wa', 'ua'],
+  ['ə', '@'],
+  ['ɤ', '7'],
+  ['œ', 'e'],
+  ['ɑ', 'A'],
+  ['ɛ', 'e'],
+  ['ɪ', ':\\i'],
+  ['ɔ', 'o'],
+  ['ʊ', 'U'],
+  ['ŋ', 'N'],
+  ['ɥ', 'y'],
+  ['y', 'y'],
+];
+
+/** SVP Cantonese X-SAMPA (exact 46-phone inventory). */
+const IPA_TO_SVP_YUE_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['kʷʰ', 'kwh'],
+  ['kʷ', 'kw'],
+  ['tsʰ', 'tsh'],
+  ['ts', 'ts'],
+  ['pʰ', 'ph'],
+  ['tʰ', 'th'],
+  ['kʰ', 'kh'],
+  ['p̚', ':p_}'],
+  ['t̚', ':t_}'],
+  ['k̚', ':k_}'],
+  ['m̩', 'm='],
+  ['ŋ̩', 'N='],
+  ['aː', 'a'],
+  ['ɛː', 'E'],
+  ['iː', 'i'],
+  ['ɔː', 'O'],
+  ['uː', 'u'],
+  ['œː', '9'],
+  ['yː', 'y'],
+  ['ɐ', '6'],
+  ['ɪ', 'I'],
+  ['ʊ', 'U'],
+  ['ɵ', '8'],
+  ['ŋ', 'N'],
+  ['ɡ', 'k'],
+];
+
+/** SVP English ARPAbet (48-phone inventory). */
+const IPA_TO_SVP_EN_ARPABET: ReadonlyArray<readonly [string, string]> = [
+  ['tʃʰ', 'CH'],
   ['tʃ', 'CH'],
   ['dʒ', 'JH'],
   ['pʰ', 'P'],
@@ -157,7 +297,7 @@ const IPA_TO_EN_ARPABET: ReadonlyArray<readonly [string, string]> = [
   ['ɛ', 'EH'],
   ['æ', 'AE'],
   ['ʌ', 'AH'],
-  ['ə', 'AH'],
+  ['ə', 'AX'],
   ['ɑ', 'AA'],
   ['ɒ', 'AA'],
   ['ɔ', 'AO'],
@@ -171,6 +311,8 @@ const IPA_TO_EN_ARPABET: ReadonlyArray<readonly [string, string]> = [
   ['θ', 'TH'],
   ['ð', 'DH'],
   ['ŋ', 'NG'],
+  ['ɾ', 'DX'],
+  ['ʔ', 'Q'],
   ['ɹ', 'R'],
   ['j', 'Y'],
   ['ɡ', 'G'],
@@ -192,21 +334,83 @@ const IPA_TO_EN_ARPABET: ReadonlyArray<readonly [string, string]> = [
   ['r', 'R'],
 ];
 
-const IPA_TO_JA_XSAMPA: ReadonlyArray<readonly [string, string]> = [
-  ['tɕ', 'tS'],
-  ['dʑ', 'dZ'],
+/** SVP Japanese Romaji phonemes (exact 42-phone inventory). */
+const IPA_TO_SVP_JA_ROMAJI: ReadonlyArray<readonly [string, string]> = [
+  ['kʷɰᵝ', 'kw'],
+  ['ɡʷɰᵝ', 'gw'],
+  ['kʲj', 'ky'],
+  ['ɡʲj', 'gy'],
+  ['ɲj', 'ny'],
+  ['çj', 'hy'],
+  ['bʲj', 'by'],
+  ['pʲj', 'py'],
+  ['mʲj', 'my'],
+  ['ɾʲj', 'ry'],
+  ['tʲj', 'ty'],
+  ['dʲj', 'dy'],
+  ['tɕ', 'ch'],
+  ['dʑ', 'j'],
   ['ts', 'ts'],
-  ['dz', 'dz'],
-  ['ɯ', 'M'],
+  ['dz', 'z'],
+  ['kʲ', 'k'],
+  ['ɡʲ', 'g'],
+  ['bʲ', 'b'],
+  ['pʲ', 'p'],
+  ['mʲ', 'm'],
+  ['ɾʲ', 'r'],
+  ['tʲ', 't'],
+  ['dʲ', 'd'],
+  ['ɸʲ', 'f'],
+  ['vʲ', 'v'],
+  ['p̚', 'cl'],
+  ['t̚', 'cl'],
+  ['k̚', 'cl'],
+  ['ʔ', 'cl'],
+  ['ɯ̈ᵝ', 'u'],
+  ['ɯᵝ', 'u'],
+  ['ɯ', 'u'],
+  ['ɰᵝ', 'w'],
+  ['ɰ̩̃', 'N'],
+  ['m̩', 'N'],
+  ['n̩', 'N'],
+  ['ɲ̩', 'N'],
+  ['ŋ̩', 'N'],
+  ['ɴ̩', 'N'],
+  ['ɴ', 'N'],
+  ['ŋ', 'N'],
+  ['ɲ', 'n'],
+  ['ɕ', 'sh'],
+  ['ʑ', 'j'],
+  ['ç', 'h'],
+  ['ɸ', 'f'],
+  ['ɾ', 'r'],
+  ['ɡ', 'g'],
+  ['j', 'y'],
+  ['ä', 'a'],
+  ['e̞', 'e'],
+  ['o̞', 'o'],
+];
+
+/** SVP Spanish X-SAMPA (exact 30-phone inventory). */
+const IPA_TO_SVP_ES_XSAMPA: ReadonlyArray<readonly [string, string]> = [
+  ['tʃ', 'ch'],
+  ['β̞', 'B'],
+  ['ð̞', 'D'],
+  ['ɣ̞', 'g'],
+  ['β', 'B'],
+  ['ð', 'D'],
+  ['ɣ', 'g'],
   ['ɲ', 'J'],
   ['ŋ', 'N'],
-  ['ɴ', 'N\\'],
-  ['ɕ', 'S'],
-  ['ʑ', 'Z'],
-  ['ç', 'C'],
-  ['ɸ', 'p\\'],
-  ['ɾ', '4'],
+  ['θ', 'C'],
+  ['ʃ', 'sh'],
+  ['ʝ', 'y'],
+  ['ʎ', 'll'],
+  ['ɾ', 'r'],
+  ['r', 'rr'],
   ['ɡ', 'g'],
+  ['j', 'I'],
+  ['w', 'U'],
 ];
 
 function cleanIpa(raw: string | undefined): string {
@@ -214,7 +418,7 @@ function cleanIpa(raw: string | undefined): string {
   return raw
     .trim()
     .replace(/^\[|\]$/gu, '')
-    .replace(/[˥˦˧˨˩¹²³⁴⁵ˈˌ.\s͜͡]+/gu, '');
+    .replace(/[˥˦˧˨˩¹²³⁴⁵ˈˌ.\s͜͡\u0325\u030a]+/gu, '');
 }
 
 function greedyMapIpa(
@@ -264,40 +468,54 @@ function greedyMapIpa(
 }
 
 function detectTrackLang(track: SingingExportTrack): SingingLang {
-  let zh = 0;
-  let en = 0;
-  let ja = 0;
+  if (track.primaryLang) return track.primaryLang;
+  const counts: Record<SingingLang, number> = { zh: 0, en: 0, ja: 0, yue: 0, es: 0 };
   for (const n of track.notes) {
-    if (n.instrumental || n.continuation) continue;
+    if (n.instrumental || n.continuation || n.breath || n.clClosure) continue;
     const alpha = (n.sourceAlphabet ?? '').toLowerCase();
-    if (alpha === 'vocaloid-0' || /japanese|romaji/.test(alpha)) ja += 2;
-    else if (alpha === 'vocaloid-1' || /english|arpabet/.test(alpha)) en += 2;
-    else if (alpha === 'vocaloid-4' || /mandarin|chinese|zh|cmn|xsampa/.test(alpha)) zh += 2;
+    if (alpha === 'vocaloid-0' || /japanese|romaji/.test(alpha)) counts.ja += 2;
+    else if (alpha === 'vocaloid-1' || /english|arpabet/.test(alpha)) counts.en += 2;
+    else if (alpha === 'vocaloid-3' || /spanish/.test(alpha)) counts.es += 2;
+    else if (/cantonese|yue/.test(alpha)) counts.yue += 2;
+    else if (alpha === 'vocaloid-4' || /mandarin|chinese|zh|cmn|xsampa/.test(alpha)) counts.zh += 2;
 
     const lang = (n.language ?? '').toLowerCase();
-    if (lang.startsWith('ja')) ja += 2;
-    else if (lang.startsWith('en')) en += 2;
-    else if (lang.startsWith('zh') || lang.startsWith('cmn')) zh += 2;
+    if (lang === 'yue') counts.yue += 3;
+    else if (lang === 'es') counts.es += 3;
+    else if (lang.startsWith('ja')) counts.ja += 2;
+    else if (lang.startsWith('en')) counts.en += 2;
+    else if (lang.startsWith('zh') || lang.startsWith('cmn')) counts.zh += 2;
 
     const text = n.lyric.trim();
-    if (/[\u3040-\u30ff]/u.test(text)) ja += 3;
-    else if (/[\u4e00-\u9fff]/u.test(text)) zh += 3;
-    else if (/[A-Za-z]/u.test(text)) en += 2;
+    if (/[\u3040-\u30ff]/u.test(text)) counts.ja += 3;
+    else if (/[嘅咗喺唔佢啲咁冇嚟睇畀嘢仲㗎]/u.test(text)) counts.yue += 4;
+    else if (/[\u4e00-\u9fff]/u.test(text)) counts.zh += 3;
+    else if (/[ñáéíóúü]/iu.test(text)) counts.es += 3;
+    else if (/[A-Za-z]/u.test(text)) counts.en += 2;
   }
-  if (ja > zh && ja >= en) return 'ja';
-  if (en > zh && en > ja) return 'en';
-  return 'zh';
+  let best: SingingLang = 'zh';
+  let bestScore = -1;
+  for (const l of ['zh', 'ja', 'en', 'yue', 'es'] as const) {
+    if (counts[l] > bestScore) {
+      bestScore = counts[l];
+      best = l;
+    }
+  }
+  return bestScore > 0 ? best : 'zh';
 }
 
 function resolveVsqxPhones(note: SingingExportNote, lang: SingingLang): string {
   if (note.continuation) return '-';
+  if (note.breath || /^br$/iu.test(note.lyric.trim())) return 'br';
   if (note.instrumental) return 'a';
-  const bs = lang === 'ja' ? '0' : lang === 'en' ? '1' : '4';
+  const bs = lang === 'ja' ? '0' : lang === 'en' ? '1' : lang === 'es' ? '3' : '4';
   const converted = lang === 'ja'
-    ? greedyMapIpa(note.ipa ?? '', IPA_TO_JA_XSAMPA, /^[abdehijkmnopstwz]$/u, true)
+    ? greedyMapIpa(note.ipa ?? '', IPA_TO_VSQX_JA_XSAMPA, /^[abdehijkmnopstwz]$/u, true)
     : lang === 'en'
-      ? greedyMapIpa(note.ipa ?? '', IPA_TO_EN_XSAMPA, /^[abdefhijklmnopstuvwz]$/u)
-      : greedyMapIpa(note.ipa ?? '', IPA_TO_ZH_XSAMPA, /^[abdefhijklmnoprstuwxz]$/u);
+      ? greedyMapIpa(note.ipa ?? '', IPA_TO_VSQX_EN_XSAMPA, /^[abdefhijklmnopstuvwz]$/u)
+      : lang === 'es'
+        ? greedyMapIpa(note.ipa ?? '', IPA_TO_VSQX_ES_XSAMPA, /^[abdefhijklmnopstuvwxz]$/u)
+        : greedyMapIpa(note.ipa ?? '', IPA_TO_VSQX_ZH_XSAMPA, /^[abdefhijklmnoprstuwxz]$/u);
   if (converted) return converted;
   if (note.sourcePhones?.trim() && note.sourceAlphabet === `vocaloid-${bs}`) {
     return note.sourcePhones.trim();
@@ -307,24 +525,47 @@ function resolveVsqxPhones(note: SingingExportNote, lang: SingingLang): string {
 
 function resolveSvpPhones(note: SingingExportNote, lang: SingingLang): string {
   if (note.continuation || note.instrumental) return '';
+  if (note.breath || /^br$/iu.test(note.lyric.trim())) return 'br';
+  if (note.clClosure || /^cl$/iu.test(note.lyric.trim())) return 'cl';
   if (lang === 'zh') {
-    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_ZH_XSAMPA, /^[abdefhijklmnoprstuwxz]$/u);
+    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_SVP_ZH_XSAMPA, /^[abdefhijklmnoprstuwxz]$/u);
     if (converted) return converted;
-    if (note.sourcePhones?.trim() && /xsampa|mandarin|chinese|zh|vocaloid-4/i.test(note.sourceAlphabet ?? '')) {
+    if (note.sourcePhones?.trim() && /svp-mandarin|xsampa|mandarin/i.test(note.sourceAlphabet ?? '')) {
+      return note.sourcePhones.trim();
+    }
+    return '';
+  }
+  if (lang === 'yue') {
+    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_SVP_YUE_XSAMPA, /^[abefhijklmnopstuwz]$/u);
+    if (converted) return converted;
+    if (note.sourcePhones?.trim() && /cantonese|yue/i.test(note.sourceAlphabet ?? '')) {
       return note.sourcePhones.trim();
     }
     return '';
   }
   if (lang === 'en') {
-    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_EN_ARPABET);
+    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_SVP_EN_ARPABET);
     if (converted) return converted;
     if (note.sourcePhones?.trim() && /arpabet|english|synthv/i.test(note.sourceAlphabet ?? '')) {
       return note.sourcePhones.trim();
     }
     return '';
   }
-  if (note.sourcePhones?.trim() && /romaji|japanese/i.test(note.sourceAlphabet ?? '')) {
-    return note.sourcePhones.trim();
+  if (lang === 'ja') {
+    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_SVP_JA_ROMAJI, /^[abdefghikmnoprstuvwyz]$/u);
+    if (converted) return converted;
+    if (note.sourcePhones?.trim() && /romaji|japanese/i.test(note.sourceAlphabet ?? '')) {
+      return note.sourcePhones.trim();
+    }
+    return '';
+  }
+  if (lang === 'es') {
+    const converted = greedyMapIpa(note.ipa ?? '', IPA_TO_SVP_ES_XSAMPA, /^[abdefghiklmnopstux]$/u);
+    if (converted) return converted;
+    if (note.sourcePhones?.trim() && /spanish/i.test(note.sourceAlphabet ?? '')) {
+      return note.sourcePhones.trim();
+    }
+    return '';
   }
   return '';
 }
@@ -449,10 +690,12 @@ export function exportVsqxProject(
   const originTicks = Math.round(VSQX_PRE_MEASURE * firstBarBeats * VSQX_PPQ);
 
   const trackLangs = activeTracks.map((t) => detectTrackLang(t));
-  const usedBs = new Set(trackLangs.map((lang) => (lang === 'ja' ? 0 : lang === 'en' ? 1 : 4)));
+  const bsForLang = (lang: SingingLang) => (lang === 'ja' ? 0 : lang === 'en' ? 1 : lang === 'es' ? 3 : 4);
+  const usedBs = new Set(trackLangs.map(bsForLang));
   const voiceCatalog: Record<number, { compId: string; name: string }> = {
     0: { compId: 'BCX52J3728749X29', name: 'VoxFigura Japanese' },
     1: { compId: 'BCX52J3728749X30', name: 'VoxFigura English' },
+    3: { compId: 'BCX52J3728749X32', name: 'VoxFigura Spanish' },
     4: { compId: 'BCX52J3728749X31', name: 'VoxFigura Mandarin' },
   };
 
@@ -512,7 +755,7 @@ export function exportVsqxProject(
 
   for (const [idx, track] of activeTracks.entries()) {
     const lang = trackLangs[idx];
-    const bs = lang === 'ja' ? 0 : lang === 'en' ? 1 : 4;
+    const bs = bsForLang(lang);
     const quantized = quantizeTrackNotes(track.notes, map, VSQX_PPQ, shiftBeat);
     const lastEnd = quantized.reduce((max, q) => Math.max(max, q.start + q.dur), 0);
     const playTime = Math.max(VSQX_PPQ * 4, lastEnd + VSQX_PPQ);
@@ -531,7 +774,11 @@ export function exportVsqxProject(
       `      <singer><t>0</t><bs>${bs}</bs><pc>0</pc></singer>`,
     );
     for (const q of quantized) {
-      const lyricText = q.note.continuation ? '-' : (q.note.lyric.trim() || 'a');
+      const lyricText = q.note.continuation
+        ? '-'
+        : q.note.breath
+          ? 'br'
+          : (q.note.lyric.trim() || 'a');
       const phones = resolveVsqxPhones(q.note, lang);
       lines.push(
         '      <note>',
@@ -571,19 +818,31 @@ export function exportSvpProject(
     gender: { mode: 'cubic', points: [] as number[] },
   });
 
+  const svpDbMeta = (lang: SingingLang): { language: string; phoneset: string } => {
+    switch (lang) {
+      case 'ja': return { language: 'japanese', phoneset: 'romaji' };
+      case 'en': return { language: 'english', phoneset: 'arpabet' };
+      case 'yue': return { language: 'cantonese', phoneset: 'xsampa' };
+      case 'es': return { language: 'spanish', phoneset: 'xsampa' };
+      default: return { language: 'mandarin', phoneset: 'xsampa' };
+    }
+  };
+
   const tracks = activeTracks.map((track, idx) => {
     const lang = detectTrackLang(track);
-    const dbMeta = lang === 'ja'
-      ? { language: 'japanese', phoneset: 'romaji' }
-      : lang === 'en'
-        ? { language: 'english', phoneset: 'arpabet' }
-        : { language: 'mandarin', phoneset: 'xsampa' };
+    const dbMeta = svpDbMeta(lang);
     const uuid = crypto.randomUUID();
     const quantized = quantizeTrackNotes(track.notes, map, SVP_BLICKS_PER_BEAT, shiftBeat);
     const notes = quantized.map((q) => ({
       onset: q.start,
       duration: q.dur,
-      lyrics: q.note.continuation ? '-' : (q.note.instrumental ? '' : q.note.lyric.trim()),
+      lyrics: q.note.continuation
+        ? '-'
+        : q.note.breath
+          ? 'br'
+          : q.note.clClosure
+            ? 'cl'
+            : (q.note.instrumental ? '' : q.note.lyric.trim()),
       phonemes: resolveSvpPhones(q.note, lang),
       pitch: q.midi,
       attributes: {},

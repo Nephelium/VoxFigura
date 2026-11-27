@@ -76,7 +76,11 @@ import CustomSelect from '@/components/common/CustomSelect.vue';
 import CompactSlider from '@/components/common/CompactSlider.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import SplitPane from '@/components/common/SplitPane.vue';
-import ContinuumInspectorPanel, { type InspectorContourData } from './ContinuumInspectorPanel.vue';
+import ContinuumInspectorPanel, {
+  type DynamicContourSample,
+  type FormantTrackPoint,
+  type InspectorContourData,
+} from './ContinuumInspectorPanel.vue';
 import AudioRecordPrepModal, { type AudioRecordPrepResult } from './AudioRecordPrepModal.vue';
 import ReconstructionMicControl from './ReconstructionMicControl.vue';
 import { useReconstructionMicMonitor } from './reconstruction-mic-monitor';
@@ -695,6 +699,10 @@ interface BatchContoursApiResponse {
 }
 
 const realContoursByKey = ref<Record<string, BatchContourCellData>>({});
+const formantTracksByKey = shallowRef<Record<string, FormantTrackPoint[]>>({});
+const endpointADynamicContours = shallowRef<DynamicContourSample[]>([]);
+const endpointBDynamicContours = shallowRef<DynamicContourSample[]>([]);
+const isDynamicContinuum = computed(() => Boolean(audioA.value || audioB.value));
 const contoursSource = ref<'loading' | 'vtl-hd' | 'fallback'>('loading');
 const contoursError = ref('');
 const recoveringEndpoints = computed(
@@ -706,6 +714,7 @@ const cellSvgRefs = new Map<string, SVGSVGElement>();
 const view = useContinuumViewport();
 const activePlaybackKey = ref('');
 const activePlaybackFrame = shallowRef<PaintableTractFrame | null>(null);
+const activePlaybackProgress = ref(0);
 const playingSequence = ref(false);
 let batchDebounceTimer = 0;
 let batchReqSeq = 0;
@@ -723,11 +732,12 @@ function paintSingleRealHdCell(key: string, svgEl: SVGSVGElement): void {
 }
 
 const playback = createContinuumPlayback(
-  (key, frame) => {
+  (key, frame, progress) => {
     const svg = cellSvgRefs.get(key);
     if (frame) {
       activePlaybackKey.value = key;
       activePlaybackFrame.value = frame;
+      activePlaybackProgress.value = progress ?? 0;
       if (svg) {
         paintReferenceFrame(svg, frame);
         svg.setAttribute('viewBox', view.viewBox.value);
@@ -735,6 +745,7 @@ const playback = createContinuumPlayback(
     } else {
       activePlaybackKey.value = '';
       activePlaybackFrame.value = null;
+      activePlaybackProgress.value = 0;
       if (svg) paintSingleRealHdCell(key, svg);
     }
   },
@@ -1062,7 +1073,10 @@ const selectedCell = computed(() => matrixCells.value.find((c) => c.key === sele
 const measuredCell = computed(() => matrixCells.value.find((cell) => cell.key === activePlaybackKey.value) ?? selectedCell.value);
 
 const endpointAContour = computed<InspectorContourData | undefined>(() => {
-  const first = matrixCells.value[0];
+  const rowCells = selectedCell.value && dualAxis.value
+    ? matrixCells.value.filter((c) => c.stepB === selectedCell.value!.stepB)
+    : matrixCells.value;
+  const first = rowCells[0];
   if (!first) return undefined;
   return realContoursByKey.value[first.key];
 });
@@ -1097,11 +1111,137 @@ function paintAllRealHdCells(): void {
 let batchAbort: AbortController | null = null;
 let cellAbort: AbortController | null = null;
 
+function activeVoicedRange(source: typeof audioA.value): [number, number] | null {
+  const rows = source?.m27RowsPa;
+  if (!rows?.length) return null;
+  const peakPr = Math.max(...rows.map((r) => r[18]));
+  if (peakPr < 30) return null;
+  const voicedIndices = rows.flatMap((r, i) => (r[18] > Math.max(40, peakPr * 0.25) && r[23] > 0.02 ? [i] : []));
+  if (voicedIndices.length < 2) return null;
+  const lo = Math.max(0, (voicedIndices[0] - 0.5) / rows.length);
+  const hi = Math.min(1, (voicedIndices[voicedIndices.length - 1] + 0.5) / rows.length);
+  return hi > lo + 0.04 ? [lo, hi] : null;
+}
+
+async function fetchDynamicAnalysisTracks(
+  cells: readonly GridCellView[],
+  signal: AbortSignal,
+  seq: number,
+): Promise<void> {
+  if (!isDynamicContinuum.value || !cells.length) {
+    formantTracksByKey.value = {};
+    endpointADynamicContours.value = [];
+    endpointBDynamicContours.value = [];
+    return;
+  }
+  const aSrc = audioA.value;
+  const bSrc = audioB.value;
+  const trajA = aSrc ? sourceTrajectory(aSrc) : [{ u: 0, params: tractRecordToArray19(endpointA.value.params) }];
+  const trajB = bSrc ? sourceTrajectory(bSrc) : [{ u: 0, params: tractRecordToArray19(endpointB.value.params) }];
+  if (!trajA.length || !trajB.length) return;
+
+  const targetRow = dualAxis.value ? (selectedCell.value?.stepB ?? 1) : 1;
+  const rowCells = dualAxis.value ? cells.filter((c) => c.stepB === targetRow) : cells;
+  if (!rowCells.length) return;
+
+  // Focus vowel-space trajectory sampling on the voiced span so leading/trailing silence doesn't flatten the curve
+  const rangeA = activeVoicedRange(aSrc);
+  const rangeB = activeVoicedRange(bSrc);
+  const uStart = rangeA && rangeB ? Math.min(rangeA[0], rangeB[0]) : (rangeA?.[0] ?? rangeB?.[0] ?? 0.1);
+  const uEnd = rangeA && rangeB ? Math.max(rangeA[1], rangeB[1]) : (rangeA?.[1] ?? rangeB?.[1] ?? 0.9);
+  const samplesPerCell = rowCells.length <= 5 ? 12 : rowCells.length <= 10 ? 8 : 6;
+
+  interface SampleTask {
+    cellKey: string;
+    isFirst: boolean;
+    isLast: boolean;
+    u: number;
+    pose19Oral: number[];
+    extras: TractPoseExtras;
+  }
+  const tasks: SampleTask[] = [];
+  const selAlign = alignment.value;
+
+  rowCells.forEach((cell, cIdx) => {
+    const warp = timeWarp(selAlign, cell.blend);
+    for (let s = 0; s < samplesPerCell; s++) {
+      const frac = s / (samplesPerCell - 1);
+      const u = uStart + (uEnd - uStart) * frac;
+      const [atA, atB] = warp(u);
+      const left = interpolatePose(trajA, atA);
+      const right = interpolatePose(trajB, atB);
+      const blended = tractArray19ToRecord(left.map((v, j) => mix(v, right[j], cell.blend)));
+      const locked = applyParameterAxes(applyLocks(tractArray19ToRecord(left), blended), cell.alphaA, cell.alphaB);
+      const pose19Oral = tractRecordToArray19(locked);
+      // Zero velum opening (VO, index 7) strictly for oral vowel-space F1-F2 formant plot,
+      // preventing fixed nasal-branch poles (~330/630 Hz) from masking oral vowel movement.
+      pose19Oral[7] = 0;
+      tasks.push({
+        cellKey: cell.key,
+        isFirst: cIdx === 0,
+        isLast: cIdx === rowCells.length - 1,
+        u,
+        pose19Oral,
+        extras: cell.extras,
+      });
+    }
+  });
+
+  const nextTracks: Record<string, FormantTrackPoint[]> = {};
+  const dynA: DynamicContourSample[] = [];
+  const dynB: DynamicContourSample[] = [];
+  const spk = normalizeFactorySpeaker(activeSpeaker.value);
+
+  // Batch in chunks of <= 60 frames to stay within /api/vtl/batch-contours 64-pose limit
+  for (let offset = 0; offset < tasks.length; offset += 60) {
+    if (signal.aborted || seq !== batchReqSeq) return;
+    const chunk = tasks.slice(offset, offset + 60);
+    const res = await defaultVtlTransport.requestBatchContours<BatchContoursApiResponse>(
+      {
+        speaker: spk,
+        poses: chunk.map((t) => t.pose19Oral),
+        lip_width_frames: chunk.map((t) => t.extras.lip_width),
+        larynx_height_frames: chunk.map((t) => t.extras.larynx_height),
+        tongue_shape_frames: chunk.map((t) => t.extras.tongue_shape),
+        lip_shape_frames: chunk.map((t) => t.extras.lip_shape),
+        manual_root_frames: chunk.map((t) => t.extras.manual_root),
+      },
+      { signal, timeoutMs: 30_000 },
+    );
+    if (signal.aborted || seq !== batchReqSeq) return;
+    if (!res.ok || !res.value.ok || !Array.isArray(res.value.items) || !res.value.parts || !res.value.part_sizes) continue;
+    const { parts, part_sizes: partSizes, items } = res.value;
+    chunk.forEach((task, idx) => {
+      const it = items[idx];
+      if (!it) return;
+      (nextTracks[task.cellKey] ??= []).push({
+        u: task.u,
+        f1_hz: it.f1_hz,
+        f2_hz: it.f2_hz,
+        f3_hz: it.f3_hz,
+      });
+      if ((task.isFirst || task.isLast) && Array.isArray(it.pts)) {
+        const parsedParts = splitM27TractParts(it.pts, parts, partSizes);
+        if (task.isFirst) dynA.push({ u: task.u, parts: parsedParts });
+        if (task.isLast) dynB.push({ u: task.u, parts: parsedParts });
+      }
+    });
+  }
+
+  if (signal.aborted || seq !== batchReqSeq) return;
+  formantTracksByKey.value = nextTracks;
+  endpointADynamicContours.value = dynA;
+  endpointBDynamicContours.value = dynB;
+}
+
 async function fetchBatchHdContours(): Promise<void> {
   if (!endpointsReady.value || axisError.value) {
     contoursSource.value = 'fallback';
     contoursError.value = '';
     realContoursByKey.value = {};
+    formantTracksByKey.value = {};
+    endpointADynamicContours.value = [];
+    endpointBDynamicContours.value = [];
     return;
   }
   const seq = ++batchReqSeq;
@@ -1170,6 +1310,7 @@ async function fetchBatchHdContours(): Promise<void> {
     contoursSource.value = 'vtl-hd';
     await nextTick();
     paintAllRealHdCells();
+    void fetchDynamicAnalysisTracks(cells, signal, seq);
   } catch (error) {
     if (signal.aborted) return;
     if (seq === batchReqSeq) {
@@ -1246,6 +1387,17 @@ watch(store.engineStatus, (status) => {
 watch(themeStamp, () => {
   void nextTick(() => paintAllRealHdCells());
 });
+
+watch(
+  () => selectedCell.value?.stepB,
+  (rowIdx) => {
+    if (!dualAxis.value || !isDynamicContinuum.value || !rowIdx || !matrixCells.value.length) return;
+    const key = `1-${rowIdx}`;
+    if (formantTracksByKey.value[key]?.length) return;
+    batchAbort ??= new AbortController();
+    void fetchDynamicAnalysisTracks(matrixCells.value, batchAbort.signal, batchReqSeq);
+  },
+);
 
 // Precise audio cache dependency key (persisted across tab switches)
 const audioDepsKey = computed(() => {
@@ -1628,6 +1780,58 @@ async function cellAction(cell: GridCellView, dest: 'play' | 'studio' | 'annotat
 
 function auditionCell(cell: GridCellView): void {
   void cellAction(cell, 'play');
+}
+
+async function auditionCompareAB(): Promise<void> {
+  if (controlsBusy.value || !selectedCell.value) return;
+  const rowCells = dualAxis.value
+    ? matrixCells.value.filter((c) => c.stepB === selectedCell.value!.stepB)
+    : matrixCells.value;
+  if (!rowCells.length) return;
+  const first = rowCells[0];
+  const last = rowCells[rowCells.length - 1];
+  const cur = selectedCell.value;
+  const uniqueMap = new Map<string, GridCellView>();
+  uniqueMap.set(first.key, first);
+  uniqueMap.set(cur.key, cur);
+  uniqueMap.set(last.key, last);
+  const compareCells = Array.from(uniqueMap.values());
+  const version = renderVersion.value;
+  const current = () => mounted && version === renderVersion.value;
+  const peak = synthesisGainMode.value === 'peak';
+  rendering.value = `对比 1 / ${compareCells.length}`;
+  try {
+    const ctx = studioAudioContext();
+    playback.stop();
+    await ctx.resume();
+    const results: RenderedCell[] = [];
+    for (const [idx, cell] of compareCells.entries()) {
+      if (!current()) return;
+      rendering.value = `对比 ${idx + 1} / ${compareCells.length}`;
+      results.push(await prepareCell(cell));
+    }
+    if (!current()) return;
+    const buffers = await Promise.all(results.map(async ({ wav }) => ctx.decodeAudioData(await wav.arrayBuffer())));
+    if (!current()) return;
+    const buffer = joinContinuumAudio(ctx, buffers);
+    if (peak) applyPeakAudioGain(buffer);
+    const gap = Math.round(ctx.sampleRate * CONTINUUM_GAP_S);
+    let cursor = 0;
+    const parts: ContinuumPlaybackPart[] = buffers.map((clip, idx) => {
+      const startS = cursor / ctx.sampleRate;
+      cursor += clip.length;
+      const endS = cursor / ctx.sampleRate;
+      cursor += gap;
+      return { key: compareCells[idx].key, startS, endS, frames: results[idx].frames };
+    });
+    playback.start(ctx, buffer, parts);
+    playingSequence.value = true;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return;
+    if (current()) store.pushToast(error instanceof Error ? error.message : String(error), 'warning');
+  } finally {
+    rendering.value = '';
+  }
 }
 
 async function renderSequence(mode: 'synth' | 'play' | 'download-seq' | 'zip'): Promise<void> {
@@ -2320,22 +2524,29 @@ watchEffect(() => {
             :cells="matrixCells"
             :selected-cell="selectedCell"
             :contours-by-key="realContoursByKey"
+            :formant-tracks-by-key="formantTracksByKey"
+            :is-dynamic="isDynamicContinuum"
             :endpoint-a-params="endpointA.params"
             :endpoint-b-params="endpointB.params"
             :endpoint-a-label="endpointA.label"
             :endpoint-b-label="endpointB.label"
             :endpoint-a-contour="endpointAContour"
             :endpoint-b-contour="endpointBContour"
+            :endpoint-a-dynamic-contours="endpointADynamicContours"
+            :endpoint-b-dynamic-contours="endpointBDynamicContours"
             :dual-axis="dualAxis"
             :view-box="view.viewBox.value"
             :view-box-obj="view.viewBoxObj.value"
             :ghost-mode="ghostMode"
             :active-playback-frame="activePlaybackFrame"
             :active-playback-key="activePlaybackKey"
+            :active-playback-progress="activePlaybackProgress"
+            :controls-busy="controlsBusy"
             :theme-stamp="themeStamp"
             @update:ghost-mode="(m) => (ghostMode = m)"
             @select-cell="selectCell"
             @audition-selected="selectedCell && !controlsBusy && auditionCell(selectedCell)"
+            @audition-compare="auditionCompareAB"
           />
         </template>
       </div>

@@ -20,12 +20,20 @@ export {
   IPA_SPACE_PAUSE_TOKEN,
 } from './text-tokens.ts';
 import {reviewKana,type KanaLexicon} from './kana-readings.ts';
+import {reviewRomajiWord,romajiToHiragana} from './romaji-readings.ts';
+import {
+  cantoneseHanziChoices,
+  reviewJyutpingToken,
+  reviewSpanishWord,
+  type LyricsLanguage,
+} from './multilang-g2p.ts';
+import type {JapaneseKanjiSegment} from './japanese-accent.ts';
 import {tr} from './shims.ts';
 
 export type Lexicon=Map<string,string[]>;
 export interface ReadingRow {
   word:string;ipa:string;choices:string[];pause:number;leadingPause?:number;
-  language?:'zh'|'en'|'ja'|'ipa';phraseEnd?:boolean;
+  language?:'zh'|'en'|'ja'|'yue'|'es'|'ipa';phraseEnd?:boolean;
   sourceWord?:string;
   syllableIndex?:number;
   syllableCount?:number;
@@ -34,17 +42,33 @@ export interface ReadingRow {
   kanaEntry?:{word:string;variants:string[][]};
 }
 
+export interface ReviewTextOptions {
+  splitEnglishSyllables?: boolean;
+  /** Singing mode disables Japanese Tokyo high-vowel devoicing. */
+  singing?: boolean;
+  /** Track primary lyrics language for disambiguating Hanzi & Latin words. */
+  primaryLang?: LyricsLanguage;
+  /** Optional track secondary lyrics language (at most 2 languages per track). */
+  secondaryLang?: LyricsLanguage | '';
+  /** Pre-segmented Japanese Kanji -> Kana map from `japaneseKanjiReadingsFor()`. */
+  jaKanji?: ReadonlyMap<string, readonly JapaneseKanjiSegment[]>;
+}
+
 const key=(word:string)=>word.normalize('NFC').toLowerCase().replace(/’/gu,"'").trim().replace(/\s+/gu,' ');
 export function needsEnglishDictionary(words:readonly string[]){
   return words.some(word=>!startsIpa(word)&&(/\p{Script=Latin}/u.test(word)||/^\d+$/u.test(word)));
 }
 
 const arpa:Record<string,string>={
-  AA:'ɑ',AE:'æ',AH:'ʌ',AO:'ɔ',AW:'aʊ',AY:'aɪ',B:'b',CH:'t͡ʃʰ',D:'d',DH:'ð',
+  AA:'ɑ',AE:'æ',AH:'ʌ',AO:'ɔ',AW:'aʊ',AX:'ə',AY:'aɪ',B:'b',CH:'t͡ʃʰ',D:'d',DH:'ð',DR:'dɹ',DX:'ɾ',
   EH:'ɛ',ER:'ɝ',EY:'eɪ',F:'f',G:'ɡ',HH:'h',IH:'ɪ',IY:'i',JH:'d͡ʒ',K:'k',
-  L:'l',M:'m',N:'n',NG:'ŋ',OW:'oʊ',OY:'ɔɪ',P:'p',R:'ɹ',S:'s',SH:'ʃ',
-  T:'t',TH:'θ',UH:'ʊ',UW:'u',V:'v',W:'w',Y:'j',Z:'z',ZH:'ʒ',
+  L:'l',M:'m',N:'n',NG:'ŋ',OW:'oʊ',OY:'ɔɪ',P:'p',Q:'ʔ',R:'ɹ',S:'s',SH:'ʃ',
+  T:'t',TH:'θ',TR:'tʰɹ',UH:'ʊ',UW:'u',V:'v',W:'w',Y:'j',Z:'z',ZH:'ʒ',
 };
+
+const VOWEL_ARPA = new Set([
+  'AA', 'AE', 'AH', 'AO', 'AW', 'AX', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW',
+]);
 
 const onsets=new Set(
   'bl br bj by dr dw fl fr fj fy gl gr gj gy kl kr kw kj ky mj my nj ny pl pr pj py sk sl sm sn sp st sw spj stj skj tr tw tj ty θr ʃr skl skr skw spl spr str fj vj hj'
@@ -72,9 +96,9 @@ export function arpaToIpaSyllables(reading: string): string[] {
       throw Error(tr('modules.vocal-tract.dictionary_invalid'));
     }
     const [, base, stress] = match;
-    if (stress) {
+    if (stress || VOWEL_ARPA.has(base)) {
       vowelIndices.push(phones.length);
-      vowelStresses.push(stress);
+      vowelStresses.push(stress || '0');
     }
     phones.push(
       stress === '0' && base === 'AH'
@@ -180,15 +204,15 @@ export function splitEnglishWordDisplay(word: string, count: number): string[] {
 const VOICELESS_END_RE = /(?:[ptkfθsʃ]|t͡ʃ)ʰ?$/u;
 const SIBILANT_END_RE = /(?:[szʃʒ]|t͡ʃ|d͡ʒ)ʰ?$/u;
 
-/** Morphological suffix & rule fallback for English words not directly in CMUdict. */
-function lookupEnglishSyllablesWithFallback(normWord: string, english: Lexicon): string[][] {
+/** Direct CMUdict & morphological suffix lookup (no last-resort letter-to-sound fallback). */
+function lookupEnglishDirectOrInflected(normWord: string, english: Lexicon): string[][] {
   const direct = english.get(normWord);
   if (direct && direct.length > 0) {
     return direct.map(arpaToIpaSyllables);
   }
   // Possessive 's
   if (normWord.endsWith("'s") && normWord.length > 2) {
-    const stem = lookupEnglishSyllablesWithFallback(normWord.slice(0, -2), english);
+    const stem = lookupEnglishDirectOrInflected(normWord.slice(0, -2), english);
     if (stem.length > 0) {
       return stem.map((syls) => {
         const copy = [...syls];
@@ -262,6 +286,13 @@ function lookupEnglishSyllablesWithFallback(normWord: string, english: Lexicon):
       });
     }
   }
+  return [];
+}
+
+/** Morphological suffix & rule fallback for English words not directly in CMUdict. */
+function lookupEnglishSyllablesWithFallback(normWord: string, english: Lexicon): string[][] {
+  const found = lookupEnglishDirectOrInflected(normWord, english);
+  if (found.length > 0) return found;
   // Simple letter-to-sound fallback for rare proper nouns / coined words
   if (/^[a-z]+$/u.test(normWord)) {
     const basic = normWord
@@ -320,7 +351,8 @@ async function readCmuText():Promise<string>{
       try{return await readFile(file,'utf8');}catch{}
     }
   }
-  const urls=['/vocal-tract/assets/cmudict.dict','./vocal-tract/assets/cmudict.dict'];
+  const base=((typeof import.meta!=='undefined'?(import.meta as {env?:{BASE_URL?:string}}).env?.BASE_URL:undefined)||'/').replace(/\/?$/,'/');
+  const urls=[`${base}vocal-tract/assets/cmudict.dict`,'/vocal-tract/assets/cmudict.dict','./vocal-tract/assets/cmudict.dict'];
   for(const url of urls){
     try{
       const r=await fetch(url);
@@ -353,15 +385,53 @@ export function reviewText(
   english:Lexicon,
   personal:Lexicon,
   kana?:KanaLexicon,
-  options?:{ splitEnglishSyllables?: boolean },
+  options?:ReviewTextOptions,
 ):ReadingRow[]{
   const splitEn = options?.splitEnglishSyllables !== false;
+  const singing = Boolean(options?.singing);
+  const primaryLang = options?.primaryLang;
+  const secondaryLang = options?.secondaryLang || undefined;
+  const jaKanji = options?.jaKanji;
+  const prefersJaHanzi = primaryLang === 'ja' || (secondaryLang === 'ja' && primaryLang !== 'zh' && primaryLang !== 'yue');
+  const prefersYueHanzi = primaryLang === 'yue' || (secondaryLang === 'yue' && primaryLang !== 'zh');
+
+  const latinPriority: LyricsLanguage[] = [];
+  if (primaryLang && primaryLang !== 'zh') latinPriority.push(primaryLang);
+  if (secondaryLang && secondaryLang !== 'zh' && !latinPriority.includes(secondaryLang)) latinPriority.push(secondaryLang);
+  const explicitLatinMode = latinPriority.length > 0;
+
   const rows:ReadingRow[]=[];
   let leadingPause=0;
   function row(word:string,choices:string[],language?:ReadingRow['language'],extra?:Partial<ReadingRow>){
     const clean=[...new Set(choices.filter(v=>v&&v!=='?'))];
     rows.push({word,choices:clean,ipa:clean[0]??'',pause:0,language,...extra});
   }
+  function pushEnglishVariants(word: string, sylVariants: string[][]) {
+    if (splitEn && sylVariants.length > 0 && sylVariants[0].length > 1) {
+      const primary = sylVariants[0];
+      const labels = splitEnglishWordDisplay(word, primary.length);
+      primary.forEach((sylIpa, sIdx) => {
+        const perSylChoices = sylVariants
+          .filter((v) => v.length === primary.length)
+          .map((v) => v[sIdx]);
+        row(labels[sIdx] ?? word, perSylChoices.length ? perSylChoices : [sylIpa], 'en', {
+          sourceWord: word,
+          syllableIndex: sIdx,
+          syllableCount: primary.length,
+        });
+      });
+      return;
+    }
+    const joinedChoices = sylVariants.map((s) => s.join(''));
+    row(word, joinedChoices, 'en', { sourceWord: word, syllableIndex: 0, syllableCount: 1 });
+  }
+  function lastBarePhone(): string | undefined {
+    const prev = rows.at(-1);
+    if (!prev || prev.pause > 0 || prev.phraseEnd) return undefined;
+    const clean = prev.ipa.replace(/[ˈˌ˥˦˧˨˩¹²³⁴⁵\u031e\u0308\u0325]/gu, '').trim();
+    return clean.at(-1);
+  }
+
   const phraseIndex=new Map<string,{parts:string[];choices:string[]}[]>();
   for(const [word,choices] of personal){
     const parts=tokens(word).map(key);if(!parts.length||parts.some(p=>pauseMark.test(p)))continue;
@@ -388,7 +458,48 @@ export function reviewText(
       rows.push({word:`[${inner}]`,ipa:inner,choices:[inner],pause:0,language:'ipa',linkedToNext});
       continue;
     }
-    if(isKanaRun(word)){rows.push(...reviewKana(word,kana));continue;}
+    // Contiguous Japanese Kanji+Kana run resolved offline via `ja-accent-v1` when Japanese is selected.
+    if (prefersJaHanzi && jaKanji?.size && (/^\p{Script=Han}$/u.test(word) || word === '々' || isKanaRun(word))) {
+      let j = i;
+      while (j < words.length && (/^\p{Script=Han}$/u.test(words[j]) || words[j] === '々' || isKanaRun(words[j]))) j++;
+      const joined = words.slice(i, j).join('');
+      const segments = jaKanji.get(joined);
+      if (segments?.length) {
+        for (const seg of segments) {
+          if (seg.reading) {
+            let moraRows: ReadingRow[] = [];
+            try {
+              moraRows = reviewKana(seg.reading, kana, { singing });
+            } catch {
+              const safe = seg.reading.replace(/^[ーっ]+/u, '');
+              if (safe) moraRows = reviewKana(safe, kana, { singing });
+            }
+            if (moraRows.length) {
+              const hasKanji = /[一-龯々]/u.test(seg.surface);
+              moraRows.forEach((mr, mIdx) => {
+                rows.push({
+                  ...mr,
+                  word: hasKanji && moraRows.length === 1 ? seg.surface : mr.word,
+                  language: 'ja',
+                  ...(hasKanji
+                    ? { sourceWord: seg.surface, syllableIndex: mIdx, syllableCount: moraRows.length }
+                    : {}),
+                });
+              });
+              continue;
+            }
+          }
+          // Unlisted rare Kanji fallback
+          for (const ch of seg.surface) {
+            const token = convertText(ch, standard)[0];
+            row(ch, token.kind === 'mapped' ? [token.value, ...variantsFor(token, standard).map((v) => v.value)] : [], 'zh');
+          }
+        }
+        i = j - 1;
+        continue;
+      }
+    }
+    if(isKanaRun(word)){rows.push(...reviewKana(word,kana,{singing}));continue;}
     if(pauseMark.test(word)){
       const previous=rows.at(-1);
       const duration=longPause.test(word)?IPA_LONG_PAUSE_MS:180;
@@ -438,28 +549,78 @@ export function reviewText(
     }
     if(/^['’"“”‘’()（）《》「」\-—]$/u.test(word))continue;
     if(/^\p{Script=Han}$/u.test(word)){
+      if (prefersYueHanzi) {
+        const yueChoices = cantoneseHanziChoices(word);
+        if (yueChoices.length) {
+          row(word, yueChoices, 'yue');
+          continue;
+        }
+      }
       const token=convertText(word,standard)[0];
       row(word,token.kind==='mapped'?[token.value,...variantsFor(token,standard).map(v=>v.value)]:[],'zh');continue;
     }
     if(/\p{Script=Latin}/u.test(word)){
-      const sylVariants = lookupEnglishSyllablesWithFallback(normalized, english);
-      if(splitEn && sylVariants.length > 0 && sylVariants[0].length > 1){
-        const primary = sylVariants[0];
-        const labels = splitEnglishWordDisplay(word, primary.length);
-        primary.forEach((sylIpa, sIdx) => {
-          const perSylChoices = sylVariants
-            .filter((v) => v.length === primary.length)
-            .map((v) => v[sIdx]);
-          row(labels[sIdx] ?? word, perSylChoices.length ? perSylChoices : [sylIpa], 'en', {
-            sourceWord: word,
-            syllableIndex: sIdx,
-            syllableCount: primary.length,
-          });
-        });
-        continue;
+      if (explicitLatinMode) {
+        let handled = false;
+        for (const lang of latinPriority) {
+          if (lang === 'ja') {
+            const jaRows = reviewRomajiWord(word, kana, { singing });
+            if (jaRows?.length) {
+              rows.push(...jaRows);
+              handled = true;
+              break;
+            }
+          } else if (lang === 'es') {
+            const esRows = reviewSpanishWord(word, { prevPhone: lastBarePhone(), splitSyllables: splitEn });
+            if (esRows?.length) {
+              rows.push(...esRows);
+              handled = true;
+              break;
+            }
+          } else if (lang === 'yue') {
+            const nextTok = words[i + 1];
+            const withTone = nextTok && /^[1-6]$/u.test(nextTok) ? reviewJyutpingToken(word + nextTok) : null;
+            if (withTone?.length) {
+              rows.push(...withTone);
+              i += 1;
+              handled = true;
+              break;
+            }
+            const yueRows = reviewJyutpingToken(word);
+            if (yueRows?.length) {
+              rows.push(...yueRows);
+              handled = true;
+              break;
+            }
+          } else if (lang === 'en') {
+            const directEn = lookupEnglishDirectOrInflected(normalized, english);
+            if (directEn.length > 0) {
+              pushEnglishVariants(word, directEn);
+              handled = true;
+              break;
+            }
+          }
+        }
+        if (handled) continue;
+      } else {
+        // Auto mode (default): CMUdict + inflections first; if unknown in CMUdict but matches built-in
+        // Japanese dictionary as valid romaji, decode as Japanese romaji; otherwise fall back to English LTS.
+        const directEn = lookupEnglishDirectOrInflected(normalized, english);
+        if (directEn.length > 0) {
+          pushEnglishVariants(word, directEn);
+          continue;
+        }
+        const hira = romajiToHiragana(word);
+        if (hira && kana?.has(hira)) {
+          const jaRows = reviewRomajiWord(word, kana, { singing });
+          if (jaRows?.length) {
+            rows.push(...jaRows);
+            continue;
+          }
+        }
       }
-      const joinedChoices = sylVariants.map((s) => s.join(''));
-      row(word, joinedChoices, 'en', { sourceWord: word, syllableIndex: 0, syllableCount: 1 });
+      const sylVariants = lookupEnglishSyllablesWithFallback(normalized, english);
+      pushEnglishVariants(word, sylVariants);
       continue;
     }
     row(word, [], undefined);

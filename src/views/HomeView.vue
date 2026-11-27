@@ -393,7 +393,7 @@ const engineBadge = computed(() => {
             <NavArtwork item="model-matrix" />
           </span>
           <span class="banner-copy">
-            <strong>端侧 9 模矩阵</strong>
+            <strong>端侧 8 模矩阵</strong>
             <span>查阅 Vox2Tract-Lite、Tract2Vox-Lite 与 VTL 2.4 架构报告</span>
           </span>
           <span class="banner-action">

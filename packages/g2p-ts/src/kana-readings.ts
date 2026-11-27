@@ -86,6 +86,8 @@ export interface ReviewKanaOptions{
   accent?:number;
   /** True when the end of the input is a phrase/utterance boundary. */
   phraseEnd?:boolean;
+  /** Singing mode disables Tokyo high-vowel devoicing (keeping full voiced /i, ɯ̈ᵝ/ on sustained notes). */
+  singing?:boolean;
 }
 
 function classifyMoraicNasal(nextIpa:string):string{
@@ -255,7 +257,7 @@ export function reviewKana(text:string,lexicon?:KanaLexicon,options?:ReviewKanaO
     previousVowel=vowelAtEnd(choices[0]);
   }
   if(lexicon?.size)dictionaryRows(rows,boundaries,lexicon);
-  applyTokyoHighVowelDevoicing(rows,boundaries,options);
+  if(!options?.singing)applyTokyoHighVowelDevoicing(rows,boundaries,options);
   if(leading&&rows.length)rows[0].leadingPause=leading;
   return rows;
 }

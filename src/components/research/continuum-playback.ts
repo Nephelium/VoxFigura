@@ -8,7 +8,7 @@ export interface ContinuumPlaybackPart {
 }
 
 export function createContinuumPlayback(
-  paint: (key: string, frame: PaintableTractFrame | null) => void,
+  paint: (key: string, frame: PaintableTractFrame | null, progress?: number) => void,
   onStop: () => void,
 ) {
   let source: AudioBufferSourceNode | undefined;
@@ -16,7 +16,7 @@ export function createContinuumPlayback(
   let activeKey = '';
 
   function clearFrame() {
-    if (activeKey) paint(activeKey, null);
+    if (activeKey) paint(activeKey, null, 0);
     activeKey = '';
   }
 
@@ -41,22 +41,32 @@ export function createContinuumPlayback(
     const origin = context.currentTime + 0.015;
     let partIndex = 0;
     let lastFrame: PaintableTractFrame | undefined;
+    let lastProgress = -1;
     function tick() {
       if (source !== node) return;
       const now = Math.max(0, context.currentTime - origin);
       while (parts[partIndex] && now >= parts[partIndex].endS) partIndex++;
       const part = parts[partIndex];
       if (part && part.startS <= now) {
-        if (activeKey !== part.key) clearFrame();
+        if (activeKey !== part.key) {
+          clearFrame();
+          lastFrame = undefined;
+          lastProgress = -1;
+        }
         activeKey = part.key;
-        const next = part.frames.findIndex(frame => frame.t_s > now - part.startS);
+        const localT = now - part.startS;
+        const progress = Math.max(0, Math.min(1, localT / Math.max(1e-4, part.endS - part.startS)));
+        const next = part.frames.findIndex(frame => frame.t_s > localT);
         const frame = part.frames[next < 0 ? part.frames.length - 1 : Math.max(0, next - 1)];
-        if (frame && lastFrame !== frame) {
+        if (frame && (lastFrame !== frame || Math.abs(progress - lastProgress) >= 0.008)) {
           lastFrame = frame;
-          paint(part.key, frame);
+          lastProgress = progress;
+          paint(part.key, frame, progress);
         }
       } else {
         clearFrame();
+        lastFrame = undefined;
+        lastProgress = -1;
       }
       animation = requestAnimationFrame(tick);
     }

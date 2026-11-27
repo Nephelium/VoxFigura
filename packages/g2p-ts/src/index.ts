@@ -104,6 +104,7 @@ export {
   reviewText,
   type Lexicon,
   type ReadingRow,
+  type ReviewTextOptions,
 } from './text-readings.ts';
 
 export {
@@ -143,7 +144,32 @@ export {
   countMoras,
   computeTokyoMoraContour,
   analyzeJapaneseAccent,
+  japaneseKanjiReadingsFor,
   type JapaneseAccentEntry,
   type JapaneseAccentMora,
   type JapaneseAccentPlan,
+  type JapaneseKanjiSegment,
 } from './japanese-accent.ts';
+
+export {
+  romajiToMoras,
+  romajiToHiragana,
+  isRomajiWord,
+  reviewRomajiWord,
+  reviewRomaji,
+  type RomajiMoraToken,
+} from './romaji-readings.ts';
+
+export {
+  LYRICS_LANGUAGE_OPTIONS,
+  isLyricsLanguage,
+  jyutpingToNarrowIpa,
+  isJyutpingToken,
+  cantoneseHanziChoices,
+  reviewJyutpingToken,
+  spanishWordToNarrowIpaSyllables,
+  reviewSpanishWord,
+  type LyricsLanguage,
+  type LanguageSelection,
+  type LyricsLanguageOption,
+} from './multilang-g2p.ts';

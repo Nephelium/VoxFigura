@@ -8,6 +8,7 @@ import {
 } from '@/data/reference-geometry';
 import { applyPeakAudioGain, synthesisGainMode } from '@/data/voice-renderer';
 import { computeAnalyticalMetrics, tractArray19ToRecord, type TractMetrics } from '@/stores/workbench';
+import { publicAssetUrl } from '@/utils/asset-url';
 import { samplePair } from '../samples';
 
 const SWAN_SLICE = {
@@ -16,11 +17,11 @@ const SWAN_SLICE = {
 } as const;
 
 const PREWARM_WAV_BY_CASE: Readonly<Record<string, string>> = {
-  swan: '/prewarm/suan_mandarin.mp3',
-  creaky: '/prewarm/creaky_vs_breathy.mp3',
-  khoomei: '/prewarm/overtone_khoomei.mp3',
-  cantonese: '/prewarm/cantonese_checked.mp3',
-  voqs: '/prewarm/voqs_quality.mp3',
+  swan: publicAssetUrl('prewarm/suan_mandarin.mp3'),
+  creaky: publicAssetUrl('prewarm/creaky_vs_breathy.mp3'),
+  khoomei: publicAssetUrl('prewarm/overtone_khoomei.mp3'),
+  cantonese: publicAssetUrl('prewarm/cantonese_checked.mp3'),
+  voqs: publicAssetUrl('prewarm/voqs_quality.mp3'),
 };
 
 const resolvedClips = new Map<string, ReferenceClip>();

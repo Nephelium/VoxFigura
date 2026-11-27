@@ -6,7 +6,7 @@ const TOOLBAR_ITEMS = [
   'home', 'assistant', 'main', 'ipa', 'm27', 'mixer', 'continuum', 'dialect', 'arranger', 'studio',
   'dock-toggle', 'history-undo', 'history-redo', 'quick-appearance', 'fullscreen', 'settings',
   'help', 'card-studio', 'ai-assistant', 'getting-started', 'user-guide', 'technical-report',
-  'check-updates', 'about', 'sun', 'moon', 'appearance', 'layout', 'engine', 'shortcuts', 'credits',
+  'check-updates', 'about', 'sun', 'moon', 'github', 'appearance', 'layout', 'engine', 'shortcuts', 'credits',
 ];
 
 describe('toolbar artwork', () => {

@@ -168,6 +168,11 @@ const neumorphism = {
     'M15 7.6v3.6 M13.2 9.4h3.6',
     'M19.1 16.3A8.9 8.9 0 0 1 7.7 4.9a7.8 7.8 0 1 0 11.4 11.4z',
   ],
+  github: [
+    'M9 19c-4 1.2-4-2-6-2.5m12 5v-3.8c0-1.1-.4-1.8-.9-2.2 2.9-.3 5.9-1.4 5.9-6.3a4.9 4.9 0 0 0-1.3-3.4 4.5 4.5 0 0 0-.1-3.3s-1.1-.3-3.5 1.3a12 12 0 0 0-6.2 0C6.5 2.2 5.4 2.5 5.4 2.5a4.5 4.5 0 0 0-.1 3.3A4.9 4.9 0 0 0 4 9.2c0 4.9 3 6 5.9 6.3-.5.4-.9 1.1-.9 2.2V21',
+    'M10.2 10.5h.01 M13.8 10.5h.01',
+    'M5.5 7.5a6.5 6.5 0 0 1 13 0c0 3.7-2.2 5.6-6.5 5.6S5.5 11.2 5.5 7.5Z',
+  ],
 } as const satisfies Record<string, ToolbarPaths>;
 
 type ToolbarItem = keyof typeof neumorphism;
@@ -327,6 +332,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'M15.5 7.1v4.4 M13.3 9.3h4.4',
       'M18.9 15.8A7.8 7.8 0 0 1 8.2 5.1 7.8 7.8 0 1 0 18.9 15.8z',
     ],
+    github: [
+      'M9.2 19.2c-3.7 1-3.7-1.9-5.6-2.3m11.4 4.5v-3.5c0-1-.3-1.7-.8-2.1 2.7-.3 5.5-1.3 5.5-5.9a4.5 4.5 0 0 0-1.2-3.2 4.2 4.2 0 0 0-.1-3.1s-1-.3-3.3 1.2a11.3 11.3 0 0 0-5.8 0C7 2.8 6 3.1 6 3.1a4.2 4.2 0 0 0-.1 3.1 4.5 4.5 0 0 0-1.2 3.2c0 4.6 2.8 5.6 5.5 5.9-.5.4-.8 1.1-.8 2.1v3.5',
+      'M9.6 10.4a.8.8 0 1 0 0 .1M14.4 10.4a.8.8 0 1 0 0 .1',
+      'M5.6 8.8c0-3.4 2.8-5 6.4-5s6.4 1.6 6.4 5-2.6 4.8-6.4 4.8-6.4-1.4-6.4-4.8z',
+    ],
   },
   // Faceted outlines with a single translucent face.
   glass: {
@@ -484,6 +494,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'M15.6 6.6v4 M13.6 8.6h4',
       'm8 4.7-.4 5.3 3.2 4.4 5.2 1.8 3.8-1.1-4 4.9H9l-5.2-5.1.3-6.1z',
     ],
+    github: [
+      'M9.3 19.4c-3.4.9-3.6-1.8-5.3-2.2M15 21v-3.4l-.8-1.9 4.2-1.8 1.4-3.7-.7-4 .2-3-3.3 1-6 0-3.3-1 .2 3-.7 4 1.4 3.7 4.2 1.8-.8 1.9V21',
+      'M9.8 10.6h.8M13.4 10.6h.8',
+      'm7.2 6.8 4.8-1 4.8 1 1.1 3.4-1.5 3.1-4.4 1.2-4.4-1.2-1.5-3.1z',
+    ],
   },
   // Open diagrams with the minimum number of strokes.
   minimal: {
@@ -610,6 +625,10 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
     moon: [
       'M18.5 16.5a8 8 0 0 1-11-11 8 8 0 1 0 11 11z',
       'M16 7.6h.01',
+    ],
+    github: [
+      'M9 19c-4.2 1.3-4.2-2.2-6-2.6m12 4.6v-3.5c0-1-.3-1.6-.8-2 2.8-.3 5.8-1.4 5.8-6.1 0-1.3-.5-2.5-1.3-3.4.1-.3.6-1.7-.1-3.4 0 0-1-.3-3.4 1.3a11.7 11.7 0 0 0-6.4 0C6.4 2.3 5.4 2.6 5.4 2.6c-.7 1.7-.2 3.1-.1 3.4-.8.9-1.3 2.1-1.3 3.4 0 4.7 3 5.8 5.8 6.1-.5.4-.8 1-.8 2V21',
+      'M10.5 10.4h.01M13.5 10.4h.01',
     ],
   },
   // Tonal foreground surfaces with a distinct secondary plane.
@@ -769,6 +788,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'M15.8 7.4v3.8 M13.9 9.3h3.8',
       'M7.5 7.1A7.1 7.1 0 0 0 17.4 17.2 8.3 8.3 0 0 1 7.5 7.1z',
     ],
+    github: [
+      'M9.1 19.5c-3.8 1.1-3.9-2-5.8-2.4M15.1 21v-3.7c0-.9-.4-1.6-.9-2 2.7-.4 5.6-1.5 5.6-6 0-1.2-.5-2.3-1.2-3.2.1-.4.5-1.7-.1-3.3 0 0-1-.3-3.2 1.2a11.5 11.5 0 0 0-6.6 0C6.7 2.5 5.7 2.8 5.7 2.8c-.6 1.6-.2 2.9-.1 3.3-.7.9-1.2 2-1.2 3.2 0 4.5 2.9 5.6 5.6 6-.5.4-.9 1.1-.9 2V21',
+      'M10 10.3l2 1.4 2-1.4',
+      'M5.2 9.3c0-3.3 2.9-5.1 6.8-5.1s6.8 1.8 6.8 5.1c0 3.2-2.6 4.8-6.8 4.8s-6.8-1.6-6.8-4.8z',
+    ],
   },
   // Straight cuts, squared marks, and an orthogonal grid.
   swiss: {
@@ -923,6 +947,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'M6 5h2v7l4 4h7v2l-3 2H9l-5-5V8z',
       'M15 6h3v3h-3z',
       'M15 6h3v3h-3z',
+    ],
+    github: [
+      'M9 20H7.5v-2.2H4.2v-1.6H9v3.8 M15 20v-4.2l4.2-2.2V6.8L17 4.2l-2 2H9l-2-2-2.2 2.6v6.8L9 15.8V20',
+      'M9 10.5h1.8 M13.2 10.5H15',
+      'M7 6.8h10v6.6H7z',
     ],
   },
   // Triangular, circular, and rectangular forms with flat color areas.
@@ -1082,6 +1111,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'm16 6 2.7 4.6h-5.4z',
       'M12 4.5a7.5 7.5 0 0 0 0 15z m4 1.5 2.7 4.6h-5.4z',
     ],
+    github: [
+      'M9.2 19.8c-3.5.7-3.6-1.8-5.2-2.2M15 20.4v-4c3-.5 4.8-2.3 4.8-5.9 0-1.4-.5-2.6-1.3-3.6l-.3-3.3-3.1 1.4a11 11 0 0 0-6.2 0L5.8 3.6l-.3 3.3c-.8 1-1.3 2.2-1.3 3.6 0 3.6 1.8 5.4 4.8 5.9v4',
+      'M12 8.2a2.3 2.3 0 1 0 0 4.6 2.3 2.3 0 1 0 0-4.6',
+      'M5.5 7.5h13v7h-13z',
+    ],
   },
   // Bold framing, angular contours, and a short offset silhouette.
   brutal: {
@@ -1239,6 +1273,11 @@ const artworkBySkin: Record<BuiltinSkinId, Readonly<Record<ToolbarItem, ToolbarP
       'm8.6 4.5-4 3.4-1 4.6 2.4 5.2 4.8 2.2 5.4-1.1 3.3-3.9-5.5.3-4.7-3.2z',
       'M15.7 6.2h.01 M18.4 8.6h.01',
       'm8.6 4.5-4 3.4-1 4.6 2.4 5.2 4.8 2.2 5.4-1.1 3.3-3.9-5.5.3-4.7-3.2z',
+    ],
+    github: [
+      'M8.8 19.8H4.6v-2.4h3.6m6.8 2.4v-4l3.8-1.8 1-4.8-1.2-4.6-2.9 1.4H8.3L5.4 4.6 4.2 9.2l1 4.8 3.8 1.8v4',
+      'M9 10.4h2M13 10.4h2',
+      'M5.4 6.5h13.2l.8 4.8-2.2 2.9H6.8L4.6 11.3z',
     ],
   },
 };

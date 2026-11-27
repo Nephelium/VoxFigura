@@ -225,7 +225,10 @@ export function representativeContinuumPose(source: WorkspaceAudio): { params: n
     } else {
       const peakPressure = Math.max(...rows.map(row => row[18]));
       const active = rows.flatMap((row, index) => row[18] > Math.max(20, peakPressure * 0.45) && row[23] > 0.05 ? [index] : []);
-      frame = active.length ? active[Math.floor(active.length / 2)] : Math.floor(rows.length / 2);
+      // Prefer a voiced oral nucleus frame (low velum opening VO = row[7]) over nasalized coda frames
+      const oralVoiced = active.filter(index => rows[index][7] <= 0.06 && rows[index][23] > 0.25);
+      const pool = oralVoiced.length ? oralVoiced : active;
+      frame = pool.length ? pool[Math.floor(pool.length / 2)] : Math.floor(rows.length / 2);
     }
     return { params: interpolatePose(trajectory, (frame + 0.5) / rows.length), f0Hz: rows[frame][17] };
   }

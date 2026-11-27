@@ -653,10 +653,11 @@ export function preloadPtbIpaPresets(speaker = 'JD2'): Promise<boolean> {
   if (inflight) return inflight;
 
   const task = (async (): Promise<boolean> => {
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/');
     const [ipaFile, pinyinFile, defaultFile] = await Promise.all([
-      fetchJsonSafe(`/vocal-tract/factory/${spk}/ipa.json`),
-      fetchJsonSafe(`/vocal-tract/factory/${spk}/pinyin.json`),
-      fetchJsonSafe('/vocal-tract/default-presets.json'),
+      fetchJsonSafe(`${base}vocal-tract/factory/${spk}/ipa.json`),
+      fetchJsonSafe(`${base}vocal-tract/factory/${spk}/pinyin.json`),
+      fetchJsonSafe(`${base}vocal-tract/default-presets.json`),
     ]);
 
     const index = new Map<string, RawPtbEntry>();

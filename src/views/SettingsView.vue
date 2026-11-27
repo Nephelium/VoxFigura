@@ -13,7 +13,7 @@ import {
   unloadLocalModel,
   type LiveLocalModelInfo,
 } from '@/data/local-models';
-import { APP_BRAND_NAME, APP_VERSION } from '@/data/app-branding';
+import { APP_BRAND_NAME, APP_REPO_SLUG, APP_REPO_URL, APP_VERSION } from '@/data/app-branding';
 import { hasUpdate, latestRelease, openUpdateModal } from '@/data/app-update';
 import { openStartupSplashPreview } from '@/data/startup-splash';
 import {
@@ -716,7 +716,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         <span>{{ tab.name }}</span>
       </button>
 
-      <div style="margin-top: auto; padding-top: 10px; border-top: 1px solid var(--panel-border)">
+      <div style="margin-top: auto; padding-top: 10px; border-top: 1px solid var(--panel-border); display: flex; flex-direction: column; gap: 6px">
         <button
           type="button"
           class="btn nav-item"
@@ -731,6 +731,20 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
           </span>
           <span class="mono muted" style="font-size: 0.78rem">v{{ APP_VERSION }}</span>
         </button>
+        <a
+          class="btn nav-item"
+          style="width: 100%; justify-content: space-between; text-decoration: none"
+          :href="APP_REPO_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          :title="APP_REPO_URL"
+        >
+          <span style="display: inline-flex; align-items: center; gap: 8px">
+            <NavArtwork item="github" toolbar theme-tint />
+            <span>开源仓库</span>
+          </span>
+          <span class="mono muted" style="font-size: 0.76rem">GitHub</span>
+        </a>
       </div>
     </aside>
 
@@ -1895,6 +1909,23 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
             <span class="mono muted" style="font-size: 0.833333rem">GPL-3.0-or-later</span>
           </div>
           <div class="p-body" style="padding: 12px; display: flex; flex-direction: column; gap: 10px">
+            <div class="setting-row">
+              <div>
+                <div class="setting-k">{{ APP_BRAND_NAME }} GitHub 开源仓库</div>
+                <div class="setting-desc mono">{{ APP_REPO_URL }}</div>
+              </div>
+              <a
+                class="btn sm primary"
+                style="text-decoration: none"
+                :href="APP_REPO_URL"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <IconSvg name="github" :size="13" />
+                <span>{{ APP_REPO_SLUG }}</span>
+                <IconSvg name="external-link" :size="11" />
+              </a>
+            </div>
             <div class="settings-grid-2">
               <div class="setting-row">
                 <div>

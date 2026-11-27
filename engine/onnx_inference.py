@@ -347,9 +347,49 @@ def extract_swift_f0_50hz(
 
     if len(pitch.times) == 0:
         return np.full(num_frames, 120.0, dtype=np.float32), np.zeros(num_frames, dtype=bool)
-    valid = np.isfinite(pitch.values)
-    if not valid.any():
+    raw_valid = np.isfinite(pitch.values)
+    if not raw_valid.any():
         return np.full(num_frames, 120.0, dtype=np.float32), np.zeros(num_frames, dtype=bool)
+
+    # Filter out isolated ultra-low-energy silence/noise false pitch detections
+    # (e.g. faint -38 dB leading room tone triggering a 1500 Hz harmonic spike under wide fmax).
+    valid = raw_valid.copy()
+    if len(x) >= 160:
+        half_win = 160  # ±10 ms @ 16 kHz
+        frame_rms = np.empty(len(pitch.times), dtype=np.float64)
+        for i, t_sec in enumerate(pitch.times):
+            c = int(round(float(t_sec) * ofr.SAMPLE_RATE_16K))
+            lo = max(0, c - half_win)
+            hi = min(len(x), c + half_win)
+            seg = x[lo:hi]
+            frame_rms[i] = float(np.sqrt(np.mean(seg * seg))) if len(seg) else 0.0
+        peak_rms = float(np.max(frame_rms)) if len(frame_rms) else 0.0
+        if peak_rms > 1e-4:
+            rms_floor = max(0.004, peak_rms * 0.035)
+            gated = valid & (frame_rms >= rms_floor)
+            if gated.any():
+                valid = gated
+
+    # Also drop tiny 1–2 frame isolated extreme octave-jump glitches surrounded by unvoiced gaps
+    if int(np.sum(valid)) >= 4:
+        med_f0 = float(np.median(pitch.values[valid]))
+        idx = 0
+        n_pts = len(valid)
+        cleaned = valid.copy()
+        while idx < n_pts:
+            if not valid[idx]:
+                idx += 1
+                continue
+            end = idx
+            while end < n_pts and valid[end]:
+                end += 1
+            if end - idx <= 2:
+                seg_vals = pitch.values[idx:end]
+                if np.all((seg_vals > med_f0 * 2.4) | (seg_vals < med_f0 / 2.4)):
+                    cleaned[idx:end] = False
+            idx = end
+        if cleaned.any():
+            valid = cleaned
 
     f0_interp = np.interp(target_times, pitch.times[valid], pitch.values[valid])
     f0_interp = np.clip(f0_interp, float(fmin), float(fmax)).astype(np.float32)

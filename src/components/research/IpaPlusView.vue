@@ -1852,7 +1852,8 @@ onMounted(async () => {
   window.addEventListener('vocalcut:tour-action', handleIpaTourAction);
   void preloadPtbIpaPresets(activeSpeaker.value);
   try {
-    const resp = await fetch('/data/ipa-plus-catalog.json');
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/');
+    const resp = await fetch(`${base}data/ipa-plus-catalog.json`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = (await resp.json()) as CatalogPayload;
     catalog.value = data;

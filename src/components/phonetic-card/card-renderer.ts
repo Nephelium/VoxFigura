@@ -67,7 +67,8 @@ export function loadVocalTractEmbedForExport(): Promise<VocalTractEmbedModule> {
       cachedEmbedPromise = null;
       reject(err);
     };
-    script.textContent = `import('/vocal-tract/embed.mjs').then((m) => window.${okKey}?.(m), (e) => window.${errKey}?.(e));`;
+    const embedUrl = JSON.stringify(`${(import.meta.env?.BASE_URL ?? '/').replace(/\/?$/, '/')}vocal-tract/embed.mjs`);
+    script.textContent = `import(${embedUrl}).then((m) => window.${okKey}?.(m), (e) => window.${errKey}?.(e));`;
     script.onerror = (ev) => (win[errKey] as ((e: unknown) => void) | undefined)?.(ev);
     document.head.appendChild(script);
   });

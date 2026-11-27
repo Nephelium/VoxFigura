@@ -1,13 +1,16 @@
 import { ref } from 'vue';
+import { publicAssetUrl } from '@/utils/asset-url';
 
 /**
  * Centralized application display naming & theme-matched brand icons for VoxFigura.
  */
 
 export const APP_BRAND_NAME = 'VoxFigura';
-export const APP_BRAND_ICON = '/app-icon.png';
+export const APP_BRAND_ICON = publicAssetUrl('app-icon.png');
 export const APP_BRAND_TAGLINE = '物理声道驱动的语音实验、标注与声乐编曲平台';
 export const APP_WINDOW_TITLE = 'VoxFigura · 语音实验与声乐编曲';
+export const APP_REPO_SLUG = 'Nephelium/VoxFigura';
+export const APP_REPO_URL = 'https://github.com/Nephelium/VoxFigura';
 export const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.0';
 export const APP_EDITION: 'public' | 'friends' | 'hackathon' =
   typeof __APP_EDITION__ !== 'undefined' ? __APP_EDITION__ : 'public';
@@ -23,14 +26,14 @@ export type AppIconVariant =
   | 'amber';
 
 export const APP_THEME_ICONS: Readonly<Record<AppIconVariant, string>> = {
-  yellow: '/icons/app-icon-yellow.png',
-  midnight: '/icons/app-icon-midnight.png',
-  rose: '/icons/app-icon-rose.png',
-  blue: '/icons/app-icon-blue.png',
-  green: '/icons/app-icon-green.png',
-  neutral: '/icons/app-icon-neutral.png',
-  purple: '/icons/app-icon-purple.png',
-  amber: '/icons/app-icon-amber.png',
+  yellow: publicAssetUrl('icons/app-icon-yellow.png'),
+  midnight: publicAssetUrl('icons/app-icon-midnight.png'),
+  rose: publicAssetUrl('icons/app-icon-rose.png'),
+  blue: publicAssetUrl('icons/app-icon-blue.png'),
+  green: publicAssetUrl('icons/app-icon-green.png'),
+  neutral: publicAssetUrl('icons/app-icon-neutral.png'),
+  purple: publicAssetUrl('icons/app-icon-purple.png'),
+  amber: publicAssetUrl('icons/app-icon-amber.png'),
 };
 
 function parseHexToRgb(hex: string): [number, number, number] | null {

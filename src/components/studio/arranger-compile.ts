@@ -31,7 +31,7 @@ interface ArrangementRoll {
   issueMsg: string;
   voice: {
     rows: (Pick<LyricRow, 'char' | 'ipa' | 'tone' | 'phraseEnd' | 'vibratoCents' | 'diminuendo' | 'phoneBoundaries'
-      | 'language' | 'sourceWord' | 'syllableIndex' | 'syllableCount'> & { readingChoices?: string[] })[];
+      | 'language' | 'sourceWord' | 'syllableIndex' | 'syllableCount' | 'breath' | 'clClosure'> & { readingChoices?: string[] })[];
     lyricsText: string;
     fullScoreStr: string;
   };
@@ -57,6 +57,8 @@ interface ArrangementOptions {
   vibrato: boolean;
   vibratoCents?: number;
   perturbation?: PerturbationConfig;
+  /** Whether `br` breath notes render as gentle unvoiced breath `[h]` (default true; false renders silence). */
+  renderBreath?: boolean;
 }
 
 const minPhoneSmp = (phone: SegmentAnchor) => phone.stop_timing
@@ -84,17 +86,37 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
   if (roll.notes.some(note => note.pressurePa < PRESSURE_LIMIT_PA.min || note.pressurePa > PRESSURE_LIMIT_PA.max)) return { issue: '简谱力度超出 0–1600 Pa' };
   const damping = assertInRange('damping_per_s', options.dampingRate, PORTAMENTO_RATE.min, PORTAMENTO_RATE.max, '1/s');
   if (!damping.ok) return { issue: damping.error.hint };
-  const groups: ArrangementRoll['notes'][] = roll.voice.rows.map(() => []);
-  for (const note of roll.notes) groups[note.rowIdx]?.push(note);
+  const renderBreath = options.renderBreath !== false;
+  const activeIndices: number[] = [];
+  const activeRows: ArrangementRoll['voice']['rows'] = [];
+  const rowIndexRemap = new Map<number, number>();
+  roll.voice.rows.forEach((row, idx) => {
+    const isBreath = Boolean(row.breath || /^br$/iu.test(row.char.trim()));
+    if (!renderBreath && isBreath) return;
+    rowIndexRemap.set(idx, activeRows.length);
+    activeIndices.push(idx);
+    activeRows.push(row);
+  });
+  const activeNotes = roll.notes
+    .map((note) => {
+      const mapped = rowIndexRemap.get(note.rowIdx);
+      return mapped === undefined ? null : { ...note, rowIdx: mapped };
+    })
+    .filter((note): note is ArrangementRoll['notes'][number] => note !== null);
+  if (!activeRows.length || !activeNotes.length) return { issue: '没有可合成的音节' };
+
+  const groups: ArrangementRoll['notes'][] = activeRows.map(() => []);
+  for (const note of activeNotes) groups[note.rowIdx]?.push(note);
   if (groups.some(group => !group.length)) return { issue: '简谱与歌词未逐音节对齐' };
-  const phonesByRow = roll.voice.rows.map(row => row.ipa.trim() ? splitIpaToPhonemes(row.ipa) : []);
+  const isBreathRow = activeRows.map((row) => Boolean(row.breath || /^br$/iu.test(row.char.trim())));
+  const phonesByRow = activeRows.map((row, idx) => (isBreathRow[idx] ? ['h'] : (row.ipa.trim() ? splitIpaToPhonemes(row.ipa) : [])));
   const unread = phonesByRow.findIndex(phones => !phones.length);
-  if (unread >= 0) return { issue: '请填写「' + roll.voice.rows[unread].char + '」的 IPA' };
-  const lexByRow = roll.voice.rows.map((row, idx) => matchingUserLexicon(row, phonesByRow[idx], options.readingStandard));
+  if (unread >= 0) return { issue: '请填写「' + activeRows[unread].char + '」的 IPA' };
+  const lexByRow = activeRows.map((row, idx) => (isBreathRow[idx] ? undefined : matchingUserLexicon(row, phonesByRow[idx], options.readingStandard)));
   const { clipId, speakerId, speaker, bpm, tonic, language = 'cmn', referenceHz, leadEnabled, leadMs, biasMs, dampingRate, vibrato } = options;
-  const targetsByRow: QtaTargetSpan[][] = roll.voice.rows.map(() => []);
-  arrangementPitchTargets(roll.notes, referenceHz, dampingRate).forEach((target, index) => {
-    targetsByRow[roll.notes[index].rowIdx]?.push(target);
+  const targetsByRow: QtaTargetSpan[][] = activeRows.map(() => []);
+  arrangementPitchTargets(activeNotes, referenceHz, dampingRate).forEach((target, index) => {
+    targetsByRow[activeNotes[index].rowIdx]?.push(target);
   });
   const samplesPerBeat = SAMPLE_RATE_HZ * 60 / bpm;
   const gapAfter = groups.map((group, index) => (
@@ -109,16 +131,17 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
     }
     if (breakAfter[index - 1]) runStart = index;
   }
-  const sylInputs = roll.voice.rows.map((row, index) => {
+  const sylInputs = activeRows.map((row, index) => {
     const id = `syl_${index + 1}`;
     const firstNote = groups[index][0];
     const nextSmp = breakAfter[index] ? groups[index].at(-1)!.endSmp : groups[index + 1][0].startSmp;
     const spanMs = Math.max(80, samplesToMs(nextSmp - firstNote.startSmp));
     const phones = phonesByRow[index];
     const lex = lexByRow[index];
+    const breath = isBreathRow[index];
     const poses = buildSegmentsForSyllable(id, phones, 0, Math.max(msToSamples(80), nextSmp - firstNote.startSmp), speaker, lex?.poseSetId);
     const hasRatios = lex?.segmentRatios?.length === poses.length;
-    const anticipates = leadEnabled && poses.some(phone => {
+    const anticipates = !breath && leadEnabled && poses.some(phone => {
       const traits = phoneTraits(phone.ipa);
       return phone.role === 'onset' && (traits.stop || traits.affricate || (traits.fricative && !traits.sonorant));
     });
@@ -126,15 +149,15 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
       id,
       text: row.char,
       segments: poses.map((phone, pIdx) => ({
-        id: phone.id, ipa: phone.ipa, role: phone.role, voiced: phone.voiced,
+        id: phone.id, ipa: phone.ipa, role: phone.role, voiced: breath ? false : phone.voiced,
         preferred_ms: hasRatios
           ? Math.max(20, Math.round(spanMs * lex!.segmentRatios![pIdx]))
           : phone.role === 'onset' ? (anticipates ? Math.max(20, leadMs) : 35) : 140,
-        stop_timing: phone.stop_timing,
+        stop_timing: breath ? undefined : phone.stop_timing,
       })),
       note_hz: firstNote.hz,
       note_beats: (nextSmp - firstNote.startSmp) / samplesPerBeat,
-      dynamic_level: firstNote.dynamic,
+      dynamic_level: breath ? -2 : firstNote.dynamic,
       lead_policy: anticipates ? 'nucleus_on_beat' as const : 'onset_on_beat' as const,
       lead_ms: anticipates ? leadMs : null,
       bias_ms: anticipates ? Math.min(0, biasMs) : 0,
@@ -171,6 +194,7 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
   for (const [index, scheduled] of scheduledRows.entries()) {
     const group = groups[index];
     const lex = lexByRow[index];
+    const breath = isBreathRow[index];
     const ipa = scheduled.segments.map((phone) => phone.ipa);
     const poses = buildSegmentsForSyllable(scheduled.id, ipa, scheduled.start_smp, scheduled.end_smp, speaker, lex?.poseSetId);
     const segments = scheduled.segments.map((phone, phoneIndex) => {
@@ -182,6 +206,7 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
       const customExtras = userPose?.extras;
       return {
         ...base,
+        voiced: breath ? false : base.voiced,
         params: customParams,
         lip_width: typeof customExtras?.lip_width === 'number' ? customExtras.lip_width : base.lip_width,
         larynx_height_cm: typeof customExtras?.larynx_height === 'number' ? customExtras.larynx_height : base.larynx_height_cm,
@@ -194,12 +219,12 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
           : base.lip_shape,
         start_smp: phone.start_smp,
         end_smp: phone.end_smp,
-        stop_timing: base.stop_timing && phone.end_smp - phone.start_smp >= msToSamples(
+        stop_timing: !breath && base.stop_timing && phone.end_smp - phone.start_smp >= msToSamples(
           base.stop_timing.closure_ms + base.stop_timing.release_ms,
         ) ? base.stop_timing : undefined,
       };
     });
-    const edit = roll.voice.rows[index];
+    const edit = activeRows[index];
     // Scale the saved proportions to this occurrence; a local boundary edit takes priority.
     const ratios=lex?.segmentRatios;
     const fromDictionary:number[]=[0];
@@ -223,27 +248,39 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
       }
     }
     const basePressure = group[0].pressurePa;
-    const pressure = new Map([[0, basePressure], [1, group.at(-1)!.pressurePa]]);
-    const progress = (sample: number) => (sample - scheduled.start_smp) / (scheduled.end_smp - scheduled.start_smp);
-    for (const note of group) {
-      if (note.startSmp >= scheduled.start_smp && note.startSmp < scheduled.end_smp) pressure.set(progress(note.startSmp), note.pressurePa);
-      if (note.endSmp > scheduled.start_smp && note.endSmp < scheduled.end_smp) pressure.set(progress(note.endSmp - 1), note.pressurePa);
-    }
-    if (roll.voice.rows[index].phraseEnd || gapAfter[index] >= msToSamples(75) || index === groups.length - 1) {
-      const end = Math.min(scheduled.end_smp, group.at(-1)!.endSmp);
-      const duration = Math.min(msToSamples(210), Math.round((end - scheduled.nucleus_start_smp) * .55));
-      if (duration > 0) {
-        const begin = end - duration;
-        let pressurePa = basePressure;
-        for (const note of group) {
-          if (note.startSmp > begin) break;
-          pressurePa = note.pressurePa;
+    const pressure = new Map<number, number>();
+    if (breath) {
+      // Gentle unvoiced breath envelope (soft airy inhalation/exhalation peaking ~190 Pa)
+      const scale = Math.max(0.55, Math.min(1.25, basePressure / 800));
+      pressure.set(0, 0);
+      pressure.set(0.22, Math.round(150 * scale));
+      pressure.set(0.55, Math.round(195 * scale));
+      pressure.set(0.86, Math.round(105 * scale));
+      pressure.set(1, 0);
+    } else {
+      pressure.set(0, basePressure);
+      pressure.set(1, group.at(-1)!.pressurePa);
+      const progress = (sample: number) => (sample - scheduled.start_smp) / (scheduled.end_smp - scheduled.start_smp);
+      for (const note of group) {
+        if (note.startSmp >= scheduled.start_smp && note.startSmp < scheduled.end_smp) pressure.set(progress(note.startSmp), note.pressurePa);
+        if (note.endSmp > scheduled.start_smp && note.endSmp < scheduled.end_smp) pressure.set(progress(note.endSmp - 1), note.pressurePa);
+      }
+      if (activeRows[index].phraseEnd || gapAfter[index] >= msToSamples(75) || index === groups.length - 1) {
+        const end = Math.min(scheduled.end_smp, group.at(-1)!.endSmp);
+        const duration = Math.min(msToSamples(210), Math.round((end - scheduled.nucleus_start_smp) * .55));
+        if (duration > 0) {
+          const begin = end - duration;
+          let pressurePa = basePressure;
+          for (const note of group) {
+            if (note.startSmp > begin) break;
+            pressurePa = note.pressurePa;
+          }
+          for (const point of pressure.keys()) if (point >= progress(begin)) pressure.delete(point);
+          [1, .84, .49, .16, 0].forEach((factor, point) => {
+            pressure.set(progress(begin + Math.round(duration * point / 4)), pressurePa * factor);
+          });
+          pressure.set(1, 0);
         }
-        for (const point of pressure.keys()) if (point >= progress(begin)) pressure.delete(point);
-        [1, .84, .49, .16, 0].forEach((factor, point) => {
-          pressure.set(progress(begin + Math.round(duration * point / 4)), pressurePa * factor);
-        });
-        pressure.set(1, 0);
       }
     }
     syllableOrder.push(scheduled.id);
@@ -251,8 +288,8 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
     syllables[scheduled.id] = {
       id: scheduled.id, text: scheduled.text, ipa,
       nucleus_index: Math.max(0, segments.findIndex((phone) => phone.role === 'nucleus')),
-      tone_levels: roll.voice.rows[index].tone ?? lex?.toneLevels,
-      reading_candidates: roll.voice.rows[index].readingChoices?.map(choice => choice.startsWith('[') ? choice : '[' + choice + ']'),
+      tone_levels: breath ? undefined : (activeRows[index].tone ?? lex?.toneLevels),
+      reading_candidates: activeRows[index].readingChoices?.map(choice => choice.startsWith('[') ? choice : '[' + choice + ']'),
       start_smp: scheduled.start_smp, end_smp: scheduled.end_smp, segments,
       anchor: {
         policy: sylInputs[index].lead_policy === 'nucleus_on_beat' ? 'nucleus_on_beat' : 'speech_timing',
@@ -265,14 +302,16 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
           u, pressure_pa: pressure_pa * (1 - u * (edit.diminuendo ?? 0) / 100),
         })),
         glottis: [],
-        vibrato: edit.vibratoCents === undefined ? undefined : {
-          enabled: edit.vibratoCents > 0, depth_cents: edit.vibratoCents,
-          delay_ms: 35, fade_in_ms: 70, fade_out_ms: 65, min_hold_ms: 150,
-        },
+        vibrato: breath
+          ? { enabled: false, depth_cents: 0, delay_ms: 0, fade_in_ms: 0, fade_out_ms: 0, min_hold_ms: 0 }
+          : edit.vibratoCents === undefined ? undefined : {
+            enabled: edit.vibratoCents > 0, depth_cents: edit.vibratoCents,
+            delay_ms: 35, fade_in_ms: 70, fade_out_ms: 65, min_hold_ms: 150,
+          },
       },
     };
   }
-  const pitchPins = restrictArrangerPitchPins(options.pitchPins ?? [], roll.notes);
+  const pitchPins = restrictArrangerPitchPins(options.pitchPins ?? [], activeNotes);
   return { clip: {
     id: clipId, kind: 'phrase', voice_id: speakerId, start_smp: 0,
     end_smp: totalSmp, variants: ['synth'], active_variant: 'synth',

@@ -225,6 +225,9 @@ const pxSize = computed(() => `${props.size}px`);
     <template v-else-if="name === 'external-link'">
       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" />
     </template>
+    <template v-else-if="name === 'github'">
+      <path d="M9 19c-4.3 1.3-4.3-2.3-6-2.8m12 4.8v-3.5c0-1-.3-1.7-.8-2.1 2.8-.3 5.8-1.4 5.8-6.2a4.8 4.8 0 0 0-1.3-3.3 4.5 4.5 0 0 0-.1-3.3s-1-.3-3.4 1.3a11.8 11.8 0 0 0-6.4 0C6.4 2.3 5.4 2.6 5.4 2.6a4.5 4.5 0 0 0-.1 3.3A4.8 4.8 0 0 0 4 9.2c0 4.8 3 5.9 5.8 6.2-.5.4-.8 1.1-.8 2.1V21" />
+    </template>
     <template v-else-if="name === 'sliders'">
       <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4" />
     </template>

@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { F0PinSegment, ScoreNotationId, SongTonic } from '@vocalcut/core';
+import type { LyricsLanguage } from '@vocalcut/g2p';
 import type { PianoKeyLabelMode } from './AlignedPianoRoll.vue';
 import type { LyricRow } from './arranger-edit';
 import type { ReconstructedVoiceRef } from './arranger-compile';
@@ -50,6 +51,9 @@ interface StoredVoiceDraft {
   shimmer?: number;
   vibratoCents?: number;
   consonantLead?: boolean;
+  primaryLang?: LyricsLanguage;
+  secondaryLang?: LyricsLanguage | '';
+  renderBreath?: boolean;
 }
 
 interface StoredArrangerDraft {
@@ -100,8 +104,18 @@ import {
   type NoteSpan,
   type ScoreMidiTrack,
 } from './midi-score';
-import { readSingingProject } from './singing-project';
+import {
+  inspectSingingProject,
+  readSingingProject,
+  type SingingProjectSummary,
+} from './singing-project';
 import { exportSvpProject, exportVsqxProject, type SingingExportTrack } from './singing-project-export';
+import {
+  applyBatchLyricsToEvents,
+  buildLyricsTextFromRows,
+  parseBatchLyricsSlots,
+  type BatchLyricSlot,
+} from './batch-lyrics';
 import { encodeArrangement, mixBuffers, type AudioFormat, type AudioStem } from './arranger-export';
 import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
 import { publishPanelSnapshot } from '@/data/panel-snapshots';
@@ -123,7 +137,7 @@ import {
   type F0PinPoint,
   type Syllable,
 } from '@vocalcut/core';
-import type { MappingStandard } from '@vocalcut/g2p';
+import { LYRICS_LANGUAGE_OPTIONS, type MappingStandard } from '@vocalcut/g2p';
 import { DEFAULT_TRACT_EXTRAS, useWorkbenchStore, type PlayAudioOptions } from '@/stores/workbench';
 import {
   pendingPianoPitch,
@@ -1156,6 +1170,7 @@ function compileVoicePart(id: string, voiceId: string, part: VoiceDraft, timelin
     pitchPins: restrictArrangerPitchPins(part.pitchPins ?? [], notes),
     vibrato: true,
     vibratoCents: part.vibratoCents,
+    renderBreath: part.renderBreath !== false,
     perturbation: part.flutter !== undefined || part.shimmer !== undefined
       ? { flutter: part.flutter ?? 0, shimmer: part.shimmer ?? 0, seed: 20261125 }
       : undefined,
@@ -1580,6 +1595,16 @@ function onArrangerKeyDown(event: KeyboardEvent) {
       event.preventDefault();
       return;
     }
+    if (pendingSinging.value) {
+      pendingSinging.value = undefined;
+      event.preventDefault();
+      return;
+    }
+    if (batchFillOpen.value) {
+      batchFillOpen.value = false;
+      event.preventDefault();
+      return;
+    }
     if (pendingMidi.value) {
       pendingMidi.value = undefined;
       event.preventDefault();
@@ -1603,7 +1628,7 @@ function onArrangerKeyDown(event: KeyboardEvent) {
     return;
   }
   if (store.activeOverlay.value !== 'none' || store.exportModalWorkspace.value || store.referencesModalOpen.value
-    || store.styleLabOpen.value || dictMenuOpen.value || pendingMidi.value) {
+    || store.styleLabOpen.value || dictMenuOpen.value || pendingMidi.value || pendingSinging.value || batchFillOpen.value) {
     return;
   }
   const focus = event.target;
@@ -1728,6 +1753,327 @@ const isTotallyEmpty = computed(() => parts.value.every(isEmptyPart));
 const midiInput = ref<HTMLInputElement>();
 const pendingMidi = shallowRef<ReturnType<typeof readMidiParts>>();
 const importIndexes = ref<number[]>([]);
+
+/* Dedicated SVP / VSQX Import Confirmation Modal (strictly separated from MIDI import) */
+const pendingSinging = shallowRef<{ file: File; summary: SingingProjectSummary }>();
+const singingImportIndexes = ref<number[]>([]);
+const singingPrimaryLang = ref<LyricsLanguage>('zh');
+const singingSecondaryLang = ref<LyricsLanguage | ''>('');
+const singingRenderBreath = ref(true);
+const singingImporting = ref(false);
+
+const primaryLangOptions = LYRICS_LANGUAGE_OPTIONS.map((o) => ({ value: o.id, label: o.label }));
+const primaryLangShortOptions = LYRICS_LANGUAGE_OPTIONS.map((o) => ({ value: o.id, label: o.shortLabel }));
+
+const singingSecondaryLangOptions = computed(() => [
+  { value: '', label: '无（单语种）' },
+  ...LYRICS_LANGUAGE_OPTIONS
+    .filter((o) => o.id !== singingPrimaryLang.value)
+    .map((o) => ({ value: o.id, label: o.label })),
+]);
+
+const activeSecondaryLangOptions = computed(() => [
+  { value: '', label: '无' },
+  ...LYRICS_LANGUAGE_OPTIONS
+    .filter((o) => o.id !== (active.value.primaryLang ?? 'zh'))
+    .map((o) => ({ value: o.id, label: o.shortLabel })),
+]);
+
+function setTrackPrimaryLang(value: string) {
+  const next = value as LyricsLanguage;
+  if (!LYRICS_LANGUAGE_OPTIONS.some((o) => o.id === next)) return;
+  editArranger('切换轨道主语种', () => {
+    active.value.primaryLang = next;
+    if (active.value.secondaryLang === next) active.value.secondaryLang = '';
+  });
+}
+
+function setTrackSecondaryLang(value: string) {
+  const next = (value === '' ? '' : value) as LyricsLanguage | '';
+  if (next && next === (active.value.primaryLang ?? 'zh')) return;
+  editArranger('切换轨道次语种', () => {
+    active.value.secondaryLang = next;
+  });
+}
+
+function setTrackRenderBreath(enabled: boolean) {
+  editArranger('切换换气声渲染', () => {
+    active.value.renderBreath = enabled;
+    mirrorPrimaryPartToProjectClip();
+  });
+}
+
+/* SV-style Batch Fill Lyrics Modal */
+const batchFillOpen = ref(false);
+const batchFillText = ref('');
+const batchFillStartIndex = ref(0);
+const batchFillPrimaryLang = ref<LyricsLanguage>('zh');
+const batchFillSecondaryLang = ref<LyricsLanguage | ''>('');
+const batchFillPreview = ref<BatchLyricSlot[]>([]);
+const batchFillBusy = ref(false);
+let batchFillPreviewSeq = 0;
+
+const batchFillSecondaryLangOptions = computed(() => [
+  { value: '', label: '无（单语种）' },
+  ...LYRICS_LANGUAGE_OPTIONS
+    .filter((o) => o.id !== batchFillPrimaryLang.value)
+    .map((o) => ({ value: o.id, label: o.shortLabel })),
+]);
+
+const batchFillOrderedEvents = computed(() =>
+  [...active.value.events].sort((a, b) => a.startSmp - b.startSmp || a.midi - b.midi),
+);
+
+const batchFillStartOptions = computed(() =>
+  batchFillOrderedEvents.value.map((ev, idx) => {
+    const row = ev.lyricId ? active.value.rows.find((r) => r.id === ev.lyricId) : undefined;
+    const tag = row?.char ? `「${row.char}」` : '（未填词）';
+    return { value: String(idx), label: `#${idx + 1} · ${jianpuKeyLabel(ev.midi, tonic.value, notation.value)} ${tag}` };
+  }),
+);
+
+async function refreshBatchFillPreview() {
+  const seq = ++batchFillPreviewSeq;
+  if (!batchFillText.value.trim()) {
+    batchFillPreview.value = [];
+    batchFillBusy.value = false;
+    return;
+  }
+  batchFillBusy.value = true;
+  try {
+    const slots = await parseBatchLyricsSlots(
+      batchFillText.value,
+      standard.value,
+      voice.value?.speaker ?? 'JD2',
+      {
+        primaryLang: batchFillPrimaryLang.value,
+        secondaryLang: batchFillSecondaryLang.value,
+        singing: true,
+      },
+    );
+    if (seq === batchFillPreviewSeq) batchFillPreview.value = slots;
+  } catch {
+    if (seq === batchFillPreviewSeq) batchFillPreview.value = [];
+  } finally {
+    if (seq === batchFillPreviewSeq) batchFillBusy.value = false;
+  }
+}
+
+watch([batchFillText, batchFillPrimaryLang, batchFillSecondaryLang, batchFillOpen], () => {
+  if (batchFillOpen.value) void refreshBatchFillPreview();
+});
+
+function openBatchFill() {
+  if (active.value.locked) {
+    store.pushToast('当前轨道已锁定', 'info');
+    return;
+  }
+  const ordered = batchFillOrderedEvents.value;
+  if (!ordered.length) {
+    store.pushToast('请先在钢琴卷帘添加或导入音符，再批量填词', 'info');
+    return;
+  }
+  const selIdx = selectedEvent.value ? ordered.findIndex((e) => e.id === selectedEvent.value) : 0;
+  batchFillStartIndex.value = selIdx >= 0 ? selIdx : 0;
+  batchFillPrimaryLang.value = active.value.primaryLang ?? 'zh';
+  batchFillSecondaryLang.value = active.value.secondaryLang ?? '';
+  const fallbackMidiLyrics = active.value.midiLyrics?.filter((l) => l.text.trim() !== '-').map((l) => l.text).join('') ?? '';
+  batchFillText.value = active.value.lyrics.trim() || fallbackMidiLyrics;
+  batchFillOpen.value = true;
+  closeVoicePopup();
+}
+
+async function confirmBatchFill() {
+  if (active.value.locked || !batchFillText.value.trim()) return;
+  const slots = await parseBatchLyricsSlots(
+    batchFillText.value,
+    standard.value,
+    voice.value?.speaker ?? 'JD2',
+    {
+      primaryLang: batchFillPrimaryLang.value,
+      secondaryLang: batchFillSecondaryLang.value,
+      singing: true,
+    },
+  );
+  if (!slots.length) {
+    store.pushToast('未解析到可填入的歌词音节', 'warning');
+    return;
+  }
+  const part = active.value;
+  const applied = applyBatchLyricsToEvents(part.events, part.rows, batchFillStartIndex.value, slots);
+  editArranger('批量填入歌词', () => {
+    part.primaryLang = batchFillPrimaryLang.value;
+    part.secondaryLang = batchFillSecondaryLang.value === batchFillPrimaryLang.value ? '' : batchFillSecondaryLang.value;
+    part.events = applied.events;
+    part.rows = applied.rows;
+    part.lyrics = applied.lyrics;
+    part.appliedLyrics = applied.lyrics;
+    part.trackKind = 'vocal';
+    const fmt = formatEventsAsNotation(part.events, part.rows, tonic.value, bpm.value, notation.value, leadingSmp, part.beatMap);
+    part.scoreEditor = fmt.full;
+    part.appliedScoreEditor = fmt.full;
+    scoreDraft.value = null;
+    stopInstrumentPreview();
+    mirrorPrimaryPartToProjectClip();
+  });
+  batchFillOpen.value = false;
+  store.pushToast(`已从第 ${batchFillStartIndex.value + 1} 个音符起覆盖填入 ${applied.appliedCount} 个音符歌词`, 'success', 2400);
+}
+
+/** Double-click inline edit of a single note block's lyric (`text`, `-` melisma, `br`, `cl`, `[IPA]`, or empty to unbind). */
+async function onEditNoteLyric(eventId: string, rawText: string) {
+  const part = active.value;
+  if (part.locked) return;
+  const ordered = [...part.events].sort((a, b) => a.startSmp - b.startSmp || a.midi - b.midi);
+  const idx = ordered.findIndex((e) => e.id === eventId);
+  if (idx < 0) return;
+  const text = rawText.trim();
+
+  const rebuildFromEvents = (nextEvents: EventNote[], extraRows: LyricRow[] = []) => {
+    const rowMap = new Map<string, LyricRow>([
+      ...part.rows.map((r) => [r.id, r] as const),
+      ...extraRows.map((r) => [r.id, r] as const),
+    ]);
+    const orderedRows: LyricRow[] = [];
+    const seen = new Set<string>();
+    for (const ev of [...nextEvents].sort((a, b) => a.startSmp - b.startSmp || a.midi - b.midi)) {
+      if (!ev.lyricId || seen.has(ev.lyricId)) continue;
+      const row = rowMap.get(ev.lyricId);
+      if (row && !row.instrumental) {
+        orderedRows.push(row);
+        seen.add(ev.lyricId);
+      }
+    }
+    part.events = nextEvents;
+    part.rows = orderedRows;
+    const lyrics = buildLyricsTextFromRows(orderedRows);
+    part.lyrics = lyrics;
+    part.appliedLyrics = lyrics;
+    if (orderedRows.length) part.trackKind = 'vocal';
+    const fmt = formatEventsAsNotation(part.events, part.rows, tonic.value, bpm.value, notation.value, leadingSmp, part.beatMap);
+    part.scoreEditor = fmt.full;
+    part.appliedScoreEditor = fmt.full;
+    scoreDraft.value = null;
+    stopInstrumentPreview();
+    mirrorPrimaryPartToProjectClip();
+  };
+
+  if (!text) {
+    editArranger('清除音符歌词', () => {
+      const nextEvents = part.events.map((e) => (e.id === eventId ? { ...e, lyricId: undefined, sourceLyric: undefined, sourcePhones: undefined } : e));
+      rebuildFromEvents(nextEvents);
+    });
+    return;
+  }
+
+  if (text === '-' || text === '—' || text === '－') {
+    let prevRowId: string | undefined;
+    for (let k = idx - 1; k >= 0; k--) {
+      if (ordered[k].lyricId) {
+        prevRowId = ordered[k].lyricId;
+        break;
+      }
+    }
+    if (!prevRowId) {
+      store.pushToast('前面没有可延长的歌词音符', 'warning');
+      return;
+    }
+    editArranger('设为连音延长 (-)', () => {
+      const nextEvents = part.events.map((e) => (e.id === eventId ? { ...e, lyricId: prevRowId, sourceLyric: '-', sourcePhones: undefined } : e));
+      rebuildFromEvents(nextEvents);
+    });
+    return;
+  }
+
+  const readings = await analyzeLyrics(text, standard.value, voice.value?.speaker ?? 'JD2', false, {
+    primaryLang: part.primaryLang,
+    secondaryLang: part.secondaryLang,
+    singing: true,
+  });
+  if (!alive || active.value !== part) return;
+  const targetEvent = part.events.find((e) => e.id === eventId);
+  if (!targetEvent) return;
+
+  const combinedIpa = readings.map((r) => r.ipa).filter(Boolean).join('');
+  const primary = readings[0];
+  const sharedByOthers = targetEvent.lyricId
+    ? part.events.some((e) => e.id !== eventId && e.lyricId === targetEvent.lyricId)
+    : false;
+  const existingRow = targetEvent.lyricId ? part.rows.find((r) => r.id === targetEvent.lyricId) : undefined;
+
+  editArranger('双击修改音符歌词', () => {
+    if (existingRow && !sharedByOthers) {
+      const updatedRow: LyricRow = {
+        ...existingRow,
+        char: readings.length > 1 ? text : (primary?.char ?? text),
+        ipa: combinedIpa || primary?.ipa || '',
+        choices: primary?.choices?.length ? [...new Set([combinedIpa || primary.ipa, ...primary.choices])] : (combinedIpa ? [combinedIpa] : []),
+        language: primary?.language ?? part.primaryLang ?? 'zh',
+        breath: primary?.breath,
+        clClosure: primary?.clClosure,
+        phoneBoundaries: undefined,
+      };
+      const nextEvents = part.events.map((e) => (e.id === eventId ? { ...e, sourceLyric: updatedRow.char, sourcePhones: undefined } : e));
+      rebuildFromEvents(nextEvents, [updatedRow]);
+      activeRowId.value = updatedRow.id;
+    } else {
+      const freshRow: LyricRow = {
+        id: crypto.randomUUID(),
+        char: readings.length > 1 ? text : (primary?.char ?? text),
+        ipa: combinedIpa || primary?.ipa || '',
+        choices: primary?.choices?.length ? [...new Set([combinedIpa || primary.ipa, ...primary.choices])] : (combinedIpa ? [combinedIpa] : []),
+        tone: primary?.tone,
+        preferredSmp: primary?.preferredSmp,
+        score: '',
+        restBefore: 0,
+        language: primary?.language ?? part.primaryLang ?? 'zh',
+        breath: primary?.breath,
+        clClosure: primary?.clClosure,
+      };
+      const nextEvents = part.events.map((e) => (e.id === eventId ? { ...e, lyricId: freshRow.id, sourceLyric: freshRow.char, sourcePhones: undefined } : e));
+      rebuildFromEvents(nextEvents, [freshRow]);
+      activeRowId.value = freshRow.id;
+    }
+  });
+}
+
+/** Double-click inline edit of a single phoneme span directly on the piano roll phoneme tier. */
+function onEditPhoneIpa(rowId: string, phoneIndex: number, rawIpa: string) {
+  const part = active.value;
+  if (part.locked) return;
+  const row = part.rows.find((r) => r.id === rowId);
+  if (!row) return;
+  const cleanNew = rawIpa.trim().replace(/^\[|\]$/gu, '');
+  const toneMatch = /[˥˦˧˨˩¹²³⁴⁵]+$/u.exec(row.ipa.trim());
+  const trailingTone = toneMatch?.[0] ?? '';
+  const body = trailingTone ? row.ipa.trim().slice(0, -trailingTone.length) : row.ipa.trim();
+  const phones = splitIpaToPhonemes(body);
+  if (phoneIndex < 0 || phoneIndex >= phones.length) return;
+
+  const nextPhones = [...phones];
+  if (!cleanNew) {
+    if (nextPhones.length <= 1) {
+      store.pushToast('音节至少需保留一个音素', 'warning');
+      return;
+    }
+    nextPhones.splice(phoneIndex, 1);
+  } else {
+    nextPhones[phoneIndex] = cleanNew;
+  }
+  const nextIpa = nextPhones.join('') + trailingTone;
+  if (nextIpa === row.ipa) return;
+
+  editArranger('双击修改音素', () => {
+    row.ipa = nextIpa;
+    row.choices = [nextIpa, ...row.choices.filter((c) => c !== nextIpa)];
+    if (splitIpaToPhonemes(nextIpa).length !== phones.length) {
+      row.phoneBoundaries = undefined;
+    }
+    activeRowId.value = rowId;
+    mirrorPrimaryPartToProjectClip();
+  });
+}
+
 const selectedEvent = computed(() => timing.value.notes.find((n) => n.rowId === activeRowId.value && n.noteIndex === activeNoteIndex.value)?.eventId);
 const inspectedNote = computed(() => active.value.events.find((n) => n.id === selectedEvent.value));
 
@@ -1802,6 +2148,9 @@ function newEventPart(name: string, kind: TrackKind = 'instrument'): VoiceDraft 
     gain: 1,
     sourceKind: 'ipa-synth',
     interludeInstrument: instrument.value,
+    primaryLang: 'zh',
+    secondaryLang: '',
+    renderBreath: true,
   };
 }
 
@@ -1840,35 +2189,17 @@ async function importMidi(input: HTMLInputElement) {
   const draftKey = currentDraftKey.value;
   const current = () => alive && request === scoreImportRequest && draftKey === currentDraftKey.value;
   pendingMidi.value = undefined;
+  pendingSinging.value = undefined;
   try {
+    // Strictly separate Synthesizer V (.svp) / VOCALOID (.vsqx) import from standard MIDI (.mid/.midi)
     if (/\.(vsqx|svp)$/i.test(file.name)) {
-      const result = await readSingingProject(file, standard.value, voice.value?.speaker ?? 'JD2', leadingSmp);
+      const summary = await inspectSingingProject(file);
       if (!current()) return;
-      editArranger('导入歌声工程', () => {
-        if (parts.value.every(isEmptyPart) && result.bpm >= 40 && result.bpm <= 240) bpm.value = result.bpm;
-        const imported = result.parts.map((p) => {
-          const base: VoiceDraft = {
-            ...newEventPart(p.name, 'vocal'),
-            ...p,
-            scoreSource: file.name,
-            trackKind: 'vocal',
-          };
-          const fmt = formatEventsAsNotation(base.events, base.rows, tonic.value, bpm.value, notation.value, leadingSmp, base.beatMap);
-          base.scoreEditor = fmt.full;
-          base.appliedScoreEditor = fmt.full;
-          return base;
-        });
-        parts.value.push(...imported);
-        selectPart(imported.find((p) => p.events.length) ?? imported[0]);
-        allTracks.value = true;
-        mirrorPrimaryPartToProjectClip();
-      });
-      const missing = result.parts.flatMap((p) => p.rows.filter((row) => !row.ipa)).length;
-      const warnSuffix = result.warnings.length ? `（${result.warnings[0]}）` : '';
-      store.pushToast(
-        `已导入 ${result.parts.length} 条人声轨${missing ? `，请补充 ${missing} 处 IPA` : ''}${warnSuffix}`,
-        missing || result.warnings.length ? 'warning' : 'success',
-      );
+      pendingSinging.value = { file, summary };
+      singingImportIndexes.value = summary.tracks.filter((t) => t.noteCount > 0).map((t) => t.index);
+      singingPrimaryLang.value = summary.suggestedPrimaryLang;
+      singingSecondaryLang.value = summary.suggestedSecondaryLang;
+      singingRenderBreath.value = true;
       return;
     }
     const result = readMidiParts(new Uint8Array(await file.arrayBuffer()));
@@ -1877,6 +2208,62 @@ async function importMidi(input: HTMLInputElement) {
     importIndexes.value = result.parts.map((_, i) => i);
   } catch (error) {
     if (current()) store.pushToast(error instanceof Error ? error.message : '乐谱导入失败', 'warning');
+  }
+}
+
+async function confirmSinging() {
+  const pending = pendingSinging.value;
+  if (!pending || !singingImportIndexes.value.length || singingImporting.value) return;
+  singingImporting.value = true;
+  try {
+    const result = await readSingingProject(
+      pending.file,
+      standard.value,
+      voice.value?.speaker ?? 'JD2',
+      leadingSmp,
+      {
+        trackIndexes: singingImportIndexes.value,
+        primaryLang: singingPrimaryLang.value,
+        secondaryLang: singingSecondaryLang.value === singingPrimaryLang.value ? '' : singingSecondaryLang.value,
+        renderBreath: singingRenderBreath.value,
+      },
+    );
+    if (!alive) return;
+    const formatLabel = result.format === 'svp' ? 'SVP' : 'VSQX';
+    editArranger(`导入 ${formatLabel} 歌声工程`, () => {
+      if (parts.value.every(isEmptyPart) && result.bpm >= 40 && result.bpm <= 240) bpm.value = result.bpm;
+      const imported = result.parts.map((p) => {
+        const base: VoiceDraft = {
+          ...newEventPart(p.name, 'vocal'),
+          ...p,
+          scoreSource: pending.file.name,
+          trackKind: 'vocal',
+          primaryLang: p.primaryLang,
+          secondaryLang: p.secondaryLang,
+          renderBreath: p.renderBreath,
+        };
+        const fmt = formatEventsAsNotation(base.events, base.rows, tonic.value, bpm.value, notation.value, leadingSmp, base.beatMap);
+        base.scoreEditor = fmt.full;
+        base.appliedScoreEditor = fmt.full;
+        return base;
+      });
+      parts.value.push(...imported);
+      selectPart(imported.find((p) => p.events.length) ?? imported[0]);
+      lyricsOpen.value = true;
+      allTracks.value = true;
+      mirrorPrimaryPartToProjectClip();
+    });
+    const missing = result.parts.flatMap((p) => p.rows.filter((row) => !row.ipa)).length;
+    const warnSuffix = result.warnings.length ? `（${result.warnings[0]}）` : '';
+    store.pushToast(
+      `已导入 ${result.parts.length} 条 ${formatLabel} 人声轨${missing ? `，请补充 ${missing} 处 IPA` : ''}${warnSuffix}`,
+      missing || result.warnings.length ? 'warning' : 'success',
+    );
+    pendingSinging.value = undefined;
+  } catch (error) {
+    store.pushToast(error instanceof Error ? error.message : '歌声工程导入失败', 'warning');
+  } finally {
+    singingImporting.value = false;
   }
 }
 
@@ -2300,9 +2687,40 @@ async function applyLyrics(): Promise<boolean> {
   const lyrics = part.lyrics;
   busyLyrics.value = true;
   try {
-    const readings = await analyzeLyrics(lyrics, standard.value, voice.value?.speaker ?? 'JD2');
+    const readings = await analyzeLyrics(lyrics, standard.value, voice.value?.speaker ?? 'JD2', true, {
+      primaryLang: part.primaryLang,
+      secondaryLang: part.secondaryLang,
+      singing: true,
+    });
     if (id !== pronunciationRequest || part !== active.value || lyrics !== part.lyrics) return false;
-    const merged = mergeLyrics(part.rows.filter((row) => !row.instrumental), readings);
+    const oldVocal = part.rows.filter((row) => !row.instrumental);
+    // Order-preserving in-place rebind when syllable count is unchanged: editing middle words
+    // updates their IPA without unbinding notes or discarding pitch/timing/F0 edits.
+    const merged =
+      oldVocal.length > 0 && oldVocal.length === readings.length
+        ? readings.map((nextRow, idx) => {
+            const prevRow = oldVocal[idx];
+            const unchanged =
+              prevRow.char.normalize('NFC').toLocaleLowerCase()
+              === nextRow.char.normalize('NFC').toLocaleLowerCase();
+            return {
+              ...nextRow,
+              id: prevRow.id,
+              score: prevRow.score,
+              restBefore: prevRow.restBefore,
+              vibratoCents: prevRow.vibratoCents,
+              diminuendo: prevRow.diminuendo,
+              marks: prevRow.marks,
+              ipa: unchanged ? (prevRow.ipa || nextRow.ipa) : nextRow.ipa,
+              tone: unchanged ? (prevRow.tone ?? nextRow.tone) : nextRow.tone,
+              preferredSmp: unchanged ? (prevRow.preferredSmp ?? nextRow.preferredSmp) : nextRow.preferredSmp,
+              phoneBoundaries: unchanged ? prevRow.phoneBoundaries : undefined,
+              choices: unchanged
+                ? [...new Set([...prevRow.choices, ...nextRow.choices])]
+                : nextRow.choices,
+            };
+          })
+        : mergeLyrics(oldVocal, readings);
     const validIds = new Set(merged.map((r) => r.id));
     editArranger('解析歌词', () => {
       part.rows = merged;
@@ -2434,7 +2852,11 @@ async function applyScore() {
     }
     if (probe.inlineLyrics?.length) {
       const joined = probe.inlineLyrics.join(probe.inlineLyrics.some((w) => /^[A-Za-z]/u.test(w)) ? ' ' : '');
-      const readings = await analyzeLyrics(joined, standard.value, voice.value?.speaker ?? 'JD2');
+      const readings = await analyzeLyrics(joined, standard.value, voice.value?.speaker ?? 'JD2', true, {
+        primaryLang: currentPart.primaryLang,
+        secondaryLang: currentPart.secondaryLang,
+        singing: true,
+      });
       if (!alive || active.value !== currentPart) return;
       const bound = parseScoreToEvents(raw, readings, tonic.value, bpm.value, notation.value, leadingSmp, { instrumental: false });
       if (!bound.ok) {
@@ -2575,6 +2997,8 @@ function timingForPart(part: VoiceDraft) {
       vocalIndex: sungIndexes.get(rowId) ?? -1,
       char: row?.char ?? '',
       instrumental: !row,
+      breath: row?.breath,
+      clClosure: row?.clClosure,
       midi: event.midi,
       velocity: event.velocity,
       dynamic,
@@ -2629,6 +3053,11 @@ function rowDisplayText(row: LyricRow) {
 
 const pxLead = computed(() => (leadingSmp / ((SAMPLE_RATE_HZ * 60) / bpm.value)) * pixelsPerBeat.value);
 const vocalRows = computed(() => voiceRowsFor(active.value));
+const compiledVocalRows = computed(() =>
+  active.value.renderBreath === false
+    ? vocalRows.value.filter((row) => !(row.breath || /^br$/iu.test(row.char.trim())))
+    : vocalRows.value,
+);
 const hasInstruments = computed(() => timing.value.notes.some((n) => n.instrumental) || !isVocalTrack.value);
 const arrangedNotes = computed(() => vocalNotesOf(timing.value));
 const activePitchPins = computed(() => restrictArrangerPitchPins(active.value.pitchPins ?? [], arrangedNotes.value));
@@ -2645,7 +3074,7 @@ const playbackRowId = computed(() => {
       const syllable = clip.syllables[id];
       return syllable.start_smp <= sample && sample < syllable.end_smp;
     }) ?? -1;
-    if (clip) return index >= 0 ? vocalRows.value[index]?.id : undefined;
+    if (clip) return index >= 0 ? compiledVocalRows.value[index]?.id : undefined;
   }
   return timing.value.notes.find((note) => note.startSmp <= sample && sample < note.endSmp)?.rowId;
 });
@@ -2660,20 +3089,24 @@ const phonePlan = computed(() => (compilationIssue(true) ? undefined : compileAc
 const rollPhones = computed<RollPhone[]>(() => {
   const clip = phonePlan.value;
   if (!clip) return [];
-  return clip.syllable_order.flatMap((id, rowIndex) => clip.syllables[id].segments.map((phone, index, segments) => ({
-    rowId: vocalRows.value[rowIndex].id,
-    index,
-    ipa: phone.ipa,
-    startSmp: phone.start_smp,
-    endSmp: phone.end_smp,
-    boundary: index ? phoneBoundaryLimits(segments[index - 1], phone) : undefined,
-  })));
+  return clip.syllable_order.flatMap((id, rowIndex) => {
+    const targetRow = compiledVocalRows.value[rowIndex];
+    if (!targetRow) return [];
+    return clip.syllables[id].segments.map((phone, index, segments) => ({
+      rowId: targetRow.id,
+      index,
+      ipa: phone.ipa,
+      startSmp: phone.start_smp,
+      endSmp: phone.end_smp,
+      boundary: index ? phoneBoundaryLimits(segments[index - 1], phone) : undefined,
+    }));
+  });
 });
 
 function editPhoneBoundary(rowId: string, index: number, sample: number) {
   const clip = phonePlan.value;
-  const rowIndex = vocalRows.value.findIndex((row) => row.id === rowId);
-  const row = vocalRows.value[rowIndex];
+  const rowIndex = compiledVocalRows.value.findIndex((row) => row.id === rowId);
+  const row = compiledVocalRows.value[rowIndex];
   const syllable = clip?.syllables[clip.syllable_order[rowIndex]];
   if (!row || !syllable?.segments[index] || index <= 0) return;
   const { minSmp, maxSmp } = phoneBoundaryLimits(syllable.segments[index - 1], syllable.segments[index]);
@@ -2939,6 +3372,7 @@ function collectSingingExportData() {
       muted: part.muted,
       solo: part.solo,
       gain: part.gain,
+      primaryLang: part.primaryLang,
       notes: timeline.notes.map((n) => {
         const ev = n.eventId ? eventById.get(n.eventId) : undefined;
         const row = n.rowIndex >= 0 ? part.rows[n.rowIndex] : undefined;
@@ -2955,6 +3389,8 @@ function collectSingingExportData() {
           sourceAlphabet: ev?.sourceAlphabet,
           continuation,
           instrumental: n.instrumental,
+          breath: row?.breath,
+          clClosure: row?.clClosure,
         };
       }),
     });
@@ -4178,6 +4614,13 @@ onBeforeUnmount(() => {
                 @click="editArranger('填入 MIDI 歌词', () => { active.lyrics = active.midiLyrics!.filter((l) => l.text.trim() !== '-').map((l) => l.text).join(''); })"
               >填入 MIDI 歌词</button>
               <button
+                type="button"
+                class="btn xs"
+                :disabled="!active.events.length"
+                title="从选中音符起批量覆盖填词（支持空格分词、- 延音、br 换气、cl 促音）"
+                @click="openBatchFill"
+              >批量填词</button>
+              <button
                 ref="dictTriggerRef"
                 type="button"
                 class="btn xs dict-trigger"
@@ -4200,12 +4643,43 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="track-lang-bar" role="group" aria-label="轨道歌词语种设置（最多选 2 种）">
+            <label class="track-lang-item" title="主语种优先用于消歧汉字（普通话/日语/粤语）及拉丁词（英语/日语罗马字/西语/粤拼）">
+              <span class="muted">主语</span>
+              <CustomSelect
+                :model-value="active.primaryLang ?? 'zh'"
+                :options="primaryLangShortOptions"
+                size="xs"
+                aria-label="轨道主语种"
+                @update:model-value="setTrackPrimaryLang(String($event))"
+              />
+            </label>
+            <label class="track-lang-item" title="可选次语种（双语混唱时用于回退解析，最多 2 种语种）">
+              <span class="muted">次语</span>
+              <CustomSelect
+                :model-value="active.secondaryLang ?? ''"
+                :options="activeSecondaryLangOptions"
+                size="xs"
+                aria-label="轨道次语种"
+                @update:model-value="setTrackSecondaryLang(String($event))"
+              />
+            </label>
+            <label class="track-breath-toggle" title="开启时 br 换气音符渲染轻柔无声带气息声；关闭时按静音休止处理">
+              <input
+                type="checkbox"
+                :checked="active.renderBreath !== false"
+                @change="setTrackRenderBreath(($event.target as HTMLInputElement).checked)"
+              />
+              <span>换气声</span>
+            </label>
+          </div>
+
           <ArrangerFollowText
             id="arranger-lyrics"
             v-model="active.lyrics"
             :rows="3"
             :span="playingLyricSpan"
-            placeholder="输入歌词（可留空作纯器乐轨）。支持中文、英语、日语假名及 [IPA]"
+            placeholder="输入歌词（可留空作纯器乐轨）。支持普通话、日语（假名/汉字/罗马字）、英语、粤语、西语及 [IPA]"
             @apply="applyLyrics"
           />
           <small v-if="activeExampleCredit" class="muted credit-line">
@@ -4803,6 +5277,9 @@ onBeforeUnmount(() => {
           @range="setInstrumentRange"
           @clear-range="clearRange"
           @phone-boundary="editPhoneBoundary"
+          @edit-note-lyric="onEditNoteLyric"
+          @edit-phone-ipa="onEditPhoneIpa"
+          @inline-edit-start="closeVoicePopup"
         />
 
         <!-- Note / Syllable Micro-Tuning Popover (using CompactSlider for live feedback) -->
@@ -4966,7 +5443,7 @@ onBeforeUnmount(() => {
             <template v-else-if="pitchTool === 'erase'">横向拖动擦除手绘 F0</template>
             <template v-else-if="pencil">按住空白处拖画音符 · Delete 删除选中</template>
             <template v-else-if="pitchTool === 'range'">横向拖拽选段以移调、试听或指定音色</template>
-            <template v-else>Space 播放/暂停 · Shift+Space 试听单字 · 双击空白添音 · Ctrl/Alt+滚轮缩放</template>
+            <template v-else>Space 播放/暂停 · 双击音符改词 · 双击音素改 IPA · 双击空白添音 · Ctrl/Alt+滚轮缩放</template>
           </span>
 
           <div class="footer-zooms">
@@ -5112,6 +5589,221 @@ onBeforeUnmount(() => {
             <button type="button" class="btn sm" @click="pendingMidi = undefined">取消</button>
             <button type="button" class="btn sm primary" :disabled="!importIndexes.length" @click="confirmMidi">
               导入选中轨道 ({{ importIndexes.length }})
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Teleported Dedicated Modal for SVP / VSQX Singing Project Import (strictly separate from MIDI) -->
+    <Teleport to="body">
+      <div
+        v-if="pendingSinging"
+        class="export-modal-mask"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="pendingSinging.summary.format === 'svp' ? '导入 Synthesizer V 工程' : '导入 VOCALOID 工程'"
+        @click.self="pendingSinging = undefined"
+      >
+        <div class="export-modal-card midi-modal-card">
+          <div class="midi-modal-head">
+            <div>
+              <h3>{{ pendingSinging.summary.format === 'svp' ? '导入 Synthesizer V 工程 (.svp)' : '导入 VOCALOID 工程 (.vsqx)' }}</h3>
+              <p class="muted">
+                {{ pendingSinging.summary.fileName }} · 速度 {{ pendingSinging.summary.bpm }} BPM · 共 {{ pendingSinging.summary.tracks.length }} 条轨道
+              </p>
+            </div>
+            <button type="button" class="btn xs icon-only" aria-label="关闭" @click="pendingSinging = undefined">
+              <IconSvg name="close" :size="13" />
+            </button>
+          </div>
+
+          <div class="singing-lang-grid" role="group" aria-label="导入歌词语种设置（最多选 2 种）">
+            <label class="dict-field">
+              <span>主语种（优先识别）</span>
+              <CustomSelect
+                :model-value="singingPrimaryLang"
+                :options="primaryLangOptions"
+                size="sm"
+                aria-label="导入主语种"
+                @update:model-value="singingPrimaryLang = $event as LyricsLanguage; if (singingSecondaryLang === singingPrimaryLang) singingSecondaryLang = ''"
+              />
+            </label>
+            <label class="dict-field">
+              <span>次语种（可选，双语混唱回退）</span>
+              <CustomSelect
+                :model-value="singingSecondaryLang"
+                :options="singingSecondaryLangOptions"
+                size="sm"
+                aria-label="导入次语种"
+                @update:model-value="singingSecondaryLang = $event as LyricsLanguage | ''"
+              />
+            </label>
+          </div>
+
+          <label class="dict-check">
+            <input v-model="singingRenderBreath" type="checkbox" />
+            <span>br 换气音符默认渲染轻柔无声带气息声（关闭则作静音休止）</span>
+          </label>
+
+          <div class="midi-modal-select-all">
+            <button
+              type="button"
+              class="btn xs"
+              @click="singingImportIndexes = pendingSinging.summary.tracks.filter((t) => t.noteCount > 0).map((t) => t.index)"
+            >全选非空轨</button>
+            <button type="button" class="btn xs" @click="singingImportIndexes = []">全不选</button>
+            <span class="muted">已选 {{ singingImportIndexes.length }} / {{ pendingSinging.summary.tracks.length }} 条</span>
+          </div>
+
+          <div class="midi-modal-list">
+            <label
+              v-for="track in pendingSinging.summary.tracks"
+              :key="track.index"
+              class="midi-track-option"
+            >
+              <input
+                v-model="singingImportIndexes"
+                type="checkbox"
+                :value="track.index"
+                :disabled="track.noteCount === 0"
+              />
+              <span class="midi-track-title">
+                {{ track.name }}
+                <span class="metric-chip">{{ track.detectedLangLabel }}</span>
+                <span v-if="track.hasBreath" class="metric-chip">含 br 换气</span>
+              </span>
+              <span class="muted mono midi-track-meta">
+                {{ track.noteCount }} 音符<template v-if="track.sampleLyrics"> · {{ track.sampleLyrics }}</template>
+              </span>
+            </label>
+          </div>
+
+          <div class="midi-modal-foot">
+            <button type="button" class="btn sm" @click="pendingSinging = undefined">取消</button>
+            <button
+              type="button"
+              class="btn sm primary"
+              :disabled="!singingImportIndexes.length || singingImporting"
+              @click="confirmSinging"
+            >
+              {{ singingImporting ? '正在导入…' : `导入选中人声轨 (${singingImportIndexes.length})` }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Teleported SV-Style Batch Fill Lyrics Modal -->
+    <Teleport to="body">
+      <div
+        v-if="batchFillOpen"
+        class="export-modal-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-label="批量填入歌词"
+        @click.self="batchFillOpen = false"
+      >
+        <div class="export-modal-card batch-fill-card">
+          <div class="midi-modal-head">
+            <div>
+              <h3>批量填入歌词（覆盖写入）</h3>
+              <p class="muted">按语种自动分词并从指定音符起顺序覆盖填词，保留原有音高、时值与手绘基频</p>
+            </div>
+            <button type="button" class="btn xs icon-only" aria-label="关闭" @click="batchFillOpen = false">
+              <IconSvg name="close" :size="13" />
+            </button>
+          </div>
+
+          <div class="batch-fill-controls">
+            <label class="dict-field">
+              <span>起始音符</span>
+              <CustomSelect
+                :model-value="String(batchFillStartIndex)"
+                :options="batchFillStartOptions"
+                size="sm"
+                aria-label="批量填词起始音符"
+                @update:model-value="batchFillStartIndex = Number($event) || 0"
+              />
+            </label>
+            <label class="dict-field">
+              <span>主语种</span>
+              <CustomSelect
+                :model-value="batchFillPrimaryLang"
+                :options="primaryLangShortOptions"
+                size="sm"
+                aria-label="批量填词主语种"
+                @update:model-value="batchFillPrimaryLang = $event as LyricsLanguage; if (batchFillSecondaryLang === batchFillPrimaryLang) batchFillSecondaryLang = ''"
+              />
+            </label>
+            <label class="dict-field">
+              <span>次语种</span>
+              <CustomSelect
+                :model-value="batchFillSecondaryLang"
+                :options="batchFillSecondaryLangOptions"
+                size="sm"
+                aria-label="批量填词次语种"
+                @update:model-value="batchFillSecondaryLang = $event as LyricsLanguage | ''"
+              />
+            </label>
+          </div>
+
+          <label class="dict-field">
+            <span>歌词内容（支持空格分词、- 延音、br 换气、cl 促音、[IPA]）</span>
+            <textarea
+              v-model="batchFillText"
+              class="inp batch-fill-textarea"
+              rows="4"
+              placeholder="示例：br 青花瓷 - 啊  或  sakura - kitte  或  corazón -"
+            />
+          </label>
+
+          <div class="batch-preview-box">
+            <div class="batch-preview-head">
+              <span class="muted">
+                预览：共解析 {{ batchFillPreview.length }} 个槽位，将写入
+                {{ Math.min(batchFillPreview.length, Math.max(0, batchFillOrderedEvents.length - batchFillStartIndex)) }}
+                / {{ Math.max(0, batchFillOrderedEvents.length - batchFillStartIndex) }} 个后续音符
+              </span>
+              <span v-if="batchFillBusy" class="muted">解析中…</span>
+            </div>
+            <div v-if="batchFillPreview.length" class="batch-preview-scroll">
+              <table class="mini-tbl">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>音符</th>
+                    <th>填入词</th>
+                    <th>窄式 IPA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(slot, idx) in batchFillPreview.slice(0, 60)" :key="idx">
+                    <td class="mono">{{ batchFillStartIndex + idx + 1 }}</td>
+                    <td class="mono">
+                      {{
+                        batchFillOrderedEvents[batchFillStartIndex + idx]
+                          ? jianpuKeyLabel(batchFillOrderedEvents[batchFillStartIndex + idx].midi, tonic, notation)
+                          : '超出音符数'
+                      }}
+                    </td>
+                    <td>{{ slot.text }}</td>
+                    <td class="ipa" translate="no">{{ slot.kind === 'continuation' ? '（延音）' : (slot.ipa || '—') }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="midi-modal-foot">
+            <button type="button" class="btn sm" @click="batchFillOpen = false">取消</button>
+            <button
+              type="button"
+              class="btn sm primary"
+              :disabled="!batchFillPreview.length || batchFillBusy"
+              @click="confirmBatchFill"
+            >
+              覆盖填入歌词 ({{ Math.min(batchFillPreview.length, Math.max(0, batchFillOrderedEvents.length - batchFillStartIndex)) }})
             </button>
           </div>
         </div>
@@ -5905,6 +6597,32 @@ onBeforeUnmount(() => {
 .roll-shortcuts {
   font-size: var(--fs-micro);
 }
+.track-lang-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.track-lang-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-micro);
+}
+.track-breath-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: var(--fs-micro);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.track-breath-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
 .footer-zooms {
   display: inline-flex;
   align-items: center;
@@ -6035,5 +6753,43 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding-top: 4px;
   border-top: 1px solid var(--border);
+}
+.singing-lang-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.batch-fill-card {
+  width: min(640px, calc(100vw - 32px));
+  display: grid;
+  gap: 10px;
+}
+.batch-fill-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.batch-fill-textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.batch-preview-box {
+  display: grid;
+  gap: 6px;
+}
+.batch-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-micro);
+}
+.batch-preview-scroll {
+  max-height: 210px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctrl);
 }
 </style>

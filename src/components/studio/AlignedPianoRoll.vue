@@ -31,6 +31,8 @@ export interface RollNote {
   char: string;
   dynamic: number;
   instrumental?: boolean;
+  breath?: boolean;
+  clClosure?: boolean;
   writtenBeats?: number;
 }
 
@@ -121,6 +123,9 @@ const emit = defineEmits<{
   range: [startSmp: number, endSmp: number];
   clearRange: [];
   phoneBoundary: [rowId: string, index: number, sample: number];
+  editNoteLyric: [eventId: string, text: string, move: 'stay' | 'next' | 'prev'];
+  editPhoneIpa: [rowId: string, phoneIndex: number, ipa: string];
+  inlineEditStart: [];
   'update:zoom': [zoom: number];
   'update:rowHeight': [rowHeight: number];
   'update:keyLabelMode': [mode: PianoKeyLabelMode];
@@ -853,6 +858,174 @@ function showRow(rowId: string) {
   }
 }
 
+interface ActiveNoteInlineEdit {
+  eventId: string;
+  rowId: string;
+  midi: number;
+  startSmp: number;
+  endSmp: number;
+  text: string;
+  original: string;
+}
+
+interface ActivePhoneInlineEdit {
+  rowId: string;
+  index: number;
+  startSmp: number;
+  endSmp: number;
+  ipa: string;
+  original: string;
+}
+
+const noteEdit = ref<ActiveNoteInlineEdit | null>(null);
+const phoneEdit = ref<ActivePhoneInlineEdit | null>(null);
+const noteEditInput = ref<HTMLInputElement>();
+const phoneEditInput = ref<HTMLInputElement>();
+let inlineCommitting = false;
+
+watch(() => props.locked, (locked) => {
+  if (locked) {
+    noteEdit.value = null;
+    phoneEdit.value = null;
+  }
+});
+
+function beginNoteEdit(note: RollNote) {
+  if (props.locked || !note.eventId) return;
+  drag.value = null;
+  phoneEdit.value = null;
+  const initial = note.noteIndex > 0 ? '-' : (note.char || '');
+  noteEdit.value = {
+    eventId: note.eventId,
+    rowId: note.rowId,
+    midi: note.midi,
+    startSmp: note.startSmp,
+    endSmp: note.endSmp,
+    text: initial,
+    original: initial,
+  };
+  emit('inlineEditStart');
+  void nextTick(() => {
+    const el = noteEditInput.value;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  });
+}
+
+function cancelNoteEdit() {
+  inlineCommitting = true;
+  noteEdit.value = null;
+  void nextTick(() => { inlineCommitting = false; });
+}
+
+function commitNoteEdit(move: 'stay' | 'next' | 'prev' = 'stay') {
+  if (inlineCommitting || !noteEdit.value) return;
+  inlineCommitting = true;
+  const current = noteEdit.value;
+  noteEdit.value = null;
+  const nextText = current.text.trim();
+  const ordered = [...props.notes]
+    .filter((n) => Boolean(n.eventId))
+    .sort((a, b) => a.startSmp - b.startSmp || a.midi - b.midi);
+  const curIdx = ordered.findIndex((n) => n.eventId === current.eventId);
+
+  if (nextText !== current.original.trim()) {
+    emit('editNoteLyric', current.eventId, nextText, move);
+  }
+  void nextTick(() => {
+    inlineCommitting = false;
+    if (move !== 'stay' && curIdx >= 0) {
+      const targetIdx = move === 'next' ? curIdx + 1 : curIdx - 1;
+      const targetId = ordered[targetIdx]?.eventId;
+      if (targetId) {
+        const refreshed = props.notes.find((n) => n.eventId === targetId);
+        if (refreshed) beginNoteEdit(refreshed);
+      }
+    }
+  });
+}
+
+function onNoteEditKeydown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    commitNoteEdit('stay');
+  } else if (event.key === 'Tab') {
+    event.preventDefault();
+    commitNoteEdit(event.shiftKey ? 'prev' : 'next');
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    cancelNoteEdit();
+  }
+}
+
+function beginPhoneEdit(phone: RollPhone) {
+  if (props.locked) return;
+  drag.value = null;
+  noteEdit.value = null;
+  phoneEdit.value = {
+    rowId: phone.rowId,
+    index: phone.index,
+    startSmp: phone.startSmp,
+    endSmp: phone.endSmp,
+    ipa: phone.ipa,
+    original: phone.ipa,
+  };
+  emit('inlineEditStart');
+  void nextTick(() => {
+    const el = phoneEditInput.value;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  });
+}
+
+function cancelPhoneEdit() {
+  inlineCommitting = true;
+  phoneEdit.value = null;
+  void nextTick(() => { inlineCommitting = false; });
+}
+
+function commitPhoneEdit(move: 'stay' | 'next' | 'prev' = 'stay') {
+  if (inlineCommitting || !phoneEdit.value) return;
+  inlineCommitting = true;
+  const current = phoneEdit.value;
+  phoneEdit.value = null;
+  const nextIpa = current.ipa.trim();
+  const list = props.phones ?? [];
+  const curIdx = list.findIndex((p) => p.rowId === current.rowId && p.index === current.index);
+  if (nextIpa !== current.original.trim()) {
+    emit('editPhoneIpa', current.rowId, current.index, nextIpa);
+  }
+  void nextTick(() => {
+    inlineCommitting = false;
+    if (move !== 'stay' && curIdx >= 0) {
+      const targetIdx = move === 'next' ? curIdx + 1 : curIdx - 1;
+      const refreshed = (props.phones ?? [])[targetIdx];
+      if (refreshed) beginPhoneEdit(refreshed);
+    }
+  });
+}
+
+function onPhoneEditKeydown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    commitPhoneEdit('stay');
+  } else if (event.key === 'Tab') {
+    event.preventDefault();
+    commitPhoneEdit(event.shiftKey ? 'prev' : 'next');
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    cancelPhoneEdit();
+  }
+}
+
 defineExpose({ showRow, centerPitch, revealTransposedNotes });
 </script>
 
@@ -907,15 +1080,35 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
         <div v-if="lyricTimes?.length" class="sung-tier" aria-label="实际演唱字界">
           <div v-for="word in lyricTimes" :key="word.id" class="phone-span" :style="{ left: x(word.start) + 'px', width: Math.max(1, x(word.end - word.start)) + 'px' }" :title="'演唱字界 · ' + word.text">{{ word.text }}</div>
         </div>
-        <div v-if="phones?.length" class="phone-tier" aria-label="音素" @click.stop>
+        <div v-if="phones?.length" class="phone-tier" aria-label="音素" @pointerdown.stop @click.stop>
           <div
             v-for="phone in phones"
             :key="phone.rowId + ':' + phone.index"
-            class="phone-span ipa"
+            class="phone-span ipa editable-phone"
             :style="{ left: x(phone.startSmp) + 'px', width: Math.max(1, x(phone.endSmp - phone.startSmp)) + 'px' }"
-            :title="phone.ipa"
+            :title="locked ? phone.ipa : `${phone.ipa} · 双击直接修改音素`"
             translate="no"
+            @dblclick.stop.prevent="beginPhoneEdit(phone)"
           >{{ phone.ipa }}</div>
+          <input
+            v-if="phoneEdit"
+            ref="phoneEditInput"
+            v-model="phoneEdit.ipa"
+            type="text"
+            class="inp ipa roll-inline-phone"
+            aria-label="编辑音素 IPA"
+            placeholder="IPA"
+            translate="no"
+            :style="{
+              left: x(phoneEdit.startSmp) + 'px',
+              width: Math.max(58, x(phoneEdit.endSmp - phoneEdit.startSmp)) + 'px',
+            }"
+            @pointerdown.stop
+            @click.stop
+            @dblclick.stop
+            @keydown="onPhoneEditKeydown"
+            @blur="commitPhoneEdit('stay')"
+          />
           <button
             v-for="phone in phones.filter((item) => item.boundary)"
             :key="'boundary:' + phone.rowId + ':' + phone.index"
@@ -1048,6 +1241,8 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
             selected: note.rowId === activeRow,
             current: note.rowId === activeRow && note.noteIndex === activeNote,
             'range-selected': noteInRange(note, rollRange),
+            'is-breath': note.breath,
+            'is-cl': note.clClosure,
           }"
           :data-row="note.rowIndex"
           :data-note="note.noteIndex"
@@ -1055,7 +1250,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           :data-arranger-syllable-target="note.instrumental ? undefined : ''"
           :tabindex="pitchTool === 'notes' || (pitchTool === 'range' && noteInRange(note, selectedRange)) ? undefined : -1"
           :aria-description="noteInRange(note, rollRange) ? '已选中，上下拖动或按方向键可整体移调' : undefined"
-          :title="`${note.char || '器乐'} · ${noteName(note.midi)} (${jianpuKeyLabel(note.midi, tonic, notation)}) · ${midiHz(note.midi).toFixed(1)} Hz · ${(note.startSmp / SAMPLE_RATE_HZ).toFixed(3)} 秒${noteInRange(note, rollRange) ? ' · 已选中' : ''}`"
+          :title="`${note.breath ? '换气 (br)' : (note.char || '器乐')} · ${noteName(note.midi)} (${jianpuKeyLabel(note.midi, tonic, notation)}) · ${midiHz(note.midi).toFixed(1)} Hz · ${(note.startSmp / SAMPLE_RATE_HZ).toFixed(3)} 秒${noteInRange(note, rollRange) ? ' · 已选中' : ''}${!locked && note.eventId ? ' · 双击改词' : ''}`"
           :style="{
             left: x(currentDrag(note)?.eventStart ?? note.startSmp) + 'px',
             top: y(displayedMidi(note)) + (rowH < 18 ? 1.5 : 2.5) + 'px',
@@ -1067,6 +1262,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           @pointerup="releaseNote"
           @pointercancel="drag = null"
           @lostpointercapture="drag = null"
+          @dblclick.stop.prevent="beginNoteEdit(note)"
           @keydown.delete="deleteFocusedNote($event, note)"
           @keydown.backspace="deleteFocusedNote($event, note)"
           @keydown.enter.prevent="emit('select', note.rowId, note.noteIndex); emit('voiceControls', note.rowId, note.noteIndex, $event.currentTarget as HTMLButtonElement)"
@@ -1074,10 +1270,29 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           @keydown.down.prevent="nudgeNotePitch(note, -1)"
         >
           <span v-if="note.eventId" class="note-start" aria-hidden="true" />
-          <span class="note-label">{{ note.char || (rowH >= 20 ? noteName(displayedMidi(note)) : '') }}</span>
+          <span class="note-label">{{ note.noteIndex > 0 ? '-' : (note.char || (rowH >= 20 ? noteName(displayedMidi(note)) : '')) }}</span>
           <span class="note-vel-bar" aria-hidden="true" />
           <span class="note-end" aria-hidden="true" />
         </button>
+        <input
+          v-if="noteEdit"
+          ref="noteEditInput"
+          v-model="noteEdit.text"
+          type="text"
+          class="inp roll-inline-note"
+          aria-label="编辑音符歌词"
+          placeholder="字 / - / br / [IPA]"
+          :style="{
+            left: x(noteEdit.startSmp) + 'px',
+            top: y(noteEdit.midi) + (rowH < 18 ? 1.5 : 2.5) + 'px',
+            width: Math.max(72, x(noteEdit.endSmp - noteEdit.startSmp)) + 'px',
+          }"
+          @pointerdown.stop
+          @click.stop
+          @dblclick.stop
+          @keydown="onNoteEditKeydown"
+          @blur="commitNoteEdit('stay')"
+        />
         <svg
           v-if="synthF0Path"
           class="synth-f0-overlay"
@@ -1534,6 +1749,47 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 }
 .pitch-edit-stroke.gesture { stroke-width: 3px; }
 .pitch-erase-range { fill: color-mix(in srgb, var(--danger) 18%, transparent); }
+.roll-note.is-breath {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--teal) 72%, var(--border));
+  background: color-mix(in srgb, var(--teal) 18%, var(--panel));
+  color: var(--teal);
+}
+.roll-note.is-cl {
+  border-style: dotted;
+  border-color: color-mix(in srgb, var(--warning) 72%, var(--border));
+  background: color-mix(in srgb, var(--warning) 18%, var(--panel));
+}
+.phone-span.editable-phone {
+  cursor: text;
+}
+.phone-span.editable-phone:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel));
+}
+.roll-inline-note,
+.roll-inline-phone {
+  position: absolute;
+  box-sizing: border-box;
+  height: var(--note-block-height);
+  min-height: 0;
+  padding: 0 5px;
+  border-radius: var(--r-ctrl);
+  border: 1.5px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--ctrl-shadow);
+  font-size: var(--control-font-size);
+  line-height: 1;
+}
+.roll-inline-note {
+  z-index: calc(var(--z-base) + 6);
+}
+.roll-inline-phone {
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: calc(var(--z-base) + 6);
+}
 .piano-playhead {
   pointer-events: none;
   position: absolute;

@@ -14,12 +14,16 @@ import {
   type Syllable,
 } from '@vocalcut/core';
 import {
+  japaneseKanjiReadingsFor,
   japaneseReadingsFor,
   loadCmu,
   mappingStandards,
   mixedSpeechTokens,
   needsEnglishDictionary,
   reviewText,
+  romajiToHiragana,
+  startsIpa,
+  type LyricsLanguage,
   type MappingStandard,
   type ReadingRow,
 } from '@vocalcut/g2p';
@@ -58,11 +62,46 @@ export interface LyricRow {
   syllableIndex?: number;
   syllableCount?: number;
   instrumental?: boolean;
+  breath?: boolean;
+  clClosure?: boolean;
   phraseEnd?: boolean;
   marks?: ScoreMark[];
   vibratoCents?: number;
   diminuendo?: number;
   phoneBoundaries?: { ipa: string; ratios: Record<number, number> };
+}
+
+export interface AnalyzeLyricsOptions {
+  primaryLang?: LyricsLanguage;
+  secondaryLang?: LyricsLanguage | '';
+  /** Arranger singing defaults to true (disables Japanese Tokyo high-vowel devoicing). */
+  singing?: boolean;
+}
+
+const CL_STOP_ONSET_RE = /^(?:[td]͡[ɕʑszʃʂ]|([pbtdkɡ]))/u;
+const CL_FRIC_ONSET_RE = /^([sɕʃʂfɸhç])/u;
+
+/**
+ * Resolve SVP/Japanese `cl` (geminate closure / glottal stop) contextually from the following IPA:
+ *  - Before a stop/affricate (`p/b/t/d/k/ɡ/t͡s/t͡ɕ/t͡ʃ/tʂ`): unreleased closure (`p̚/t̚/k̚/...`)
+ *  - Before a voiceless fricative (`s/ɕ/ʃ/ʂ/f/ɸ/h/ç`): sustained frication hold
+ *  - Phrase-final or before vowel/sonorant: glottal stop (`ʔ`)
+ */
+export function resolveClClosureIpa(nextIpa?: string): { ipa: string; choices: string[] } {
+  const clean = (nextIpa ?? '').trim().replace(/^[ˈˌ\[［]+/u, '');
+  if (clean) {
+    const stopMatch = CL_STOP_ONSET_RE.exec(clean);
+    if (stopMatch) {
+      const stopBase = stopMatch[1] ?? clean[0];
+      const closure = `${stopBase}̚`;
+      return { ipa: closure, choices: [closure, 'ʔ'] };
+    }
+    const fricMatch = CL_FRIC_ONSET_RE.exec(clean);
+    if (fricMatch) {
+      return { ipa: fricMatch[1], choices: [fricMatch[1], 'ʔ'] };
+    }
+  }
+  return { ipa: 'ʔ', choices: ['ʔ', 't̚', 'p̚', 'k̚'] };
 }
 
 export const midiHz = (midi: number) => 440 * (2 ** ((midi - 69) / 12));
@@ -272,20 +311,44 @@ export function distributeScore(
 const sameWord = (text: string) => text.normalize('NFC').toLocaleLowerCase();
 const cleanIpa = (text: string) => text.trim().replace(/^\[(.*)\]$/u, '$1');
 
-export async function analyzeLyrics(text: string, standard: string, speaker: string, useProsody = true): Promise<LyricRow[]> {
+export async function analyzeLyrics(
+  text: string,
+  standard: string,
+  speaker: string,
+  useProsody = true,
+  langOpts?: AnalyzeLyricsOptions,
+): Promise<LyricRow[]> {
   if (!text.trim()) return [];
+  const primaryLang = langOpts?.primaryLang;
+  const secondaryLang = langOpts?.secondaryLang || undefined;
+  const singing = langOpts?.singing ?? true;
   const dictionary = savedDialects.value.find((pack) => pack.id === standard);
   const tokens = mixedSpeechTokens(text);
   const useEnDict = needsEnglishDictionary(tokens);
   const english = useEnDict ? await loadCmu() : new Map<string, string[]>();
-  const kana = await japaneseReadingsFor(text);
+  const wantsJaKanji = (primaryLang === 'ja' || secondaryLang === 'ja') && /[一-龯々]/u.test(text);
+  const jaKanji = wantsJaKanji ? await japaneseKanjiReadingsFor(text) : undefined;
+  const romajiHira = tokens
+    .filter((t) => !startsIpa(t) && /\p{Script=Latin}/u.test(t) && !/^(br|cl)$/iu.test(t))
+    .map((t) => romajiToHiragana(t))
+    .filter((h): h is string => Boolean(h))
+    .join(' ');
+  const kanjiHira = jaKanji
+    ? [...jaKanji.values()].flatMap((segs) => segs.map((s) => s.reading)).filter(Boolean).join(' ')
+    : '';
+  const kana = await japaneseReadingsFor([text, romajiHira, kanjiHira].filter(Boolean).join(' '));
   const effectiveStandard = (dictionary ? dictionaryPrefs.value.zhStandard : standard) as MappingStandard;
-  const readings = reviewText(text, effectiveStandard, english, buildPersonalG2pMap(effectiveStandard), kana);
-  if (dictionary) {
+  const readings = reviewText(text, effectiveStandard, english, buildPersonalG2pMap(effectiveStandard), kana, {
+    singing,
+    primaryLang,
+    secondaryLang,
+    jaKanji,
+  });
+  if (dictionary && (!primaryLang || primaryLang === 'zh')) {
     const selected = tokenizeDialect(text, dictionary.lexicon);
-    if (!selected.length) return readings.map((row) => fromReading(row, effectiveStandard));
+    if (!selected.length) return finalizeControlRows(readings.map((row) => fromReading(row, effectiveStandard)));
     const plan = planDialect(dictionary, selected, {});
-    return plan.map<LyricRow>((row, index) => {
+    return finalizeControlRows(plan.map<LyricRow>((row, index) => {
       const userEntry = lookupUserLexiconEntry(row.word, 'zh', { standard });
       const baseChoices = (selected[index]?.readings ?? []).map((choice) => choice.ipa);
       const choices = userEntry ? [userEntry.ipaJoined, ...baseChoices.filter((c) => c !== userEntry.ipaJoined)] : baseChoices;
@@ -302,10 +365,11 @@ export async function analyzeLyrics(text: string, standard: string, speaker: str
         restBefore: 0,
         language: 'zh',
       };
-    });
+    }));
   }
-  const result = readings.map((row) => fromReading(row, effectiveStandard));
+  const result = finalizeControlRows(readings.map((row) => fromReading(row, effectiveStandard)));
   if (!useProsody || !textProsodyEnabled.value || !supportsProsodyText(text)) return result;
+  if (primaryLang && primaryLang !== 'zh' && primaryLang !== 'en') return result;
   try {
     const prediction = await predictSpeechProsody(text, speaker);
     const syllables = prediction.syllableOrder.map((id) => prediction.syllables[id]);
@@ -318,6 +382,44 @@ export async function analyzeLyrics(text: string, standard: string, speaker: str
     }
   } catch { /* Use the same rule dictionaries if model timing is unavailable. */ }
   return result;
+}
+
+/** Recognize standalone singing control tokens (`br` breath, `cl` closure/glottal stop) across all languages. */
+function finalizeControlRows(rows: LyricRow[]): LyricRow[] {
+  const out = rows.map((row) => {
+    const clean = row.char.trim();
+    if (/^br$/iu.test(clean)) {
+      return {
+        ...row,
+        char: 'br',
+        ipa: 'h',
+        choices: ['h'],
+        language: 'ipa' as const,
+        breath: true,
+        clClosure: undefined,
+      };
+    }
+    if (/^cl$/iu.test(clean)) {
+      return {
+        ...row,
+        char: 'cl',
+        ipa: 'ʔ',
+        choices: ['ʔ', 't̚', 'p̚', 'k̚'],
+        language: 'ipa' as const,
+        clClosure: true,
+        breath: undefined,
+      };
+    }
+    return row;
+  });
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].clClosure) {
+      const resolved = resolveClClosureIpa(out[i + 1]?.ipa);
+      out[i].ipa = resolved.ipa;
+      out[i].choices = resolved.choices;
+    }
+  }
+  return out;
 }
 
 function fromReading(row: ReadingRow, standard: string): LyricRow {
