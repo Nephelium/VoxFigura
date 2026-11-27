@@ -1,0 +1,47 @@
+[
+  {
+    "id": "trill-r-linguolabial-unvoiced",
+    "symbol": "r̼̊",
+    "label": "PTB 生理颤音构型 · Tract2Vox-Lite / VTL 合成"
+  },
+  {
+    "id": "trill-r-linguolabial",
+    "symbol": "r̼",
+    "label": "PTB 生理颤音构型 · Tract2Vox-Lite / VTL 合成"
+  },
+  {
+    "id": "trill-r-dental-unvoiced",
+    "symbol": "r̪̊",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-dental",
+    "symbol": "r̪",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-alveolar-unvoiced",
+    "symbol": "r̊",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-alveolar",
+    "symbol": "r",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-postalveolar-unvoiced",
+    "symbol": "r̠̊",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-postalveolar",
+    "symbol": "r̠",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  },
+  {
+    "id": "trill-r-uvular",
+    "symbol": "ʀ",
+    "label": "PTB 生理颤音构型 · 井井音色 Tract2Vox-Lite 合成"
+  }
+]

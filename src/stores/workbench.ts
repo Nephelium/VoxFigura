@@ -135,7 +135,7 @@ export type GuideModuleId =
   | 'stage'
   | 'card'
   | 'explore';
-export type SettingsTabId = 'appearance' | 'style-lab' | 'layout' | 'engine' | 'shortcuts' | 'credits';
+export type SettingsTabId = 'appearance' | 'style-lab' | 'layout' | 'engine' | 'storage' | 'shortcuts' | 'credits';
 export type LayoutDensity = 'compact' | 'standard' | 'spacious';
 export type TimelineTrackScale = 'compact' | 'standard' | 'tall';
 export type AiDrawerDockMode = 'docked' | 'overlay';

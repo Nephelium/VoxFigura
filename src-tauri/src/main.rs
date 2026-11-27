@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::ffi::{c_void, OsStr};
 use std::fs::{self, File, OpenOptions};
@@ -101,10 +101,16 @@ struct BundleManifest {
     files: HashMap<String, BundleManifestFile>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct LauncherConfig {
-    #[serde(rename = "cacheRoot")]
+    #[serde(rename = "cacheRoot", default, skip_serializing_if = "Option::is_none")]
     cache_root: Option<String>,
+    #[serde(rename = "knownCacheRoots", default, skip_serializing_if = "Vec::is_empty")]
+    known_cache_roots: Vec<String>,
+    #[serde(rename = "autoCleanPolicy", default, skip_serializing_if = "Option::is_none")]
+    auto_clean_policy: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +123,8 @@ struct PreparedBundle {
     app_dir: PathBuf,
     cache_root: PathBuf,
     config_path: PathBuf,
+    lock_path: PathBuf,
+    lock_file: File,
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -359,6 +367,282 @@ fn ensure_cache_root_marker(root: &Path) {
     }
 }
 
+fn read_launcher_config(config_path: &Path) -> LauncherConfig {
+    fs::read_to_string(config_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<LauncherConfig>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_launcher_config(config_path: &Path, cfg: &LauncherConfig) {
+    if let Some(parent) = config_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut text) = serde_json::to_string_pretty(cfg) {
+        text.push('\n');
+        let _ = fs::write(config_path, text);
+    }
+}
+
+fn record_known_cache_root(config_path: &Path, root: &Path) {
+    let root_str = root.to_string_lossy().trim().to_string();
+    if root_str.is_empty() {
+        return;
+    }
+    let mut cfg = read_launcher_config(config_path);
+    if cfg.known_cache_roots.iter().any(|p| same_path_ci(Path::new(p), root)) {
+        return;
+    }
+    cfg.known_cache_roots.push(root_str);
+    if cfg.known_cache_roots.len() > 20 {
+        let overflow = cfg.known_cache_roots.len() - 20;
+        cfg.known_cache_roots.drain(0..overflow);
+    }
+    write_launcher_config(config_path, &cfg);
+}
+
+fn is_valid_version_dir_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("public-")
+        .or_else(|| lower.strip_prefix("hackathon-"))
+        .or_else(|| lower.strip_prefix("friends-"));
+    match rest {
+        Some(hex) => hex.len() >= 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+fn parse_incomplete_prefix(name: &str) -> Option<&str> {
+    let idx = name.find(".incomplete-")?;
+    let prefix = &name[..idx];
+    let suffix = &name[idx + ".incomplete-".len()..];
+    if is_valid_version_dir_name(prefix)
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn is_temp_unpack_name(name: &str) -> bool {
+    match name.strip_prefix(".u-") {
+        Some(suffix) => !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        None => false,
+    }
+}
+
+fn parse_lock_prefix(name: &str) -> Option<&str> {
+    let prefix = name.strip_suffix(".lock")?;
+    if is_valid_version_dir_name(prefix) {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn is_lock_held(lock_path: &Path) -> bool {
+    match fs::symlink_metadata(lock_path) {
+        Ok(m) if m.is_file() && !m.file_type().is_symlink() => {}
+        _ => return false,
+    }
+    match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(_) => false,
+        Err(err) => matches!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
+        ) || err.raw_os_error() == Some(32) || err.raw_os_error() == Some(33),
+    }
+}
+
+fn try_remove_unlocked_lock(lock_path: &Path) {
+    if !is_lock_held(lock_path) {
+        let _ = fs::remove_file(lock_path);
+    }
+}
+
+fn try_prune_empty_historical_root(
+    root: &Path,
+    active_root: &Path,
+    default_root: &Path,
+    configured_root: Option<&Path>,
+) -> bool {
+    if same_path_ci(root, active_root) || same_path_ci(root, default_root) {
+        return false;
+    }
+    if let Some(cfg_root) = configured_root {
+        if same_path_ci(root, cfg_root) {
+            return false;
+        }
+    }
+    let items: Vec<String> = match fs::read_dir(root) {
+        Ok(rd) => rd
+            .filter_map(|entry| entry.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => return false,
+    };
+    if items.is_empty() {
+        return fs::remove_dir(root).is_ok();
+    }
+    if items.len() == 1 && items[0] == CACHE_ROOT_MARKER {
+        let marker = root.join(CACHE_ROOT_MARKER);
+        if fs::symlink_metadata(&marker).map(|m| m.is_file()).unwrap_or(false) {
+            let _ = fs::remove_file(&marker);
+            return fs::remove_dir(root).is_ok();
+        }
+    }
+    false
+}
+
+fn run_startup_cache_maintenance(bundle: &PreparedBundle) {
+    let local_appdata = match env::var("LOCALAPPDATA") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    let default_root = PathBuf::from(&local_appdata).join("VoxFigura").join("Portable");
+    let active_name = bundle
+        .app_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut cfg = read_launcher_config(&bundle.config_path);
+    let policy = cfg.auto_clean_policy.as_deref().unwrap_or("manual").to_string();
+    let configured_root = cfg
+        .cache_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |p: PathBuf| {
+        if !roots.iter().any(|existing| same_path_ci(existing, &p)) {
+            roots.push(p);
+        }
+    };
+    push_unique(bundle.cache_root.clone());
+    if let Some(ref c) = configured_root {
+        push_unique(c.clone());
+    }
+    push_unique(default_root.clone());
+    for known in &cfg.known_cache_roots {
+        let trimmed = known.trim();
+        if !trimmed.is_empty() {
+            push_unique(PathBuf::from(trimmed));
+        }
+    }
+
+    // Always clean orphan 0-byte .lock files whose bundle directory no longer exists.
+    for root in &roots {
+        let rd = match fs::read_dir(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let is_active_root = same_path_ci(root, &bundle.cache_root);
+        let names: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        for name in &names {
+            let Some(prefix) = parse_lock_prefix(name) else { continue };
+            if is_active_root && prefix.eq_ignore_ascii_case(&active_name) {
+                continue;
+            }
+            let has_owner = names.iter().any(|other| {
+                other.eq_ignore_ascii_case(prefix)
+                    || parse_incomplete_prefix(other)
+                        .map(|p| p.eq_ignore_ascii_case(prefix))
+                        .unwrap_or(false)
+            });
+            if !has_owner {
+                try_remove_unlocked_lock(&root.join(name));
+            }
+        }
+    }
+
+    if policy != "keep_current" && policy != "keep_recent_2" {
+        return;
+    }
+
+    let keep_extra_stale: usize = if policy == "keep_recent_2" { 1 } else { 0 };
+    let mut stale_versions: Vec<(PathBuf, PathBuf, String, u128)> = Vec::new();
+
+    for root in &roots {
+        let rd = match fs::read_dir(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let is_active_root = same_path_ci(root, &bundle.cache_root);
+        for entry in rd.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if is_active_root && name.eq_ignore_ascii_case(&active_name) {
+                continue;
+            }
+            if meta.is_dir() && is_valid_version_dir_name(&name) {
+                let manifest = path.join("bundle-manifest.json");
+                if fs::symlink_metadata(&manifest).map(|m| m.is_file()).unwrap_or(false) {
+                    let lock = root.join(format!("{name}.lock"));
+                    if !is_lock_held(&lock) {
+                        let mtime = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        stale_versions.push((root.clone(), path, name, mtime));
+                    }
+                }
+            } else if let Some(prefix) = parse_incomplete_prefix(&name) {
+                let lock = root.join(format!("{prefix}.lock"));
+                if !is_lock_held(&lock) {
+                    let _ = if meta.is_dir() {
+                        fs::remove_dir_all(&path)
+                    } else {
+                        fs::remove_file(&path)
+                    };
+                    try_remove_unlocked_lock(&lock);
+                }
+            } else if meta.is_dir() && is_temp_unpack_name(&name) {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    stale_versions.sort_by(|a, b| b.3.cmp(&a.3));
+    for (root, path, name, _) in stale_versions.into_iter().skip(keep_extra_stale) {
+        let lock = root.join(format!("{name}.lock"));
+        if is_lock_held(&lock) {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            try_remove_unlocked_lock(&lock);
+        }
+    }
+
+    let mut pruned_any = false;
+    for root in &roots {
+        if try_prune_empty_historical_root(root, &bundle.cache_root, &default_root, configured_root.as_deref()) {
+            cfg.known_cache_roots.retain(|p| !same_path_ci(Path::new(p), root));
+            pruned_any = true;
+        }
+    }
+    if pruned_any {
+        write_launcher_config(&bundle.config_path, &cfg);
+    }
+}
+
 fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, String> {
     let exe_path = env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
     let mut exe_file = File::open(&exe_path).map_err(|e| format!("无法读取当前程序文件: {e}"))?;
@@ -372,17 +656,20 @@ fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, Str
     let (root, config_path) = resolve_cache_root(&local_appdata);
     fs::create_dir_all(&root).map_err(|e| format!("无法创建运行缓存目录 ({}): {e}", root.display()))?;
     ensure_cache_root_marker(&root);
+    record_known_cache_root(&config_path, &root);
 
     let hash_prefix = &meta.archive_sha256[..meta.archive_sha256.len().min(16)];
     let app_dir = root.join(format!("{}-{}", meta.edition, hash_prefix));
     let lock_path = root.join(format!("{}-{}.lock", meta.edition, hash_prefix));
-    let _lock = acquire_lock(&lock_path)?;
+    let lock_file = acquire_lock(&lock_path)?;
 
     if is_ready(&app_dir, &meta.manifest_sha256) {
         return Ok(PreparedBundle {
             app_dir,
             cache_root: root,
             config_path,
+            lock_path,
+            lock_file,
         });
     }
 
@@ -444,6 +731,8 @@ fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, Str
         app_dir: dir,
         cache_root: root,
         config_path,
+        lock_path,
+        lock_file,
     })
 }
 
@@ -504,6 +793,9 @@ fn run_headless(no_browser: bool) -> i32 {
     if !no_browser {
         println!("BUNDLE={}", bundle.app_dir.display());
         let _ = io::stdout().flush();
+        let lock_path = bundle.lock_path.clone();
+        drop(bundle);
+        let _ = fs::remove_file(&lock_path);
         return 0;
     }
 
@@ -551,6 +843,9 @@ fn run_headless(no_browser: bool) -> i32 {
     if let Some(t) = t_err {
         let _ = t.join();
     }
+    let lock_path = bundle.lock_path.clone();
+    drop(bundle);
+    let _ = fs::remove_file(&lock_path);
     code
 }
 
@@ -595,6 +890,9 @@ fn main() {
     let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     let child_for_setup = Arc::clone(&child_slot);
     let child_for_exit = Arc::clone(&child_slot);
+    let bundle_lock_slot: Arc<Mutex<Option<(File, PathBuf)>>> = Arc::new(Mutex::new(None));
+    let bundle_lock_for_setup = Arc::clone(&bundle_lock_slot);
+    let bundle_lock_for_exit = Arc::clone(&bundle_lock_slot);
     let ui_state: Arc<Mutex<UiStatusState>> = Arc::new(Mutex::new(UiStatusState::default()));
     let ui_for_load = Arc::clone(&ui_state);
     let ui_for_setup = Arc::clone(&ui_state);
@@ -644,14 +942,23 @@ fn main() {
                     }
                 };
 
+                run_startup_cache_maintenance(&bundle);
+
                 set_window_status(&win_bg, &ui_bg, "__vfSetStatus", "正在启动本地物理声道与神经推理引擎…");
                 let mut child = match spawn_portable_server(&bundle) {
                     Ok(c) => c,
                     Err(err) => {
+                        let lp = bundle.lock_path.clone();
+                        drop(bundle);
+                        let _ = fs::remove_file(&lp);
                         set_window_status(&win_bg, &ui_bg, "__vfSetError", &err);
                         return;
                     }
                 };
+
+                if let Ok(mut guard) = bundle_lock_for_setup.lock() {
+                    *guard = Some((bundle.lock_file, bundle.lock_path));
+                }
 
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
@@ -741,6 +1048,12 @@ fn main() {
     app.run(move |_app_handle, event| {
         if let RunEvent::Exit = event {
             stop_child(&child_for_exit);
+            if let Ok(mut lock_guard) = bundle_lock_for_exit.lock() {
+                if let Some((lock_file, lock_path)) = lock_guard.take() {
+                    drop(lock_file);
+                    let _ = fs::remove_file(&lock_path);
+                }
+            }
             if let Ok(mut g) = guard_for_exit.lock() {
                 let _ = g.take();
             }

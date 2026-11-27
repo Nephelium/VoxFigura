@@ -21,7 +21,6 @@ launcher-config.json
 /docs/试听/
 /docs/ipa-constriction-audit.csv
 /docs/ipa-reference-inventory.csv
-/engine/reference_library/
 /engine/model_bundle/speakers/
 /engine/model_bundle/**/*.spk.json
 /src/editions/hackathon/recordings/

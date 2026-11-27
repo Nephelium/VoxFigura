@@ -73,7 +73,7 @@ import CustomSelect, { type SelectOption } from '@/components/common/CustomSelec
 import IconSvg from '@/components/common/IconSvg.vue';
 import { useOnboardingStore } from '@/stores/onboarding';
 
-type SettingViewTabId = 'appearance' | 'layout' | 'shortcuts' | 'engine' | 'credits';
+type SettingViewTabId = 'appearance' | 'layout' | 'shortcuts' | 'engine' | 'storage' | 'credits';
 
 const store = useWorkbenchStore();
 const onboarding = useOnboardingStore();
@@ -95,6 +95,7 @@ function onResetAllOnboarding(): void {
 
 function mapStoreTabToView(tab: SettingsTabId): SettingViewTabId {
   if (tab === 'style-lab') return 'appearance';
+  if (tab === 'storage') return isPortableRuntime ? 'storage' : 'appearance';
   if (tab === 'layout' || tab === 'engine' || tab === 'shortcuts' || tab === 'credits') return tab;
   return 'appearance';
 }
@@ -579,10 +580,11 @@ const waveformModeOptions: SelectOption[] = [
   { value: 'custom', label: '自定义十六进制色' },
 ];
 
-const tabs: ReadonlyArray<{ id: SettingViewTabId; artKey: string; name: string }> = [
+const tabs: ReadonlyArray<{ id: SettingViewTabId; artKey?: string; icon?: string; name: string }> = [
   { id: 'appearance', artKey: 'appearance', name: '外观与排版' },
   { id: 'layout', artKey: 'layout', name: '布局与分栏' },
   { id: 'engine', artKey: 'engine', name: '声学引擎与模型' },
+  ...(isPortableRuntime ? [{ id: 'storage' as const, icon: 'hard-drive', name: '存储与缓存' }] : []),
   { id: 'shortcuts', artKey: 'shortcuts', name: '快捷键' },
   { id: 'credits', artKey: 'credits', name: '引用与致谢' },
 ];
@@ -728,7 +730,8 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         :class="{ active: activeTab === tab.id }"
         @click="selectTab(tab.id)"
       >
-        <NavArtwork :item="tab.artKey" toolbar theme-tint />
+        <IconSvg v-if="tab.icon" :name="tab.icon" :size="15" />
+        <NavArtwork v-else-if="tab.artKey" :item="tab.artKey" toolbar theme-tint />
         <span>{{ tab.name }}</span>
       </button>
 
@@ -1600,6 +1603,11 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         </div>
       </div>
 
+      <!-- 4.5. PORTABLE STORAGE & CACHE -->
+      <div v-else-if="activeTab === 'storage' && isPortableRuntime" class="set-full-pane">
+        <PortableCachePanel v-if="isPortableRuntime" />
+      </div>
+
       <!-- 3. SHORTCUTS -->
       <div v-else-if="activeTab === 'shortcuts'" class="set-full-pane">
         <div class="shortcut-groups">
@@ -1620,7 +1628,6 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 
       <!-- 4. ACOUSTIC ENGINE & LOCAL MODELS (T-38) -->
       <div v-else-if="activeTab === 'engine'" class="set-full-pane">
-        <PortableCachePanel v-if="isPortableRuntime" />
         <div class="panel">
           <div class="p-head">
             <span>声学求解内核、默认合成声源与参考声纹</span>

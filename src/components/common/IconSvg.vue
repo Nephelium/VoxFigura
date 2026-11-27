@@ -111,6 +111,11 @@ const pxSize = computed(() => `${props.size}px`);
     <template v-else-if="name === 'folder-open'">
       <path d="M3 19V5a1 1 0 0 1 1-1h5l2 3h8a1 1 0 0 1 1 1v2M3 19h16.5l2.5-8H6l-3 8z" />
     </template>
+    <template v-else-if="name === 'hard-drive'">
+      <path d="M22 12H2" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      <path d="M6 16h.01M10 16h.01" />
+    </template>
     <template v-else-if="name === 'file'">
       <path d="M6 3h8l4 4v14H6zM14 3v5h4" />
     </template>

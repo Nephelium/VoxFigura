@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
-import { CACHE_ROOT_MARKER, DEDICATED_SUBDIR_NAME, buildPickFolderScript, isLockFileHeld, resolveSafeCacheRoot } from '../server/portable-cache.mjs';
+import { CACHE_ROOT_MARKER, DEDICATED_SUBDIR_NAME, buildPickFolderScript, isLockFileHeld, probeCacheRootCandidate, resolveSafeCacheRoot } from '../server/portable-cache.mjs';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
 import { DEFAULT_UPDATE_MANIFEST_URLS, createProxyServer, detectIpRegion, getEngineTimeoutMs, githubReleaseToManifest, isAllowedUpdateUrl, pickGithubReleaseAssetUrl, sanitizeUpdateManifest } from '../server/proxy.mjs';
 // @ts-expect-error The Node proxy server modules ship as untyped ESM.
@@ -332,6 +332,131 @@ describe('D-01: portable cache allowlist, custom root isolation, lock guard & no
       }
     },
   );
+
+  it('tracks historical cache roots, scans custom paths, reads manifest versions, cleans companion locks & prunes empty historical roots while preserving ASR cache', async () => {
+    const sandbox = await makeTempDir('vf-history-cache-');
+    const localAppData = join(sandbox, 'LocalAppData');
+    const activeRoot = join(sandbox, 'ActiveCache');
+    const historicalRoot = join(sandbox, 'OldDrive', DEDICATED_SUBDIR_NAME);
+    const unrelatedDir = join(sandbox, 'RandomUserFolder');
+    const asrDir = join(localAppData, 'VoxFigura', 'ASR');
+    const cfgPath = join(localAppData, 'VoxFigura', 'launcher-config.json');
+
+    await mkdir(activeRoot, { recursive: true });
+    await writeFile(join(activeRoot, CACHE_ROOT_MARKER), '{"app":"VoxFigura"}\n', 'utf8');
+    const activeDir = join(activeRoot, 'public-1111aaaa2222');
+    await mkdir(activeDir, { recursive: true });
+    await writeFile(
+      join(activeDir, 'bundle-manifest.json'),
+      JSON.stringify({ edition: 'public', version: '0.2.1' }),
+      'utf8',
+    );
+
+    // Historical cache root in another location with a stale bundle + companion .lock
+    await mkdir(historicalRoot, { recursive: true });
+    await writeFile(join(historicalRoot, CACHE_ROOT_MARKER), '{"app":"VoxFigura"}\n', 'utf8');
+    const oldBundle = join(historicalRoot, 'friends-9999bbbb8888');
+    await mkdir(oldBundle, { recursive: true });
+    await writeFile(
+      join(oldBundle, 'bundle-manifest.json'),
+      JSON.stringify({ edition: 'friends', version: '0.2.0' }),
+      'utf8',
+    );
+    await writeFile(join(oldBundle, 'model.bin'), 'old-weights', 'utf8');
+    const oldCompanionLock = join(historicalRoot, 'friends-9999bbbb8888.lock');
+    await writeFile(oldCompanionLock, '', 'utf8');
+
+    // Unrelated directory should never be recognized as a cache root
+    await mkdir(unrelatedDir, { recursive: true });
+    await writeFile(join(unrelatedDir, 'notes.txt'), 'not a cache', 'utf8');
+
+    // Persistent ASR model directory should be reported separately and never deleted
+    await mkdir(join(asrDir, 'sensevoice-small'), { recursive: true });
+    await writeFile(join(asrDir, 'sensevoice-small', 'model.int8.onnx'), 'asr-weights', 'utf8');
+
+    process.env.LOCALAPPDATA = localAppData;
+    process.env.VOCALCUT_PORTABLE_ROOT = activeRoot;
+    process.env.VOCALCUT_PORTABLE_ACTIVE = 'public-1111aaaa2222';
+    process.env.VOCALCUT_LAUNCHER_CONFIG = cfgPath;
+
+    const { port } = await startTestServer();
+
+    // Policy validation & persistence
+    const badPolicy = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/policy',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ policy: 'delete_everything' }),
+    });
+    expect(badPolicy.status).toBe(400);
+
+    const okPolicy = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/policy',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ policy: 'keep_current' }),
+    });
+    expect(okPolicy.status).toBe(200);
+    expect(okPolicy.json.autoCleanPolicy).toBe('keep_current');
+
+    // Unrelated folder must not be matched
+    const probeMiss = await probeCacheRootCandidate(unrelatedDir);
+    expect(probeMiss.matched).toBe(false);
+
+    const scanMiss = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/scan',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'custom', targetPath: unrelatedDir }),
+    });
+    expect(scanMiss.status).toBe(200);
+    expect(scanMiss.json.matched).toBe(false);
+
+    // Custom scan pointing at OldDrive parent detects OldDrive/VoxFigura-Cache
+    const scanHit = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/scan',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'custom', targetPath: join(sandbox, 'OldDrive') }),
+    });
+    expect(scanHit.status).toBe(200);
+    expect(scanHit.json.matched).toBe(true);
+    expect(scanHit.json.discoveredRoots).toContain(historicalRoot);
+
+    const activeEntry = scanHit.json.entries.find((e: any) => e.name === 'public-1111aaaa2222');
+    const oldEntry = scanHit.json.entries.find((e: any) => e.name === 'friends-9999bbbb8888');
+    expect(activeEntry?.displayName).toBe('开源版 v0.2.1');
+    expect(oldEntry?.displayName).toBe('群友版 v0.2.0');
+    expect(scanHit.json.asrCache?.exists).toBe(true);
+    expect(scanHit.json.asrCache?.modelCount).toBe(1);
+
+    // Open endpoint must reject arbitrary non-registered paths
+    const badOpen = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/open',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: unrelatedDir }),
+    });
+    expect(badOpen.status).toBe(400);
+
+    // Cleaning the stale bundle entry must also remove its companion lock and prune empty historical root
+    const cleanEntry = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/clean',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'entry', targetPath: oldBundle }),
+    });
+    expect(cleanEntry.status).toBe(200);
+    expect(cleanEntry.json.removedCount).toBe(1);
+    expect(await exists(oldBundle)).toBe(false);
+    expect(await exists(oldCompanionLock)).toBe(false);
+    expect(await exists(historicalRoot)).toBe(false);
+    expect(cleanEntry.json.removedEmptyRoots).toContain(historicalRoot);
+
+    // ASR directory and active bundle must remain untouched
+    expect(await exists(activeDir)).toBe(true);
+    expect(await exists(join(asrDir, 'sensevoice-small', 'model.int8.onnx'))).toBe(true);
+  });
 });
 
 describe('D-03: PowerShell pick-dir prevents U+2019 curly quote command injection', () => {

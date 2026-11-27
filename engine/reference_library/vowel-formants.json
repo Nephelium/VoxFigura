@@ -1,0 +1,304 @@
+{
+  "method": "Praat Burg",
+  "parselmouth": "0.4.7",
+  "window_ms": 25,
+  "step_ms": 10,
+  "ceiling_hz": 5000,
+  "core_fraction": [
+    0.3,
+    0.7
+  ],
+  "records": [
+    {
+      "id": "main-T221",
+      "symbol": "i",
+      "f1": 285.6,
+      "f2": 2074.1,
+      "f3": 3163,
+      "frames": 62,
+      "core_start_s": 0.6638,
+      "core_end_s": 1.3328
+    },
+    {
+      "id": "main-T222",
+      "symbol": "y",
+      "f1": 276.1,
+      "f2": 1888.2,
+      "f3": 2122,
+      "frames": 66,
+      "core_start_s": 0.957,
+      "core_end_s": 1.6171
+    },
+    {
+      "id": "main-T223",
+      "symbol": "ɨ",
+      "f1": 286.3,
+      "f2": 1602.3,
+      "f3": 2132.6,
+      "frames": 49,
+      "core_start_s": 0.919,
+      "core_end_s": 1.451
+    },
+    {
+      "id": "main-T224",
+      "symbol": "ʉ",
+      "f1": 289.7,
+      "f2": 1240.4,
+      "f3": 2117,
+      "frames": 66,
+      "core_start_s": 1.2693,
+      "core_end_s": 1.936
+    },
+    {
+      "id": "main-T225",
+      "symbol": "ɯ",
+      "f1": 312.7,
+      "f2": 1207.7,
+      "f3": 2256.8,
+      "frames": 58,
+      "core_start_s": 0.966,
+      "core_end_s": 1.574
+    },
+    {
+      "id": "main-T226",
+      "symbol": "u",
+      "f1": 291.5,
+      "f2": 559.6,
+      "f3": 2546,
+      "frames": 72,
+      "core_start_s": 1.057,
+      "core_end_s": 1.7732
+    },
+    {
+      "id": "main-T227",
+      "symbol": "ɪ",
+      "f1": 370.1,
+      "f2": 1774.7,
+      "f3": 2401,
+      "frames": 67,
+      "core_start_s": 1.4371,
+      "core_end_s": 2.1013
+    },
+    {
+      "id": "main-T228",
+      "symbol": "ʏ",
+      "f1": 331.2,
+      "f2": 1756.8,
+      "f3": 2147,
+      "frames": 62,
+      "core_start_s": 0.9756,
+      "core_end_s": 1.5886
+    },
+    {
+      "id": "main-T229",
+      "symbol": "ʊ",
+      "f1": 333.8,
+      "f2": 806.8,
+      "f3": 2770,
+      "frames": 75,
+      "core_start_s": 1.4964,
+      "core_end_s": 2.2462
+    },
+    {
+      "id": "main-T230",
+      "symbol": "e",
+      "f1": 399.8,
+      "f2": 1888.8,
+      "f3": 2616,
+      "frames": 61,
+      "core_start_s": 1.5534,
+      "core_end_s": 2.2505
+    },
+    {
+      "id": "main-T231",
+      "symbol": "ø",
+      "f1": 404.2,
+      "f2": 1591.3,
+      "f3": 2111,
+      "frames": 70,
+      "core_start_s": 1.1357,
+      "core_end_s": 1.8453
+    },
+    {
+      "id": "main-T232",
+      "symbol": "ɘ",
+      "f1": 443.8,
+      "f2": 1473.6,
+      "f3": 2613,
+      "frames": 57,
+      "core_start_s": 0.8044,
+      "core_end_s": 1.3941
+    },
+    {
+      "id": "main-T233",
+      "symbol": "ɵ",
+      "f1": 444.0,
+      "f2": 1062.2,
+      "f3": 2552,
+      "frames": 64,
+      "core_start_s": 0.9198,
+      "core_end_s": 1.5647
+    },
+    {
+      "id": "main-T234",
+      "symbol": "ɤ",
+      "f1": 404.1,
+      "f2": 1101.9,
+      "f3": 2546.1,
+      "frames": 41,
+      "core_start_s": 0.706,
+      "core_end_s": 1.114
+    },
+    {
+      "id": "main-T235",
+      "symbol": "o",
+      "f1": 354.3,
+      "f2": 729.1,
+      "f3": 2805,
+      "frames": 80,
+      "core_start_s": 1.4342,
+      "core_end_s": 2.2329
+    },
+    {
+      "id": "main-T236",
+      "symbol": "ə",
+      "f1": 478.7,
+      "f2": 1249.1,
+      "f3": 2691,
+      "frames": 57,
+      "core_start_s": 1.0924,
+      "core_end_s": 1.659
+    },
+    {
+      "id": "main-T237",
+      "symbol": "ɛ",
+      "f1": 579.4,
+      "f2": 1865.8,
+      "f3": 2691.9,
+      "frames": 35,
+      "core_start_s": 0.721,
+      "core_end_s": 1.069
+    },
+    {
+      "id": "main-T238",
+      "symbol": "œ",
+      "f1": 466.9,
+      "f2": 1417.3,
+      "f3": 2388,
+      "frames": 62,
+      "core_start_s": 1.0531,
+      "core_end_s": 1.6686
+    },
+    {
+      "id": "main-T239",
+      "symbol": "ɜ",
+      "f1": 515.4,
+      "f2": 1110.8,
+      "f3": 2794,
+      "frames": 63,
+      "core_start_s": 1.3296,
+      "core_end_s": 1.9642
+    },
+    {
+      "id": "main-T240",
+      "symbol": "ɞ",
+      "f1": 462.1,
+      "f2": 862.9,
+      "f3": 2635,
+      "frames": 71,
+      "core_start_s": 1.2116,
+      "core_end_s": 1.9212
+    },
+    {
+      "id": "main-T241",
+      "symbol": "ʌ",
+      "f1": 532.8,
+      "f2": 1024.8,
+      "f3": 2863.2,
+      "frames": 39,
+      "core_start_s": 0.721,
+      "core_end_s": 1.109
+    },
+    {
+      "id": "main-T242",
+      "symbol": "ɔ",
+      "f1": 453.8,
+      "f2": 752.4,
+      "f3": 2838,
+      "frames": 67,
+      "core_start_s": 1.2614,
+      "core_end_s": 1.9324
+    },
+    {
+      "id": "main-T243",
+      "symbol": "æ",
+      "f1": 655.9,
+      "f2": 1775.4,
+      "f3": 2854.2,
+      "frames": 32,
+      "core_start_s": 0.637,
+      "core_end_s": 0.993
+    },
+    {
+      "id": "main-T244",
+      "symbol": "ɐ",
+      "f1": 600.8,
+      "f2": 1109.3,
+      "f3": 2949,
+      "frames": 62,
+      "core_start_s": 1.1008,
+      "core_end_s": 1.7226
+    },
+    {
+      "id": "main-T245",
+      "symbol": "a",
+      "f1": 795.7,
+      "f2": 1489.3,
+      "f3": 2822.2,
+      "frames": 37,
+      "core_start_s": 0.806,
+      "core_end_s": 1.174
+    },
+    {
+      "id": "supplement-mandarin-central-a",
+      "symbol": "ä",
+      "f1": 760.5,
+      "f2": 1354.9,
+      "frames": 46,
+      "core_start_s": 0.782,
+      "core_end_s": 1.238,
+      "f3": 2852.5
+    },
+    {
+      "id": "main-T246",
+      "symbol": "ɶ",
+      "f1": 500.4,
+      "f2": 1270.5,
+      "f3": 2533,
+      "frames": 77,
+      "core_start_s": 1.3366,
+      "core_end_s": 2.1277
+    },
+    {
+      "id": "main-T247",
+      "symbol": "ɑ",
+      "f1": 608.6,
+      "f2": 995.2,
+      "f3": 2950.7,
+      "frames": 53,
+      "core_start_s": 0.926,
+      "core_end_s": 1.454
+    },
+    {
+      "id": "main-T248",
+      "symbol": "ɒ",
+      "f1": 488.8,
+      "f2": 752.5,
+      "f3": 2864.2,
+      "frames": 33,
+      "core_start_s": 0.356,
+      "core_end_s": 0.684
+    }
+  ],
+  "omitted": []
+}
