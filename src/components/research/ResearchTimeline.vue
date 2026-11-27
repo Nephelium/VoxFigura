@@ -2,10 +2,10 @@
 import { phoneTraits, stripDottedCirclePlaceholders } from "@/data/ipa-segments";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import {
-  F0_LIMIT_HZ,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
   hzToSt,
+  isValidF0Hz,
   msToSamples,
   retime,
   samplesToMs,
@@ -26,12 +26,28 @@ import {
 import { getCurrentPageScale } from '@/styles/skin-registry';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { sendWorkspaceAudio } from '@/data/workspace-transfer';
+import { textPoseSource } from '@/data/ipa-pose-source';
 import { evaluateControlPitch, setUnmarkedIpaPitchMode, unmarkedIpaPitchMode } from './control-pitch';
 import { isSegmentVoicedAt } from '@/data/speech-timing';
 import { buildF0CurvePaths, type F0CurvePoint } from './f0-curve-paths';
 import { SYNTHESIS_VOQS_PROFILES, voqsAnchorLabel, voqsAnchorPatch, voqsLane, voqsProfile, voqsSynthesisLaneIndex } from '@/data/voqs-library';
 import { writeRecordedVoqs } from './voqs-actions';
-import { insertAnnotationSegment, spliceAnnotationPcm, splitAnnotationPhone, stopPhaseBoundaries } from './annotation-edit';
+import {
+  copyAnnotationSelection,
+  deleteAnnotationSegments,
+  getPhoneSlideBounds,
+  getSyllableSlideBounds,
+  insertAnnotationSegment,
+  pasteAnnotationClipboard,
+  resizeAnnotationSilenceGap,
+  slideAnnotationPhones,
+  slideAnnotationSyllables,
+  spliceAnnotationPcm,
+  splitAnnotationPhone,
+  stopPhaseBoundaries,
+  syncSyllableTextFromSegments,
+  type AnnotationClipboardPayload,
+} from './annotation-edit';
 import KeyframePopover from './KeyframePopover.vue';
 import PhonationEditor from './PhonationEditor.vue';
 import {
@@ -59,21 +75,99 @@ const zoomMin = 0.2;
 const zoomMax = 5;
 
 // Per-track vertical heights (every track has an independent bottom-edge vertical drag handle!)
-const hTextgrid = ref(66);
-const hArt = ref(34);
-const hPhon = ref(46);
-const hF0 = ref(56);
-const hPs = ref(44);
-const hWave = ref(46);
+const TRACK_HEIGHT_BASE = {
+  textgrid: 66,
+  art: 34,
+  phon: 56,
+  f0: 56,
+  ps: 44,
+  wave: 46,
+} as const;
+const TRACK_SCALE_FACTOR = {
+  compact: 0.84,
+  standard: 1,
+  tall: 1.22,
+} as const;
+
+function scaledTrackHeight(base: number): number {
+  const factor = TRACK_SCALE_FACTOR[store.timelineTrackScale.value] ?? 1;
+  return Math.max(24, Math.round(base * factor));
+}
+
+const hTextgrid = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.textgrid));
+const hArt = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.art));
+const hPhon = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.phon));
+const hF0 = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.f0));
+const hPs = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.ps));
+const hWave = ref(scaledTrackHeight(TRACK_HEIGHT_BASE.wave));
 
 const phonExpanded = ref(false);
 const phonEditorOpen = ref(false);
 const f0Expanded = ref(false);
 const psExpanded = ref(false);
+const collapsedSpecialHeights = ref<{ phon: number; f0: number; ps: number }>({
+  phon: scaledTrackHeight(TRACK_HEIGHT_BASE.phon),
+  f0: scaledTrackHeight(TRACK_HEIGHT_BASE.f0),
+  ps: scaledTrackHeight(TRACK_HEIGHT_BASE.ps),
+});
 
-const effPhonHeight = computed(() => (phonExpanded.value ? Math.max(26 + SYNTHESIS_VOQS_PROFILES.length * 20, hPhon.value) : hPhon.value));
+watch(
+  () => store.timelineTrackScale.value,
+  () => {
+    hTextgrid.value = scaledTrackHeight(TRACK_HEIGHT_BASE.textgrid);
+    hArt.value = scaledTrackHeight(TRACK_HEIGHT_BASE.art);
+    hWave.value = scaledTrackHeight(TRACK_HEIGHT_BASE.wave);
+    const nextPhon = scaledTrackHeight(TRACK_HEIGHT_BASE.phon);
+    const nextF0 = scaledTrackHeight(TRACK_HEIGHT_BASE.f0);
+    const nextPs = scaledTrackHeight(TRACK_HEIGHT_BASE.ps);
+    collapsedSpecialHeights.value = { phon: nextPhon, f0: nextF0, ps: nextPs };
+    if (!phonExpanded.value) hPhon.value = nextPhon;
+    if (!f0Expanded.value) hF0.value = nextF0;
+    if (!psExpanded.value) hPs.value = nextPs;
+  },
+);
+const phonExpandedMin = 28 + SYNTHESIS_VOQS_PROFILES.length * 22;
+
+const effPhonHeight = computed(() => (phonExpanded.value ? Math.max(phonExpandedMin, hPhon.value) : hPhon.value));
 const effF0Height = computed(() => (f0Expanded.value ? Math.max(148, hF0.value) : hF0.value));
 const effPsHeight = computed(() => (psExpanded.value ? Math.max(148, hPs.value) : hPs.value));
+
+function toggleSpecialTrack(track: 'phon' | 'f0' | 'ps'): void {
+  if (track === 'phon') {
+    if (phonExpanded.value) {
+      phonExpanded.value = false;
+      hPhon.value = collapsedSpecialHeights.value.phon;
+    } else {
+      collapsedSpecialHeights.value.phon = Math.min(96, hPhon.value);
+      phonExpanded.value = true;
+      hPhon.value = Math.max(phonExpandedMin, hPhon.value);
+    }
+    return;
+  }
+  if (track === 'f0') {
+    if (f0Expanded.value) {
+      f0Expanded.value = false;
+      hF0.value = collapsedSpecialHeights.value.f0;
+    } else {
+      collapsedSpecialHeights.value.f0 = Math.min(96, hF0.value);
+      f0Expanded.value = true;
+      hF0.value = Math.max(148, hF0.value);
+    }
+    return;
+  }
+  if (psExpanded.value) {
+    psExpanded.value = false;
+    hPs.value = collapsedSpecialHeights.value.ps;
+  } else {
+    collapsedSpecialHeights.value.ps = Math.min(96, hPs.value);
+    psExpanded.value = true;
+    hPs.value = Math.max(148, hPs.value);
+  }
+}
+
+function spanWidthPx(startSmp: number, endSmp: number): number {
+  return Math.max(2, smpToX(endSmp) - smpToX(startSmp));
+}
 
 // F0 Track Header Capsules (strictly 靶点 / 钉住 / 颤音 / 微扰 + 手绘 + 放大 — NO redundant 残差!)
 const showF0Targets = ref(true);
@@ -157,6 +251,36 @@ function inView(startSmp: number, endSmp: number): boolean {
 }
 const visiblePhones = computed(() => flatPhones.value.filter(({ seg }) => inView(seg.start_smp, seg.end_smp)));
 const visibleSyllables = computed(() => syllables.value.filter((syl) => inView(syl.start_smp, syl.end_smp)));
+interface SilenceGapItem {
+  id: string;
+  startSmp: number;
+  endSmp: number;
+  kind: 'leading' | 'between' | 'trailing';
+}
+const silenceGaps = computed<SilenceGapItem[]>(() => {
+  const clip = drawingClip.value;
+  if (!clip || !syllables.value.length) return [];
+  const minGapSmp = msToSamples(10);
+  const ordered = [...syllables.value].sort((a, b) => a.start_smp - b.start_smp);
+  const gaps: SilenceGapItem[] = [];
+  const clipStart = clip.start_smp ?? 0;
+  if (ordered[0].start_smp - clipStart >= minGapSmp) {
+    gaps.push({ id: `gap_lead_${clipStart}_${ordered[0].start_smp}`, startSmp: clipStart, endSmp: ordered[0].start_smp, kind: 'leading' });
+  }
+  for (let i = 0; i < ordered.length - 1; i++) {
+    const a = ordered[i].end_smp;
+    const b = ordered[i + 1].start_smp;
+    if (b - a >= minGapSmp) {
+      gaps.push({ id: `gap_mid_${ordered[i].id}_${ordered[i + 1].id}`, startSmp: a, endSmp: b, kind: 'between' });
+    }
+  }
+  const lastEnd = ordered[ordered.length - 1].end_smp;
+  if (clip.end_smp - lastEnd >= minGapSmp) {
+    gaps.push({ id: `gap_tail_${lastEnd}_${clip.end_smp}`, startSmp: lastEnd, endSmp: clip.end_smp, kind: 'trailing' });
+  }
+  return gaps;
+});
+const visibleSilenceGaps = computed(() => silenceGaps.value.filter((g) => inView(g.startSmp, g.endSmp)));
 const selectedPhoneSet = computed(() => new Set(store.selectedPhonemeIds.value));
 const singlePhone = computed(() => selectedPhoneSet.value.size === 1
   ? flatPhones.value.find(({ seg }) => selectedPhoneSet.value.has(seg.id)) ?? null : null);
@@ -251,6 +375,9 @@ const emit = defineEmits<{
   'play-selection': [payload: { startSmp?: number; endSmp?: number; gain: number }];
   'cut-range': [payload: { startSmp: number; endSmp: number }];
   'trim-silence': [];
+  'save-dictionary': [];
+  'playhead-scrub': [smp: number];
+  'phoneme-focus': [];
 }>();
 const openKfIdx = computed(() => {
   const index = flatPhones.value.findIndex(({ seg }) => seg.id === openKfId.value);
@@ -272,10 +399,12 @@ const activeKfNextParams = computed(() => {
 });
 
 function openKeyframePopover(item: FlatPhoneItem): void {
+  cutSelectionSmp.value = null;
   store.selectedSyllableId.value = item.syl.id;
   store.selectedPhonemeIds.value = [item.seg.id];
   store.playheadSmp.value = item.seg.start_smp;
   openKfId.value = openKfId.value === item.seg.id ? null : item.seg.id;
+  emit('phoneme-focus');
 }
 
 // ===== Polyphone Corner Triangle Reading Switcher (STRICT: only triangle triggers!) =====
@@ -291,11 +420,13 @@ let phoneRangeAnchor = '';
 
 function selectSyllableBodyOnly(syl: Syllable): void {
   if (suppressNextPhoneClick) return;
+  cutSelectionSmp.value = null;
   readingMenuSyl.value = null;
   selectedSyllableIds.value = [syl.id];
   store.selectedSyllableId.value = syl.id;
   store.selectedPhonemeIds.value = [];
   store.playheadSmp.value = syl.start_smp;
+  emit('phoneme-focus');
 }
 
 function openPolyphoneMenu(syl: Syllable, e: MouseEvent): void {
@@ -308,20 +439,33 @@ function openPolyphoneMenu(syl: Syllable, e: MouseEvent): void {
   const btn = e.currentTarget as HTMLElement | null;
   if (!btn) return;
   const rect = btn.getBoundingClientRect();
-  const scale = getCurrentPageScale();
-  const menuW = Math.round(186 * Math.min(1, Math.max(0.85, scale)));
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  let left = rect.right - menuW;
+  const scale = Math.max(0.5, getCurrentPageScale());
+  const menuW = 192;
+  const vw = window.innerWidth / scale;
+  const vh = window.innerHeight / scale;
+  let left = rect.right / scale - menuW;
   left = Math.max(8, Math.min(vw - menuW - 8, left));
-  let top = rect.bottom + 4;
-  if (top + 140 > vh) top = Math.max(8, rect.top - 130);
+  let top = rect.bottom / scale + 4;
+  if (top + 148 > vh) top = Math.max(8, rect.top / scale - 138);
   readingMenuStyle.value = {
     left: `${Math.round(left)}px`,
     top: `${Math.round(top)}px`,
     minWidth: `${menuW}px`,
+    maxHeight: `${Math.max(120, Math.round(vh - 24))}px`,
   };
   readingMenuSyl.value = syl;
+}
+
+function isActiveReadingCandidate(syl: Syllable, candidate: string): boolean {
+  const ipaMatch = /\[([^\]]+)\]/.exec(candidate);
+  const rawIpa = ipaMatch ? ipaMatch[1] : candidate;
+  const toneDigits = extractToneLevels(rawIpa) ?? '';
+  const phonemes = splitIpaToPhonemes(rawIpa);
+  const samePhones =
+    phonemes.length === syl.ipa.length && phonemes.every((p, idx) => p === syl.ipa[idx]);
+  if (!samePhones) return false;
+  if (toneDigits && (syl.tone_levels ?? '') !== toneDigits) return false;
+  return true;
 }
 
 function applyReadingCandidate(syl: Syllable, candidate: string): void {
@@ -331,8 +475,10 @@ function applyReadingCandidate(syl: Syllable, candidate: string): void {
   const phonemes = splitIpaToPhonemes(rawIpa);
   const clip = activeClip.value;
   if (!clip) return;
-  const next = JSON.parse(JSON.stringify(clip)) as typeof clip;
-  const row = next.syllables[syl.id];
+  const nextProject = JSON.parse(JSON.stringify(store.project.value));
+  const nextClip = nextProject.clips[clip.id];
+  const row = nextClip?.syllables[syl.id];
+  if (!nextClip || !row) return;
   const segments = buildSegmentsForSyllable(syl.id, phonemes, syl.start_smp, syl.end_smp, activeVoice.value?.speaker);
   if (segments.some((segment) => segment.end_smp <= segment.start_smp || (segment.stop_timing
     && samplesToMs(segment.end_smp - segment.start_smp) < 11))) {
@@ -342,20 +488,34 @@ function applyReadingCandidate(syl: Syllable, candidate: string): void {
   row.ipa = phonemes;
   row.segments = segments;
   row.nucleus_index = Math.max(0, segments.findIndex((segment) => segment.role === 'nucleus'));
-  if (toneDigits) setSyllableTone(row, toneDigits);
+  if (row.overrides?.poses) row.overrides.poses = [];
+  if (toneDigits) {
+    setSyllableTone(row, toneDigits);
+    if (nextProject.f0_pins?.length) {
+      nextProject.f0_pins = stripPinsOverlappingRange(nextProject.f0_pins, row.start_smp, row.end_smp);
+    }
+  }
   const res = store.executeCommand({
-    type: 'clip.edit',
+    type: 'project.replace',
     label: `切换多音字「${syl.text}」读音为 ${candidate}`,
-    payload: { clip: next },
+    payload: { project: nextProject },
   });
-  if (res.ok) selectSyllableBodyOnly(row);
+  if (res.ok) {
+    invalidateSynthesisBufferIfNeeded();
+    selectSyllableBodyOnly(row);
+  }
   readingMenuSyl.value = null;
 }
 
 function setSyllableTone(syllable: Syllable, tone: string): void {
-  if (syllable.tone_levels === tone) return;
+  if ((syllable.tone_levels ?? '') === tone) return;
   syllable.tone_levels = tone;
-  if (!tone) return;
+  if (!tone) {
+    if (syllable.targets[0]?.candidates?.user) {
+      delete syllable.targets[0].candidates.user;
+    }
+    return;
+  }
   const target = syllable.targets[0] ?? {
     id: `${syllable.id}_t0`, span_id: syllable.id,
     start_smp: syllable.start_smp, end_smp: syllable.end_smp,
@@ -368,16 +528,43 @@ function setSyllableTone(syllable: Syllable, tone: string): void {
 }
 
 const editDialog = ref<HTMLDialogElement | null>(null);
-const editing = ref<{ syllableId: string; phoneId?: string; text: string; tone: string } | null>(null);
+const editing = ref<{
+  syllableId: string;
+  phoneId?: string;
+  gap?: { startSmp: number; endSmp: number };
+  text: string;
+  tone: string;
+  durationMs: number;
+  origDurationMs: number;
+} | null>(null);
 const editError = ref('');
 
 async function openAnnotationEdit(syllable: Syllable, segment?: SegmentAnchor): Promise<void> {
   editError.value = '';
+  const origMs = Math.round(samplesToMs((segment?.end_smp ?? syllable.end_smp) - (segment?.start_smp ?? syllable.start_smp)));
   editing.value = {
     syllableId: syllable.id,
     phoneId: segment?.id,
     text: segment?.ipa ?? syllable.text,
     tone: syllable.tone_levels ?? '',
+    durationMs: origMs,
+    origDurationMs: origMs,
+  };
+  await nextTick();
+  if (!editDialog.value?.open) editDialog.value?.showModal();
+}
+
+async function openSilenceGapEdit(gap: SilenceGapItem): Promise<void> {
+  if (activeClip.value?.source?.score) return;
+  editError.value = '';
+  const origMs = Math.round(samplesToMs(gap.endSmp - gap.startSmp));
+  editing.value = {
+    syllableId: '',
+    gap: { startSmp: gap.startSmp, endSmp: gap.endSmp },
+    text: 'sil',
+    tone: '',
+    durationMs: origMs,
+    origDurationMs: origMs,
   };
   await nextTick();
   if (!editDialog.value?.open) editDialog.value?.showModal();
@@ -387,14 +574,47 @@ function applyAnnotationEdit(): void {
   const draft = editing.value;
   const clip = activeClip.value;
   if (!draft || !clip) return;
+
+  if (draft.gap) {
+    const requestedMs = Math.round(Number(draft.durationMs));
+    if (!Number.isFinite(requestedMs) || requestedMs < 0 || requestedMs > 60000) {
+      editError.value = '无声段时长须在 0–60000 ms 之间（设为 0 可消除停顿）';
+      return;
+    }
+    const retimed = resizeAnnotationSilenceGap(
+      clip,
+      draft.gap.startSmp,
+      draft.gap.endSmp,
+      msToSamples(requestedMs),
+      store.project.value,
+    );
+    const res = store.executeCommand({
+      type: 'clip.edit',
+      label: requestedMs === 0 ? '消除无声段停顿' : `调整无声段时长至 ${requestedMs} ms`,
+      payload: { clip: retimed.clip, retimed },
+    });
+    if (res.ok) {
+      invalidateSynthesisBufferIfNeeded();
+      editDialog.value?.close();
+    } else if (res.error) {
+      editError.value = res.error.hint;
+    }
+    return;
+  }
+
   const text = draft.text.trim();
   if (!text) {
     editError.value = draft.phoneId ? '请输入音素符号' : '请输入音节文字';
     return;
   }
-  const next = JSON.parse(JSON.stringify(clip)) as typeof clip;
-  const syllable = next.syllables[draft.syllableId];
-  if (!syllable) return;
+  const nextProject = JSON.parse(JSON.stringify(store.project.value));
+  let nextClip = nextProject.clips[clip.id] as typeof clip | undefined;
+  const syllable = nextClip?.syllables[draft.syllableId];
+  if (!nextClip || !syllable) return;
+
+  const requestedDurMs = Math.round(Number(draft.durationMs));
+  const durChanged = Number.isFinite(requestedDurMs) && requestedDurMs !== draft.origDurationMs;
+
   if (draft.phoneId) {
     const index = syllable.segments.findIndex((segment) => segment.id === draft.phoneId);
     if (index < 0) return;
@@ -404,82 +624,248 @@ function applyAnnotationEdit(): void {
       editError.value = '请输入单个音素，可包含附加符号';
       return;
     }
-    if (phoneTraits(symbol).stop && samplesToMs(phone.end_smp - phone.start_smp) < 11) {
-      editError.value = '塞音至少需要闭塞 10 ms 与释放 1 ms';
+    const effectiveDurMs = durChanged ? requestedDurMs : samplesToMs(phone.end_smp - phone.start_smp);
+    if (!Number.isFinite(effectiveDurMs) || effectiveDurMs < (phoneTraits(symbol).stop ? 11 : 15) || effectiveDurMs > 60000) {
+      editError.value = phoneTraits(symbol).stop
+        ? '塞音时长须在 11–60000 ms 之间（闭塞 ≥10 ms、释放 ≥1 ms）'
+        : '音素时长须在 15–60000 ms 之间';
       return;
     }
+    const prevIpa = syllable.segments.map((s) => s.ipa);
     syllable.segments[index] = replaceSegmentIpa(phone, symbol, activeVoice.value?.speaker ?? 'JD2');
     syllable.ipa[index] = symbol;
+    if (syllable.overrides?.poses?.length) {
+      syllable.overrides.poses = syllable.overrides.poses.filter(
+        (pose) => pose.seg_index !== index && pose.seg_id !== phone.id,
+      );
+    }
+    const nucIdx = syllable.segments.findIndex((s) => s.role === 'nucleus');
+    if (nucIdx >= 0) syllable.nucleus_index = nucIdx;
+    syncSyllableTextFromSegments(syllable, prevIpa);
+    if (durChanged) {
+      const rt = retime(
+        nextClip,
+        {
+          clip_id: nextClip.id,
+          syllable_id: syllable.id,
+          segment_id: phone.id,
+          new_end_smp: phone.start_smp + msToSamples(requestedDurMs),
+        },
+        nextProject.phonation_anchors,
+        nextProject.f0_pins ?? [],
+      );
+      if (!rt.ok) {
+        editError.value = rt.error.hint;
+        return;
+      }
+      nextClip = rt.value.clip;
+      nextProject.clips[clip.id] = nextClip;
+      nextProject.phonation_anchors = rt.value.phonation_anchors;
+      nextProject.f0_pins = rt.value.f0_pins;
+    }
   } else {
     if (!/^[1-5]{0,5}$/.test(draft.tone.trim())) {
       editError.value = '调值使用 1–5 的数字，可留空';
       return;
     }
+    const prevTone = syllable.tone_levels ?? '';
+    const nextTone = draft.tone.trim();
     syllable.text = text;
-    setSyllableTone(syllable, draft.tone.trim());
+    setSyllableTone(syllable, nextTone);
+    if (nextTone !== prevTone && nextProject.f0_pins?.length) {
+      nextProject.f0_pins = stripPinsOverlappingRange(nextProject.f0_pins, syllable.start_smp, syllable.end_smp);
+    }
+    if (durChanged) {
+      if (!Number.isFinite(requestedDurMs) || requestedDurMs < 20 || requestedDurMs > 60000) {
+        editError.value = '音节时长须在 20–60000 ms 之间';
+        return;
+      }
+      const rt = retime(
+        nextClip,
+        {
+          clip_id: nextClip.id,
+          syllable_id: syllable.id,
+          new_start_smp: syllable.start_smp,
+          new_end_smp: syllable.start_smp + msToSamples(requestedDurMs),
+        },
+        nextProject.phonation_anchors,
+        nextProject.f0_pins ?? [],
+      );
+      if (!rt.ok) {
+        editError.value = rt.error.hint;
+        return;
+      }
+      nextClip = rt.value.clip;
+      const lastSid = nextClip.syllable_order.at(-1);
+      const lastEnd = lastSid ? nextClip.syllables[lastSid]?.end_smp ?? nextClip.end_smp : nextClip.end_smp;
+      nextClip.end_smp = Math.max(msToSamples(60), lastEnd);
+      nextProject.clips[clip.id] = nextClip;
+      nextProject.phonation_anchors = rt.value.phonation_anchors;
+      nextProject.f0_pins = rt.value.f0_pins;
+    }
   }
   const result = store.executeCommand({
-    type: 'clip.edit',
+    type: 'project.replace',
     label: draft.phoneId ? '编辑音素' : '编辑音节与声调',
-    payload: { clip: next },
+    payload: { project: nextProject },
   });
-  if (result.ok) editDialog.value?.close();
+  if (result.ok) {
+    invalidateSynthesisBufferIfNeeded();
+    editDialog.value?.close();
+  }
 }
 
 // ===== Enhanced Phoneme Edit Popover (T-15) =====
 const phoneEditMenuOpen = ref(false);
 const phoneEditBtnRef = ref<HTMLButtonElement | null>(null);
+const insertPhoneBtnRef = ref<HTMLButtonElement | null>(null);
 const phoneEditMenuRef = ref<HTMLDivElement | null>(null);
+const insertIpaInputRef = ref<HTMLInputElement | null>(null);
 const phoneEditMenuStyle = ref<Record<string, string>>({});
+const phoneContextMenuRef = ref<HTMLDivElement | null>(null);
+const phoneContextMenu = ref<{
+  syl: Syllable;
+  seg: SegmentAnchor;
+  style: Record<string, string>;
+} | null>(null);
 const quickEditIpa = ref('');
+const quickDurationMs = ref(80);
 const insertIpa = ref('');
 const insertIpaMs = ref(80);
 const insertSilenceMs = ref(120);
 const votDraftMs = ref(0);
 const insertionSyllable = computed(() => singlePhone.value?.syl
-  ?? syllables.value.find((syl) => syl.id === store.selectedSyllableId.value));
+  ?? syllables.value.find((syl) => syl.id === store.selectedSyllableId.value)
+  ?? syllables.value.at(-1));
 const canInsertIpa = computed(() => Boolean(
-  !props.recordingActive && !activeClip.value?.source?.score && insertionSyllable.value
+  !activeClip.value?.source?.score && insertionSyllable.value
   && store.selectedPhonemeIds.value.length <= 1,
+));
+const canDeleteSelectedPhones = computed(() => Boolean(
+  !activeClip.value?.source?.score && store.selectedPhonemeIds.value.length > 0,
 ));
 
 watch(
-  () => [singlePhone.value?.seg.id, singlePhone.value?.seg.ipa, singlePhone.value?.seg.stop_timing?.vot_ms] as const,
+  () => [
+    singlePhone.value?.seg.id,
+    singlePhone.value?.seg.ipa,
+    singlePhone.value?.seg.start_smp,
+    singlePhone.value?.seg.end_smp,
+    singlePhone.value?.seg.stop_timing?.vot_ms,
+  ] as const,
   () => {
     const seg = singlePhone.value?.seg;
     quickEditIpa.value = seg?.ipa ?? '';
+    quickDurationMs.value = seg ? Math.round(samplesToMs(seg.end_smp - seg.start_smp)) : 80;
     votDraftMs.value = Math.round(seg?.stop_timing?.vot_ms ?? 0);
   },
   { immediate: true },
 );
+
+function openPhoneEditPopoverAt(anchor: HTMLElement | null, focusInsert = false): void {
+  phoneContextMenu.value = null;
+  const btn = anchor ?? phoneEditBtnRef.value;
+  if (btn) {
+    const rect = btn.getBoundingClientRect();
+    const scale = Math.max(0.5, getCurrentPageScale());
+    const vw = window.innerWidth / scale;
+    const vh = window.innerHeight / scale;
+    const menuW = 290;
+    let left = rect.left / scale;
+    left = Math.max(8, Math.min(vw - menuW - 8, left));
+    phoneEditMenuStyle.value = {
+      left: `${Math.round(left)}px`,
+      top: '8px',
+      width: `${menuW}px`,
+      maxHeight: `${Math.max(180, Math.round(vh - 16))}px`,
+    };
+    void nextTick(() => {
+      const menu = phoneEditMenuRef.value;
+      if (menu) {
+        const below = rect.bottom / scale + 6;
+        const top = below + menu.offsetHeight <= vh - 8
+          ? below : Math.max(8, rect.top / scale - menu.offsetHeight - 6);
+        phoneEditMenuStyle.value = { ...phoneEditMenuStyle.value, top: `${Math.round(top)}px` };
+      }
+      if (focusInsert) {
+        insertIpaInputRef.value?.focus();
+        insertIpaInputRef.value?.select();
+      }
+    });
+  }
+  phoneEditMenuOpen.value = true;
+}
 
 function togglePhoneEditMenu(): void {
   if (phoneEditMenuOpen.value) {
     phoneEditMenuOpen.value = false;
     return;
   }
-  const btn = phoneEditBtnRef.value;
-  if (btn) {
-    const rect = btn.getBoundingClientRect();
-    const menuW = 278;
-    let left = rect.left;
-    left = Math.max(8, Math.min(window.innerWidth - menuW - 8, left));
-    phoneEditMenuStyle.value = {
-      left: `${Math.round(left)}px`,
-      top: '8px',
-      width: `${menuW}px`,
-      maxHeight: 'calc(100dvh - 16px)',
-    };
-    void nextTick(() => {
-      const menu = phoneEditMenuRef.value;
-      if (!menu) return;
-      const below = rect.bottom + 6;
-      const top = below + menu.offsetHeight <= window.innerHeight - 8
-        ? below : Math.max(8, rect.top - menu.offsetHeight - 6);
-      phoneEditMenuStyle.value = { ...phoneEditMenuStyle.value, top: `${Math.round(top)}px` };
-    });
+  openPhoneEditPopoverAt(phoneEditBtnRef.value, false);
+}
+
+function openPhoneInsertPopover(): void {
+  openPhoneEditPopoverAt(insertPhoneBtnRef.value ?? phoneEditBtnRef.value, true);
+}
+
+function openPhoneContextMenu(item: { syl: Syllable; seg: SegmentAnchor }, e: MouseEvent): void {
+  phoneEditMenuOpen.value = false;
+  if (!selectedPhoneSet.value.has(item.seg.id)) {
+    store.selectedSyllableId.value = item.syl.id;
+    store.selectedPhonemeIds.value = [item.seg.id];
+    selectedSyllableIds.value = [];
+    phoneRangeAnchor = item.seg.id;
   }
-  phoneEditMenuOpen.value = true;
+  const scale = Math.max(0.5, getCurrentPageScale());
+  const vw = window.innerWidth / scale;
+  const vh = window.innerHeight / scale;
+  const menuW = 196;
+  const estH = 224;
+  const left = Math.max(8, Math.min(vw - menuW - 8, e.clientX / scale));
+  const rawTop = e.clientY / scale;
+  const top = rawTop + estH <= vh - 8 ? rawTop : Math.max(8, rawTop - estH);
+  phoneContextMenu.value = {
+    syl: item.syl,
+    seg: item.seg,
+    style: { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, minWidth: `${menuW}px` },
+  };
+}
+
+function commitQuickSegmentDuration(): void {
+  const item = singlePhone.value;
+  const clip = activeClip.value;
+  if (!item || !clip) return;
+  const requestedMs = Math.round(Number(quickDurationMs.value));
+  const minMs = item.seg.stop_timing ? 11 : 15;
+  if (!Number.isFinite(requestedMs) || requestedMs < minMs || requestedMs > 60000) {
+    store.pushToast(`音素时长须在 ${minMs}–60000 ms 之间`, 'danger', 3400);
+    return;
+  }
+  const rt = retime(
+    clip,
+    {
+      clip_id: clip.id,
+      syllable_id: item.syl.id,
+      segment_id: item.seg.id,
+      new_end_smp: item.seg.start_smp + msToSamples(requestedMs),
+    },
+    store.project.value.phonation_anchors,
+    store.project.value.f0_pins ?? [],
+  );
+  if (!rt.ok) {
+    store.pushToast(rt.error.hint, 'danger', 3600);
+    quickDurationMs.value = Math.round(samplesToMs(item.seg.end_smp - item.seg.start_smp));
+    return;
+  }
+  const res = store.executeCommand({
+    type: 'clip.edit',
+    label: `调整音素 [${item.seg.ipa}] 时长至 ${requestedMs} ms`,
+    payload: { clip: rt.value.clip, retimed: rt.value },
+  });
+  if (res.ok) {
+    invalidateSynthesisBufferIfNeeded();
+    store.pushToast(`已调整 [${item.seg.ipa}] 时长至 ${requestedMs} ms`, 'success', 2000);
+  }
 }
 
 const canSplitMidpoint = computed(() => {
@@ -519,14 +905,26 @@ function applyQuickIpaEdit(): void {
   const next = JSON.parse(JSON.stringify(clip)) as typeof clip;
   const syl = next.syllables[item.syl.id];
   if (!syl) return;
+  const prevIpa = syl.segments.map((s) => s.ipa);
   syl.segments[idx] = replaceSegmentIpa(syl.segments[idx], symbol, activeVoice.value?.speaker ?? 'JD2');
   syl.ipa[idx] = symbol;
+  if (syl.overrides?.poses?.length) {
+    syl.overrides.poses = syl.overrides.poses.filter(
+      (pose) => pose.seg_index !== idx && pose.seg_id !== item.seg.id,
+    );
+  }
+  const nucIdx = syl.segments.findIndex((s) => s.role === 'nucleus');
+  if (nucIdx >= 0) syl.nucleus_index = nucIdx;
+  syncSyllableTextFromSegments(syl, prevIpa);
   const res = store.executeCommand({
     type: 'clip.edit',
     label: `修改音素为 [${symbol}]`,
     payload: { clip: next },
   });
-  if (res.ok) store.pushToast(`已更新音素为 [${symbol}]`, 'success', 2000);
+  if (res.ok) {
+    invalidateSynthesisBufferIfNeeded();
+    store.pushToast(`已更新音素为 [${symbol}]`, 'success', 2000);
+  }
 }
 
 function splitSelectedPhone(mode: 'playhead' | 'midpoint' = 'playhead'): void {
@@ -581,6 +979,7 @@ function mergeSelectedPhone(direction: 'prev' | 'next'): void {
     kept.stop_timing.closure_ms = Math.max(10, Math.round(durMs * 0.58));
     kept.stop_timing.release_ms = Math.max(1, Math.min(kept.stop_timing.release_ms, Math.floor(durMs - kept.stop_timing.closure_ms)));
   }
+  const prevIpa = syl.segments.map((s) => s.ipa);
   syl.segments.splice(dropIdx, 1);
   syl.ipa = syl.segments.map((s) => s.ipa);
   syl.nucleus_index = Math.max(
@@ -595,6 +994,7 @@ function mergeSelectedPhone(direction: 'prev' | 'next'): void {
   syl.overrides.poses = (syl.overrides.poses ?? [])
     .filter((p) => p.seg_index !== dropIdx && p.seg_id !== dropped.id)
     .map((p) => (p.seg_index > dropIdx ? { ...p, seg_index: p.seg_index - 1 } : p));
+  syncSyllableTextFromSegments(syl, prevIpa);
 
   const res = store.executeCommand({
     type: 'clip.edit',
@@ -609,7 +1009,7 @@ function mergeSelectedPhone(direction: 'prev' | 'next'): void {
 
 function insertAtSelection(direction: 'before' | 'after', silence = false): void {
   const clip = activeClip.value;
-  if (!clip || (!silence && !canInsertIpa.value)) return;
+  if (!clip || activeClip.value?.source?.score || (!silence && !canInsertIpa.value)) return;
   const rawMs = Number(silence ? insertSilenceMs.value : insertIpaMs.value);
   if (!Number.isFinite(rawMs) || rawMs < 20 || rawMs > 2000) {
     store.pushToast('插入时长须在 20–2000 ms 之间', 'warning');
@@ -625,7 +1025,8 @@ function insertAtSelection(direction: 'before' | 'after', silence = false): void
   const symbol = silence
     ? 'sil'
     : stripDottedCirclePlaceholders(insertIpa.value.trim().replace(/^\[|\]$/gu, '').trim());
-  if (!silence && (!/^[\p{Script=Latin}βθχǀǁǂǃ]/u.test(symbol) || splitIpaToPhonemes(symbol)[0] !== symbol)) {
+  const splitParts = silence ? ['sil'] : splitIpaToPhonemes(symbol);
+  if (!silence && (!symbol || splitParts.length !== 1 || splitParts[0] !== symbol)) {
     store.pushToast('请输入单个 IPA 音素，可带附加符号', 'warning');
     return;
   }
@@ -656,6 +1057,37 @@ function insertAtSelection(direction: 'before' | 'after', silence = false): void
     store.playheadSmp.value = at;
     invalidateSynthesisBufferIfNeeded();
     store.pushToast(`已${label}`, 'success', 2200);
+  }
+}
+
+function deleteSelectedPhones(targetIds?: readonly string[]): void {
+  const clip = activeClip.value;
+  if (!clip || clip.source?.score) return;
+  const ids = targetIds?.length ? [...targetIds] : [...store.selectedPhonemeIds.value];
+  if (!ids.length) {
+    store.pushToast('请先在时间轴选中要删除的音素', 'warning', 2000);
+    return;
+  }
+  const retimed = deleteAnnotationSegments(clip, ids, store.project.value);
+  if (!retimed) {
+    store.pushToast('至少需保留 1 个音素，无法全部删除', 'warning', 2400);
+    return;
+  }
+  const label = retimed.deletedCount === 1 ? '删除 1 个音素' : `删除 ${retimed.deletedCount} 个音素`;
+  const res = store.executeCommand({
+    type: 'clip.edit',
+    label,
+    payload: { clip: retimed.clip, retimed },
+  });
+  if (res.ok) {
+    store.stopPlayback();
+    phoneContextMenu.value = null;
+    store.selectedPhonemeIds.value = retimed.nextFocusPhoneId ? [retimed.nextFocusPhoneId] : [];
+    phoneRangeAnchor = retimed.nextFocusPhoneId ?? '';
+    store.selectedSyllableId.value = retimed.nextFocusSyllableId ?? retimed.clip.syllable_order[0] ?? '';
+    selectedSyllableIds.value = [];
+    invalidateSynthesisBufferIfNeeded();
+    store.pushToast(`已${label}（可 Ctrl+Z 撤销）`, 'success', 2200);
   }
 }
 
@@ -715,13 +1147,16 @@ function commitStopVot(): void {
     vot_ms: requestedVot,
     auto_generated: false,
   };
-  targetSyl.segments[idx].voiced = requestedVot < 0 ? true : targetSyl.segments[idx].voiced;
+  targetSyl.segments[idx].voiced = requestedVot < 0 ? true : phoneTraits(seg.ipa).voiced;
   const res = store.executeCommand({
     type: 'clip.edit',
     label: `调节 [${seg.ipa}] VOT 至 ${requestedVot} ms`,
     payload: { clip: next },
   });
-  if (res.ok) store.pushToast(`已设置 [${seg.ipa}] VOT = ${requestedVot} ms`, 'success', 2000);
+  if (res.ok) {
+    invalidateSynthesisBufferIfNeeded();
+    store.pushToast(`已设置 [${seg.ipa}] VOT = ${requestedVot} ms`, 'success', 2000);
+  }
 }
 
 function markStopRelease(): void {
@@ -754,8 +1189,9 @@ function markStopRelease(): void {
 const canSynthesizeSelected = computed(() => {
   const audio = store.annotationAudioBuffer.value;
   const phone = singlePhone.value?.seg;
-  return Boolean(props.recordingActive && audio && phone && phone.start_smp >= 0
-    && Math.round(phone.end_smp * audio.sampleRate / SAMPLE_RATE_HZ) <= audio.length && !store.isSynthesizing.value);
+  const offset = store.annotationAudioOffsetSmp.value;
+  return Boolean(props.recordingActive && audio && phone && phone.start_smp >= offset
+    && Math.round((phone.end_smp - offset) * audio.sampleRate / SAMPLE_RATE_HZ) <= audio.length && !store.isSynthesizing.value);
 });
 
 async function resampleReplacement(audio: AudioBuffer, sampleRate: number, sampleCount: number): Promise<Float32Array> {
@@ -773,11 +1209,13 @@ async function synthesizeSelectedPhone(): Promise<void> {
   const audio = store.annotationAudioBuffer.value;
   const clip = activeClip.value;
   const revision = store.project.value.revision;
+  const offset = store.annotationAudioOffsetSmp.value;
   if (!canSynthesizeSelected.value || !item || !audio || !clip) return;
-  const start = Math.round(item.seg.start_smp * audio.sampleRate / SAMPLE_RATE_HZ);
-  const end = Math.round(item.seg.end_smp * audio.sampleRate / SAMPLE_RATE_HZ);
+  const start = Math.round((item.seg.start_smp - offset) * audio.sampleRate / SAMPLE_RATE_HZ);
+  const end = Math.round((item.seg.end_smp - offset) * audio.sampleRate / SAMPLE_RATE_HZ);
   const generated = await store.synthesizeRange({
     annotation: true, startSmp: item.seg.start_smp, endSmp: item.seg.end_smp, cacheWaveform: false,
+    ipaPoseSource: textPoseSource.value,
   });
   if (!generated || revision !== store.project.value.revision || clip !== activeClip.value
     || audio !== store.annotationAudioBuffer.value) return;
@@ -811,6 +1249,20 @@ function stopPhaseStyle(seg: SegmentAnchor) {
 const marqueeState = ref<{ tier: 'words' | 'phones'; startX: number; curX: number } | null>(null);
 const rigidGuardMsg = ref('');
 let suppressNextPhoneClick = false;
+let suppressNextPhonClick = false;
+let suppressPhoneClickTimer = 0;
+let suppressPhonClickTimer = 0;
+let rigidGuardTimer = 0;
+const activeDragCleanups = new Set<() => void>();
+
+function registerDragCleanup(fn: () => void): () => void {
+  const wrapped = () => {
+    activeDragCleanups.delete(wrapped);
+    fn();
+  };
+  activeDragCleanups.add(wrapped);
+  return wrapped;
+}
 
 function localXFromPointer(e: PointerEvent, el: HTMLElement): number {
   const rect = el.getBoundingClientRect();
@@ -852,13 +1304,29 @@ function onAnnotationLanePointerDown(tier: 'words' | 'phones', e: PointerEvent):
       const picked = syllables.value.filter((syl) => syl.end_smp > s0 && syl.start_smp < s1);
       selectedSyllableIds.value = picked.map((syl) => syl.id);
       store.selectedPhonemeIds.value = [];
-      if (picked[0]) store.selectedSyllableId.value = picked[0].id;
+      if (picked[0]) {
+        cutSelectionSmp.value = null;
+        store.selectedSyllableId.value = picked[0].id;
+      } else if (s1 > s0) {
+        cutSelectionSmp.value = { startSmp: s0, endSmp: s1 };
+        const curSmp = xToSmp(curX);
+        store.playheadSmp.value = curSmp;
+        emit('playhead-scrub', curSmp);
+      }
     } else {
       const picked = flatPhones.value.filter(({ seg }) => seg.end_smp > s0 && seg.start_smp < s1);
       selectedSyllableIds.value = [];
       store.selectedPhonemeIds.value = picked.map(({ seg }) => seg.id);
       phoneRangeAnchor = picked[0]?.seg.id ?? '';
-      if (picked[0]) store.selectedSyllableId.value = picked[0].syl.id;
+      if (picked[0]) {
+        cutSelectionSmp.value = null;
+        store.selectedSyllableId.value = picked[0].syl.id;
+      } else if (s1 > s0) {
+        cutSelectionSmp.value = { startSmp: s0, endSmp: s1 };
+        const curSmp = xToSmp(curX);
+        store.playheadSmp.value = curSmp;
+        emit('playhead-scrub', curSmp);
+      }
     }
   };
 
@@ -896,6 +1364,7 @@ function onSelectSinglePhone(item: FlatPhoneItem, e: MouseEvent): void {
     return;
   }
   if ((e.target as HTMLElement | null)?.closest('.seg-edge-handle')) return;
+  cutSelectionSmp.value = null;
   selectedSyllableIds.value = [];
   if (e.shiftKey && store.selectedPhonemeIds.value.length > 0) {
     const firstId = selectedPhoneSet.value.has(phoneRangeAnchor) ? phoneRangeAnchor : store.selectedPhonemeIds.value[0];
@@ -909,6 +1378,7 @@ function onSelectSinglePhone(item: FlatPhoneItem, e: MouseEvent): void {
       phoneRangeAnchor = firstId;
       store.selectedSyllableId.value = item.syl.id;
       store.playheadSmp.value = item.seg.start_smp;
+      emit('phoneme-focus');
       return;
     }
   }
@@ -916,6 +1386,298 @@ function onSelectSinglePhone(item: FlatPhoneItem, e: MouseEvent): void {
   store.selectedPhonemeIds.value = [item.seg.id];
   phoneRangeAnchor = item.seg.id;
   store.playheadSmp.value = item.seg.start_smp;
+  emit('phoneme-focus');
+}
+
+function canSlideSyllable(syl: Syllable): boolean {
+  const clip = activeClip.value;
+  if (!clip || clip.source?.score) return false;
+  const isSelected = selectedSyllableSet.value.has(syl.id) || focusedSyllableId.value === syl.id;
+  if (!isSelected) return false;
+  const ids = selectedSyllableSet.value.has(syl.id) && selectedSyllableIds.value.length > 0
+    ? selectedSyllableIds.value
+    : [syl.id];
+  return Boolean(getSyllableSlideBounds(clip, ids));
+}
+
+function canSlidePhone(seg: SegmentAnchor): boolean {
+  const clip = activeClip.value;
+  if (!clip || clip.source?.score || !selectedPhoneSet.value.has(seg.id)) return false;
+  return Boolean(getPhoneSlideBounds(clip, store.selectedPhonemeIds.value));
+}
+
+function startSyllableSlideDrag(syl: Syllable, e: PointerEvent): void {
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest('.syl-edge-handle, .poly-tri-btn')) return;
+  const baseClip = activeClip.value;
+  if (!baseClip || baseClip.source?.score || !canSlideSyllable(syl)) return;
+  const slideIds = selectedSyllableSet.value.has(syl.id) && selectedSyllableIds.value.length > 0
+    ? [...selectedSyllableIds.value]
+    : [syl.id];
+  const bounds = getSyllableSlideBounds(baseClip, slideIds);
+  if (!bounds) return;
+
+  e.stopPropagation();
+  const origClipSnapshot = JSON.parse(JSON.stringify(baseClip)) as typeof baseClip;
+  const origAnchorsSnapshot = JSON.parse(JSON.stringify(store.project.value.phonation_anchors));
+  const origPinsSnapshot = JSON.parse(JSON.stringify(store.project.value.f0_pins ?? []));
+  const startClientX = e.clientX;
+  const originalScale = pxPerSec.value;
+  const pageScale = getCurrentPageScale();
+  let moved = false;
+  let previewFrame = 0;
+  let clientX = startClientX;
+  let lastDelta = 0;
+
+  const updatePreview = () => {
+    previewFrame = 0;
+    const dxPx = (clientX - startClientX) / pageScale;
+    const rawDelta = Math.round((dxPx / originalScale) * SAMPLE_RATE_HZ);
+    const clamped = Math.max(bounds.minDelta, Math.min(bounds.maxDelta, rawDelta));
+    lastDelta = clamped;
+    if (clamped === 0) {
+      boundaryPreview.value = null;
+      return;
+    }
+    boundaryPreview.value = slideAnnotationSyllables(
+      origClipSnapshot,
+      slideIds,
+      clamped,
+      { phonation_anchors: origAnchorsSnapshot, f0_pins: origPinsSnapshot },
+    );
+  };
+
+  const onMove = (ev: PointerEvent) => {
+    if (!moved) {
+      if (Math.abs(ev.clientX - startClientX) < 4) return;
+      moved = true;
+    }
+    clientX = ev.clientX;
+    if (!previewFrame) previewFrame = requestAnimationFrame(updatePreview);
+  };
+
+  const cleanup = registerDragCleanup(() => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', cleanup);
+    if (previewFrame) cancelAnimationFrame(previewFrame);
+    boundaryPreview.value = null;
+  });
+
+  const onUp = (ev: PointerEvent) => {
+    if (moved && previewFrame) {
+      cancelAnimationFrame(previewFrame);
+      clientX = ev.clientX;
+      updatePreview();
+    } else if (moved) {
+      clientX = ev.clientX;
+      updatePreview();
+    }
+    const retimed = boundaryPreview.value;
+    const committedDelta = lastDelta;
+    cleanup();
+    if (moved) {
+      suppressNextPhoneClick = true;
+      window.clearTimeout(suppressPhoneClickTimer);
+      suppressPhoneClickTimer = window.setTimeout(() => {
+        suppressNextPhoneClick = false;
+      }, 0);
+    }
+    if (retimed && committedDelta !== 0 && baseClip === activeClip.value) {
+      const ms = Math.round(samplesToMs(committedDelta));
+      const sign = ms > 0 ? '+' : '';
+      const label = slideIds.length === 1
+        ? `平移音节「${syl.text}」${sign}${ms} ms`
+        : `平移 ${slideIds.length} 个音节 ${sign}${ms} ms`;
+      const res = store.executeCommand({
+        type: 'clip.edit',
+        label,
+        payload: { clip: retimed.clip, retimed },
+      });
+      if (res.ok) {
+        invalidateSynthesisBufferIfNeeded();
+        store.pushToast(`已${label}`, 'success', 1800);
+      }
+    }
+  };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
+}
+
+function startPhoneSlideDrag(item: FlatPhoneItem, e: PointerEvent): void {
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest('.seg-edge-handle')) return;
+  const baseClip = activeClip.value;
+  if (!baseClip || baseClip.source?.score || !canSlidePhone(item.seg)) return;
+  const slideIds = [...store.selectedPhonemeIds.value];
+  const bounds = getPhoneSlideBounds(baseClip, slideIds);
+  if (!bounds) return;
+
+  e.stopPropagation();
+  const origClipSnapshot = JSON.parse(JSON.stringify(baseClip)) as typeof baseClip;
+  const origAnchorsSnapshot = JSON.parse(JSON.stringify(store.project.value.phonation_anchors));
+  const origPinsSnapshot = JSON.parse(JSON.stringify(store.project.value.f0_pins ?? []));
+  const startClientX = e.clientX;
+  const originalScale = pxPerSec.value;
+  const pageScale = getCurrentPageScale();
+  let moved = false;
+  let previewFrame = 0;
+  let clientX = startClientX;
+  let lastDelta = 0;
+
+  const updatePreview = () => {
+    previewFrame = 0;
+    const dxPx = (clientX - startClientX) / pageScale;
+    const rawDelta = Math.round((dxPx / originalScale) * SAMPLE_RATE_HZ);
+    const clamped = Math.max(bounds.minDelta, Math.min(bounds.maxDelta, rawDelta));
+    lastDelta = clamped;
+    if (clamped === 0) {
+      boundaryPreview.value = null;
+      return;
+    }
+    boundaryPreview.value = slideAnnotationPhones(
+      origClipSnapshot,
+      slideIds,
+      clamped,
+      { phonation_anchors: origAnchorsSnapshot, f0_pins: origPinsSnapshot },
+    );
+  };
+
+  const onMove = (ev: PointerEvent) => {
+    if (!moved) {
+      if (Math.abs(ev.clientX - startClientX) < 4) return;
+      moved = true;
+    }
+    clientX = ev.clientX;
+    if (!previewFrame) previewFrame = requestAnimationFrame(updatePreview);
+  };
+
+  const cleanup = registerDragCleanup(() => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', cleanup);
+    if (previewFrame) cancelAnimationFrame(previewFrame);
+    boundaryPreview.value = null;
+  });
+
+  const onUp = (ev: PointerEvent) => {
+    if (moved && previewFrame) {
+      cancelAnimationFrame(previewFrame);
+      clientX = ev.clientX;
+      updatePreview();
+    } else if (moved) {
+      clientX = ev.clientX;
+      updatePreview();
+    }
+    const retimed = boundaryPreview.value;
+    const committedDelta = lastDelta;
+    cleanup();
+    if (moved) {
+      suppressNextPhoneClick = true;
+      window.clearTimeout(suppressPhoneClickTimer);
+      suppressPhoneClickTimer = window.setTimeout(() => {
+        suppressNextPhoneClick = false;
+      }, 0);
+    }
+    if (retimed && committedDelta !== 0 && baseClip === activeClip.value) {
+      const ms = Math.round(samplesToMs(committedDelta));
+      const sign = ms > 0 ? '+' : '';
+      const label = slideIds.length === 1
+        ? `平移音素 [${item.seg.ipa}] ${sign}${ms} ms`
+        : `平移 ${slideIds.length} 个音素 ${sign}${ms} ms`;
+      const res = store.executeCommand({
+        type: 'clip.edit',
+        label,
+        payload: { clip: retimed.clip, retimed },
+      });
+      if (res.ok) {
+        invalidateSynthesisBufferIfNeeded();
+        store.pushToast(`已${label}`, 'success', 1800);
+      }
+    }
+  };
+
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
+}
+
+function startSilenceGapDrag(gap: SilenceGapItem, e: PointerEvent): void {
+  e.preventDefault();
+  e.stopPropagation();
+  const baseClip = activeClip.value;
+  if (!baseClip || baseClip.source?.score) return;
+  const origClipSnapshot = JSON.parse(JSON.stringify(baseClip)) as typeof baseClip;
+  const origAnchorsSnapshot = JSON.parse(JSON.stringify(store.project.value.phonation_anchors));
+  const origPinsSnapshot = JSON.parse(JSON.stringify(store.project.value.f0_pins ?? []));
+  const startClientX = e.clientX;
+  const origDurSmp = gap.endSmp - gap.startSmp;
+  const originalScale = pxPerSec.value;
+  const pageScale = getCurrentPageScale();
+  const maxDurSmp = msToSamples(60000);
+  let previewFrame = 0;
+  let clientX = startClientX;
+
+  const computeTargetDur = () => {
+    const dxPx = (clientX - startClientX) / pageScale;
+    const dSmp = Math.round((dxPx / originalScale) * SAMPLE_RATE_HZ);
+    return Math.max(0, Math.min(maxDurSmp, origDurSmp + dSmp));
+  };
+
+  const updatePreview = () => {
+    previewFrame = 0;
+    const targetDur = computeTargetDur();
+    if (targetDur === origDurSmp) {
+      boundaryPreview.value = null;
+      return;
+    }
+    boundaryPreview.value = resizeAnnotationSilenceGap(
+      origClipSnapshot,
+      gap.startSmp,
+      gap.endSmp,
+      targetDur,
+      { phonation_anchors: origAnchorsSnapshot, f0_pins: origPinsSnapshot },
+    );
+  };
+
+  const onMove = (ev: PointerEvent) => {
+    clientX = ev.clientX;
+    if (!previewFrame) previewFrame = requestAnimationFrame(updatePreview);
+  };
+  const cleanup = registerDragCleanup(() => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', cleanup);
+    if (previewFrame) cancelAnimationFrame(previewFrame);
+    boundaryPreview.value = null;
+  });
+  const onUp = (ev: PointerEvent) => {
+    clientX = ev.clientX;
+    const targetDur = computeTargetDur();
+    cleanup();
+    if (targetDur === origDurSmp) return;
+    const retimed = resizeAnnotationSilenceGap(
+      origClipSnapshot,
+      gap.startSmp,
+      gap.endSmp,
+      targetDur,
+      { phonation_anchors: origAnchorsSnapshot, f0_pins: origPinsSnapshot },
+    );
+    const ms = Math.round(samplesToMs(targetDur));
+    const res = store.executeCommand({
+      type: 'clip.edit',
+      label: ms === 0 ? '消除无声段停顿' : `调整无声段时长至 ${ms} ms`,
+      payload: { clip: retimed.clip, retimed },
+    });
+    if (res.ok) invalidateSynthesisBufferIfNeeded();
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
 }
 
 function startBoundaryDrag(item: FlatPhoneItem, e: PointerEvent): void {
@@ -956,6 +1718,7 @@ function startBoundaryDrag(item: FlatPhoneItem, e: PointerEvent): void {
     if (!res.ok) {
       blockedReason = res.error.hint;
       rigidGuardMsg.value = res.error.hint;
+      boundaryPreview.value = null;
       return;
     }
     blockedReason = '';
@@ -967,13 +1730,13 @@ function startBoundaryDrag(item: FlatPhoneItem, e: PointerEvent): void {
     clientX = ev.clientX;
     if (!previewFrame) previewFrame = requestAnimationFrame(updatePreview);
   };
-  const cleanup = () => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', cleanup);
     if (previewFrame) cancelAnimationFrame(previewFrame);
     boundaryPreview.value = null;
-  };
+  });
   const onUp = (ev: PointerEvent) => {
     if (previewFrame) {
       cancelAnimationFrame(previewFrame);
@@ -992,7 +1755,8 @@ function startBoundaryDrag(item: FlatPhoneItem, e: PointerEvent): void {
         payload: { clip: retimed.clip, retimed },
       });
     }
-    window.setTimeout(() => {
+    window.clearTimeout(rigidGuardTimer);
+    rigidGuardTimer = window.setTimeout(() => {
       rigidGuardMsg.value = '';
     }, 2600);
   };
@@ -1048,6 +1812,7 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
       if (!res.ok) {
         blockedReason = res.error.hint;
         rigidGuardMsg.value = res.error.hint;
+        boundaryPreview.value = null;
         return;
       }
       blockedReason = '';
@@ -1074,6 +1839,7 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
         if (!prevRes.ok) {
           blockedReason = prevRes.error.hint;
           rigidGuardMsg.value = prevRes.error.hint;
+          boundaryPreview.value = null;
           return;
         }
         const curRes = retime(
@@ -1085,6 +1851,7 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
         if (!curRes.ok) {
           blockedReason = curRes.error.hint;
           rigidGuardMsg.value = curRes.error.hint;
+          boundaryPreview.value = null;
           return;
         }
         blockedReason = '';
@@ -1112,6 +1879,7 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
         if (!res.ok) {
           blockedReason = res.error.hint;
           rigidGuardMsg.value = res.error.hint;
+          boundaryPreview.value = null;
           return;
         }
         blockedReason = '';
@@ -1132,13 +1900,13 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
     clientX = ev.clientX;
     if (!previewFrame) previewFrame = requestAnimationFrame(updatePreview);
   };
-  const cleanup = () => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', cleanup);
     if (previewFrame) cancelAnimationFrame(previewFrame);
     boundaryPreview.value = null;
-  };
+  });
   const onUp = (ev: PointerEvent) => {
     if (previewFrame) {
       cancelAnimationFrame(previewFrame);
@@ -1163,7 +1931,8 @@ function startSyllableBoundaryDrag(syl: Syllable, side: 'left' | 'right', e: Poi
         },
       });
     }
-    window.setTimeout(() => {
+    window.clearTimeout(rigidGuardTimer);
+    rigidGuardTimer = window.setTimeout(() => {
       rigidGuardMsg.value = '';
     }, 2600);
   };
@@ -1264,11 +2033,17 @@ function onShellDrop(e: DragEvent): void {
 }
 
 // ===== PHON Discrete 5-Lane Anchors Track =====
+function phonLaneGeometry(trackH: number): { topPad: number; usable: number } {
+  // Align expanded lanes with `.rt-phon-legend` directly below `.rt-hdr-top` (~28 px); keep 10 px pad collapsed so 16 px pills never clip.
+  const topPad = phonExpanded.value ? 30 : 10;
+  const bottomPad = 10;
+  return { topPad, usable: Math.max(16, trackH - topPad - bottomPad) };
+}
+
 function phonLaneY(target: Pick<PhonationAnchor, 'regime' | 'voqs'> | string, trackH: number): number {
-  const pad = 7;
-  const usable = Math.max(12, trackH - pad * 2);
+  const { topPad, usable } = phonLaneGeometry(trackH);
   const idx = voqsSynthesisLaneIndex(target);
-  return pad + (idx / Math.max(1, SYNTHESIS_VOQS_PROFILES.length - 1)) * usable;
+  return topPad + (idx / Math.max(1, SYNTHESIS_VOQS_PROFILES.length - 1)) * usable;
 }
 
 const phonDraft = ref<PhonationAnchor | null>(null);
@@ -1313,21 +2088,39 @@ function removeSelectedPhonationAnchor(): void {
   if (res.ok) store.selectedPhonationAnchorId.value = nextList[0]?.id ?? null;
 }
 
+function onPhonLanePointerDown(e: PointerEvent): void {
+  if (e.button !== 0 || phonExpanded.value) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest('.phon-node, .rt-row-resizer')) return;
+  startTimeRangeDrag(e, e.currentTarget as HTMLElement, () => {
+    suppressNextPhonClick = true;
+    window.clearTimeout(suppressPhonClickTimer);
+    suppressPhonClickTimer = window.setTimeout(() => {
+      suppressNextPhonClick = false;
+    }, 0);
+  });
+}
+
 function onPhonLaneClick(e: MouseEvent): void {
+  if (suppressNextPhonClick) {
+    suppressNextPhonClick = false;
+    return;
+  }
   if ((e.target as HTMLElement).closest('.phon-node')) return;
   const el = e.currentTarget as HTMLElement;
   const rect = el.getBoundingClientRect();
   const scale = getCurrentPageScale();
   const lx = (e.clientX - rect.left) / scale;
-  store.playheadSmp.value = xToSmp(lx);
-  if (!phonExpanded.value) {
-    phonExpanded.value = true;
-    return;
-  }
+  const smp = xToSmp(lx);
+  store.playheadSmp.value = smp;
+  emit('playhead-scrub', smp);
+  // Collapsed click only seeks playhead (double-click or header toggle expands track).
+  if (!phonExpanded.value) return;
   const ly = (e.clientY - rect.top) / scale;
-  const laneFrac = Math.max(0, Math.min(1, (ly - 7) / Math.max(12, effPhonHeight.value - 14)));
+  const { topPad, usable } = phonLaneGeometry(effPhonHeight.value);
+  const laneFrac = Math.max(0, Math.min(1, (ly - topPad) / usable));
   const profile = SYNTHESIS_VOQS_PROFILES[Math.round(laneFrac * (SYNTHESIS_VOQS_PROFILES.length - 1))];
-  if (profile) addPhonationAnchorAt(xToSmp(lx), profile.symbol);
+  if (profile) addPhonationAnchorAt(smp, profile.symbol);
 }
 
 function startPhonDrag(anchor: PhonationAnchor, e: PointerEvent): void {
@@ -1336,26 +2129,50 @@ function startPhonDrag(anchor: PhonationAnchor, e: PointerEvent): void {
   store.selectedPhonationAnchorId.value = anchor.id;
   const laneEl = (e.currentTarget as HTMLElement).closest('.phon-lane-canvas') as HTMLElement | null;
   if (!laneEl) return;
+  const startY = e.clientY;
   let draftT = anchor.t_smp;
   const originalSymbol = voqsLane(anchor);
+  const isInFiveLanes = SYNTHESIS_VOQS_PROFILES.some((p) => p.symbol === originalSymbol);
+  let moved = false;
 
   const onMove = (ev: PointerEvent) => {
+    moved = true;
     const rect = laneEl.getBoundingClientRect();
     const scale = getCurrentPageScale();
     const lx = (ev.clientX - rect.left) / scale;
     const ly = (ev.clientY - rect.top) / scale;
     draftT = xToSmp(lx);
-    const laneFrac = Math.max(0, Math.min(1, (ly - 7) / Math.max(12, effPhonHeight.value - 14)));
-    const profile = SYNTHESIS_VOQS_PROFILES[Math.round(laneFrac * (SYNTHESIS_VOQS_PROFILES.length - 1))];
-    const change = profile && profile.symbol !== originalSymbol ? voqsAnchorPatch(profile) : {};
+    const dyPx = Math.abs(ev.clientY - startY) / scale;
+    const allowLaneSwitch = (phonExpanded.value || isInFiveLanes) && dyPx >= 8;
+    let change: Partial<PhonationAnchor> = {};
+    if (allowLaneSwitch) {
+      const { topPad, usable } = phonLaneGeometry(effPhonHeight.value);
+      const laneFrac = Math.max(0, Math.min(1, (ly - topPad) / usable));
+      const profile = SYNTHESIS_VOQS_PROFILES[Math.round(laneFrac * (SYNTHESIS_VOQS_PROFILES.length - 1))];
+      if (profile && profile.symbol !== originalSymbol) {
+        change = voqsAnchorPatch(profile);
+      }
+    }
     phonDraft.value = { ...anchor, ...change, t_smp: draftT };
   };
 
-  const onUp = () => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    const draft = phonDraft.value;
+    window.removeEventListener('pointercancel', cleanup);
     phonDraft.value = null;
+  });
+
+  const onUp = () => {
+    const draft = phonDraft.value;
+    cleanup();
+    if (moved) {
+      suppressNextPhonClick = true;
+      window.clearTimeout(suppressPhonClickTimer);
+      suppressPhonClickTimer = window.setTimeout(() => {
+        suppressNextPhonClick = false;
+      }, 0);
+    }
     if (!draft || (draft.t_smp === anchor.t_smp && voqsLane(draft) === originalSymbol)) return;
     const updated = [...store.phonationAnchors.value.filter((a) => a.id !== anchor.id && a.t_smp !== draftT), draft];
     store.executeCommand({
@@ -1366,6 +2183,7 @@ function startPhonDrag(anchor: PhonationAnchor, e: PointerEvent): void {
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
 }
 
 // ===== F0 Control Track (Adaptive Y-Axis Scaling + Manual Range Controls, T-65) =====
@@ -1377,7 +2195,7 @@ const f0AutoBounds = computed<{ min: number; max: number }>(() => {
   let lo = Infinity;
   let hi = -Infinity;
   const pushHz = (hz: number) => {
-    if (Number.isFinite(hz) && hz >= F0_LIMIT_HZ.min && hz <= F0_LIMIT_HZ.max) {
+    if (isValidF0Hz(hz)) {
       if (hz < lo) lo = hz;
       if (hz > hi) hi = hz;
     }
@@ -1413,14 +2231,14 @@ const f0AutoBounds = computed<{ min: number; max: number }>(() => {
   }
 
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
-    lo = Math.max(F0_LIMIT_HZ.min, fRefHz.value * 0.72);
-    hi = Math.min(F0_LIMIT_HZ.max, fRefHz.value * 1.42);
+    lo = Math.max(10, fRefHz.value * 0.72);
+    hi = Math.max(lo + 30, fRefHz.value * 1.42);
   }
 
   const center = 0.5 * (lo + hi);
   const rawSpan = Math.max(48, (hi - lo) * 1.36);
-  const minHz = Math.max(F0_LIMIT_HZ.min, Math.floor((center - rawSpan * 0.5) / 5) * 5);
-  const maxHz = Math.min(F0_LIMIT_HZ.max, Math.ceil((center + rawSpan * 0.5) / 5) * 5);
+  const minHz = Math.max(5, Math.floor((center - rawSpan * 0.5) / 5) * 5);
+  const maxHz = Math.ceil((center + rawSpan * 0.5) / 5) * 5;
   return {
     min: minHz,
     max: Math.max(minHz + 30, maxHz),
@@ -1454,8 +2272,8 @@ function zoomF0VerticalRange(factor: number): void {
   const halfRatio = Math.pow(curHi / Math.max(1, curLo), 0.5 * factor);
   let nextLo = Math.round((center / halfRatio) / 5) * 5;
   let nextHi = Math.round((center * halfRatio) / 5) * 5;
-  nextLo = Math.max(F0_LIMIT_HZ.min, Math.min(F0_LIMIT_HZ.max - 25, nextLo));
-  nextHi = Math.max(nextLo + 25, Math.min(F0_LIMIT_HZ.max, nextHi));
+  nextLo = Math.max(5, nextLo);
+  nextHi = Math.max(nextLo + 15, nextHi);
   f0ManualMinHz.value = nextLo;
   f0ManualMaxHz.value = nextHi;
   f0AutoScale.value = false;
@@ -1483,7 +2301,7 @@ function f0YToHz(y: number, h: number): number {
   const vMax = Math.max(vMin + 10, f0ViewMaxHz.value);
   const norm = Math.max(0, Math.min(1, 1 - (y - pad) / Math.max(12, h - pad * 2)));
   const hz = vMin * Math.pow(vMax / vMin, norm);
-  return Math.round(Math.max(F0_LIMIT_HZ.min, Math.min(F0_LIMIT_HZ.max, hz)) * 10) / 10;
+  return Math.round(Math.max(1, hz) * 10) / 10;
 }
 
 /** Strip or trim `f0_pins` segments that cover `[startSmp, endSmp]` so qTA target edits immediately drive synthesis F0 (T-14). */
@@ -1585,7 +2403,9 @@ const f0Curves = computed(() => {
     const sample = ev.times_smp[i];
     while (phoneIndex < phones.length && phones[phoneIndex].seg.end_smp <= sample) phoneIndex++;
     const phone = phones[phoneIndex]?.seg;
-    const voiced = phone && phone.start_smp <= sample ? isSegmentVoicedAt(phone, sample) : true;
+    const voiced = phone && phone.start_smp <= sample
+      ? isSegmentVoicedAt(phone, sample)
+      : flatPhones.value.length === 0;
     const x = smpToX(sample);
     points.push({ x, y: hzToF0Y(ev.f0_hz[i], h), voiced });
     if (voiced) {
@@ -1681,15 +2501,38 @@ const f0DraftPath = computed(() => {
     .join(' ');
 });
 
+function upsertMonotonicStrokePoint<T extends { t_smp: number }>(
+  list: T[],
+  nextPt: T,
+  prevT: number | null,
+  minStepSmp: number,
+): T[] {
+  if (list.length === 0) return [nextPt];
+  if (prevT !== null && Math.abs(nextPt.t_smp - prevT) < minStepSmp) {
+    return list;
+  }
+  const lo = prevT !== null ? Math.min(prevT, nextPt.t_smp) : nextPt.t_smp;
+  const hi = prevT !== null ? Math.max(prevT, nextPt.t_smp) : nextPt.t_smp;
+  // Overwrite any points inside the swept time interval so backtracking redraws smoothly without zigzags.
+  const kept = list.filter((pt) => pt.t_smp < lo || pt.t_smp > hi);
+  if (prevT !== null) {
+    const anchor = list.find((pt) => pt.t_smp === prevT);
+    if (anchor && !kept.some((pt) => pt.t_smp === anchor.t_smp)) kept.push(anchor);
+  }
+  kept.push(nextPt);
+  kept.sort((a, b) => a.t_smp - b.t_smp);
+  return kept;
+}
+
 function onF0PointerDown(e: PointerEvent): void {
   const el = e.currentTarget as HTMLElement;
   if (!f0DrawMode.value) {
-    const lx = localXFromPointer(e, el);
-    store.playheadSmp.value = xToSmp(lx);
+    startTimeRangeDrag(e, el);
     return;
   }
   e.preventDefault();
   el.setPointerCapture?.(e.pointerId);
+  let lastPointerT: number | null = null;
   const addPoint = (ev: PointerEvent) => {
     const rect = el.getBoundingClientRect();
     const scale = getCurrentPageScale();
@@ -1697,31 +2540,62 @@ function onF0PointerDown(e: PointerEvent): void {
     const ly = (ev.clientY - rect.top) / scale;
     const tSmp = xToSmp(lx);
     const hz = f0YToHz(ly, effF0Height.value);
-    const prev = f0DraftPts.value[f0DraftPts.value.length - 1];
-    if (!prev || Math.abs(tSmp - prev.t_smp) >= 480) {
-      f0DraftPts.value.push({ t_smp: tSmp, f0_hz: hz });
+    const next = upsertMonotonicStrokePoint(f0DraftPts.value, { t_smp: tSmp, f0_hz: hz }, lastPointerT, 480);
+    if (next !== f0DraftPts.value) {
+      f0DraftPts.value = next;
+      lastPointerT = tSmp;
     }
   };
   f0DraftPts.value = [];
   addPoint(e);
 
   const onMove = (ev: PointerEvent) => addPoint(ev);
-  const onUp = () => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    const sorted = [...f0DraftPts.value].sort((a, b) => a.t_smp - b.t_smp);
+    window.removeEventListener('pointercancel', cleanup);
     f0DraftPts.value = [];
-    if (sorted.length >= 2) {
+  });
+  const onUp = () => {
+    const sorted = [...f0DraftPts.value];
+    cleanup();
+    if (sorted.length >= 2 && sorted[sorted.length - 1].t_smp > sorted[0].t_smp) {
       showF0Pins.value = true;
-      store.executeCommand({
-        type: 'f0.draw',
-        label: `手绘 F0 曲线 (${sorted.length} 点)`,
-        payload: { points: sorted },
-      });
+      const startSmp = sorted[0].t_smp;
+      const endSmp = sorted[sorted.length - 1].t_smp;
+      const origPins = store.project.value.f0_pins ?? [];
+      const hasOverlap = origPins.some((p) => p.end_smp > startSmp && p.start_smp < endSmp);
+      if (hasOverlap) {
+        const nextProject = JSON.parse(JSON.stringify(store.project.value));
+        const trimmed = stripPinsOverlappingRange(origPins, startSmp, endSmp);
+        trimmed.push({
+          id: `pin_${crypto.randomUUID()}`,
+          start_smp: startSmp,
+          end_smp: endSmp,
+          points: sorted,
+          transition_ms: 30,
+          exit_fit_ms: 35,
+        });
+        nextProject.f0_pins = trimmed;
+        const res = store.executeCommand({
+          type: 'project.replace',
+          label: `手绘 F0 曲线 (${sorted.length} 点)`,
+          payload: { project: nextProject },
+        });
+        if (res.ok) invalidateSynthesisBufferIfNeeded();
+      } else {
+        const res = store.executeCommand({
+          type: 'f0.draw',
+          label: `手绘 F0 曲线 (${sorted.length} 点)`,
+          payload: { points: sorted },
+        });
+        if (res.ok) invalidateSynthesisBufferIfNeeded();
+      }
     }
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
 }
 
 function startF0TargetDrag(syl: Syllable, targetIdx: number, e: PointerEvent): void {
@@ -1823,10 +2697,12 @@ function psYToPa(y: number, h: number): number {
   return Math.round(norm * PRESSURE_LIMIT_PA.max);
 }
 
-const psPolyline = computed(() => {
+const psPaths = computed<{ linePaths: string[]; areaPaths: string[] }>(() => {
   const h = effPsHeight.value;
-  const pts: string[] = [];
+  const linePaths: string[] = [];
+  const areaPaths: string[] = [];
   for (const syl of visibleSyllables.value) {
+    if (syl.segments.length > 0 && syl.segments.every((s) => s.role === 'rest' || s.ipa === 'sil')) continue;
     const arr = syl.overrides.pressure?.length
       ? syl.overrides.pressure
       : [
@@ -1835,22 +2711,18 @@ const psPolyline = computed(() => {
           { u: 1, pressure_pa: 520 },
         ];
     const span = Math.max(1, syl.end_smp - syl.start_smp);
-    for (const pt of arr) {
+    const coords = arr.map((pt) => {
       const x = smpToX(syl.start_smp + pt.u * span);
       const y = paToPsY(pt.pressure_pa, h);
-      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-    }
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    if (coords.length < 2) continue;
+    const firstX = coords[0].split(',')[0];
+    const lastX = coords[coords.length - 1].split(',')[0];
+    linePaths.push(`M ${coords.join(' L ')}`);
+    areaPaths.push(`M ${firstX},${h} L ${coords.join(' L ')} L ${lastX},${h} Z`);
   }
-  return pts.join(' ');
-});
-
-const psAreaPath = computed(() => {
-  if (!psPolyline.value) return '';
-  const coords = psPolyline.value.split(' ');
-  const firstX = coords[0]?.split(',')[0] ?? '0';
-  const lastX = coords[coords.length - 1]?.split(',')[0] ?? '0';
-  const h = effPsHeight.value;
-  return `M ${firstX},${h} L ${coords.join(' L ')} L ${lastX},${h} Z`;
+  return { linePaths, areaPaths };
 });
 
 const psDraftPts = ref<Array<{ t_smp: number; pressure_pa: number }>>([]);
@@ -1865,11 +2737,12 @@ const psDraftPath = computed(() => {
 function onPsPointerDown(e: PointerEvent): void {
   const el = e.currentTarget as HTMLElement;
   if (!psDrawMode.value) {
-    store.playheadSmp.value = xToSmp(localXFromPointer(e, el));
+    startTimeRangeDrag(e, el);
     return;
   }
   e.preventDefault();
   el.setPointerCapture?.(e.pointerId);
+  let lastPointerT: number | null = null;
   const addPoint = (ev: PointerEvent) => {
     const rect = el.getBoundingClientRect();
     const scale = getCurrentPageScale();
@@ -1877,20 +2750,25 @@ function onPsPointerDown(e: PointerEvent): void {
     const ly = (ev.clientY - rect.top) / scale;
     const tSmp = xToSmp(lx);
     const pa = psYToPa(ly, effPsHeight.value);
-    const prev = psDraftPts.value[psDraftPts.value.length - 1];
-    if (!prev || Math.abs(tSmp - prev.t_smp) >= 240) {
-      psDraftPts.value.push({ t_smp: tSmp, pressure_pa: pa });
+    const next = upsertMonotonicStrokePoint(psDraftPts.value, { t_smp: tSmp, pressure_pa: pa }, lastPointerT, 240);
+    if (next !== psDraftPts.value) {
+      psDraftPts.value = next;
+      lastPointerT = tSmp;
     }
   };
   psDraftPts.value = [];
   addPoint(e);
 
   const onMove = (ev: PointerEvent) => addPoint(ev);
-  const onUp = () => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    const pts = [...psDraftPts.value].sort((a, b) => a.t_smp - b.t_smp);
+    window.removeEventListener('pointercancel', cleanup);
     psDraftPts.value = [];
+  });
+  const onUp = () => {
+    const pts = [...psDraftPts.value];
+    cleanup();
     const clip = activeClip.value;
     if (!clip || pts.length < 2) return;
     const cloned = JSON.parse(JSON.stringify(clip));
@@ -1898,6 +2776,7 @@ function onPsPointerDown(e: PointerEvent): void {
     for (const p of pts) avgPa += p.pressure_pa;
     avgPa = Math.round(avgPa / pts.length);
 
+    let updatedCount = 0;
     for (const sid of cloned.syllable_order) {
       const syl = cloned.syllables[sid];
       if (!syl) continue;
@@ -1908,9 +2787,14 @@ function onPsPointerDown(e: PointerEvent): void {
           u: Number(Math.max(0, Math.min(1, (p.t_smp - syl.start_smp) / span)).toFixed(4)),
           pressure_pa: p.pressure_pa,
         }));
+        updatedCount++;
       }
     }
-    store.executeCommand({
+    if (updatedCount === 0) {
+      store.pushToast('请在包含音节的区间内手绘声门下压曲线', 'info', 2400);
+      return;
+    }
+    const res = store.executeCommand({
       type: 'batch',
       label: `手绘 PS 声门下压曲线 (${pts.length} 点, 均值 ${avgPa} Pa)`,
       payload: {
@@ -1920,9 +2804,11 @@ function onPsPointerDown(e: PointerEvent): void {
         ],
       },
     });
+    if (res.ok) invalidateSynthesisBufferIfNeeded();
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', cleanup);
 }
 
 // Draw decoded samples on the same time axis as the annotation tracks.
@@ -1938,8 +2824,10 @@ const waveformBars = computed(() => {
   const bars: Array<{ x: number; amp: number }> = [];
   for (let x = from + Math.max(0, Math.floor((viewLeft.value - from) / barStep) * barStep); x < extent; x += barStep) {
     let peak = 0;
+    const start = Math.max(0, Math.floor((x - from) * samplesPerPixel));
     const end = Math.min(ch.length, Math.ceil((x - from + barStep) * samplesPerPixel));
-    for (let j = Math.floor((x - from) * samplesPerPixel); j < end; j++) peak = Math.max(peak, Math.abs(ch[j]));
+    const stride = Math.max(1, Math.floor((end - start) / 48));
+    for (let j = start; j < end; j += stride) peak = Math.max(peak, Math.abs(ch[j]));
     bars.push({ x, amp: Math.min(1, peak * gain) });
   }
   return bars;
@@ -1983,16 +2871,27 @@ function startTrackResize(trackKey: 'tg' | 'art' | 'phon' | 'f0' | 'ps' | 'wave'
     const dy = (ev.clientY - startY) / scale;
     const next = Math.round(Math.max(minH, Math.min(maxH, startH + dy)));
     targetRef.value = next;
-    if (trackKey === 'phon') phonExpanded.value = next >= 132;
-    if (trackKey === 'f0') f0Expanded.value = next >= 148;
-    if (trackKey === 'ps') psExpanded.value = next >= 148;
+    if (trackKey === 'phon') {
+      phonExpanded.value = next >= 120;
+      if (!phonExpanded.value) collapsedSpecialHeights.value.phon = next;
+    }
+    if (trackKey === 'f0') {
+      f0Expanded.value = next >= 140;
+      if (!f0Expanded.value) collapsedSpecialHeights.value.f0 = next;
+    }
+    if (trackKey === 'ps') {
+      psExpanded.value = next >= 140;
+      if (!psExpanded.value) collapsedSpecialHeights.value.ps = next;
+    }
   };
-  const onUp = () => {
+  const onUp = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-  };
+    window.removeEventListener('pointercancel', onUp);
+  });
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
 }
 
 // ===== Ctrl + Wheel Horizontal Zoom =====
@@ -2000,6 +2899,19 @@ function changeZoom(delta: number, originX = laneWidth.value / 2): void {
   const scroller = lanesScrollRef.value;
   const sample = xToSmp((scroller?.scrollLeft ?? 0) + originX);
   hZoom.value = Math.max(zoomMin, Math.min(zoomMax, Number((hZoom.value * delta).toFixed(2))));
+  void nextTick(() => {
+    if (scroller) scroller.scrollLeft = Math.max(0, smpToX(sample) - originX);
+  });
+}
+
+function setZoomAnchored(nextZoom: number): void {
+  if (!Number.isFinite(nextZoom) || nextZoom <= 0) return;
+  const clamped = Math.max(zoomMin, Math.min(zoomMax, Number(nextZoom.toFixed(2))));
+  if (Math.abs(clamped - hZoom.value) < 1e-4) return;
+  const scroller = lanesScrollRef.value;
+  const originX = laneWidth.value * 0.5;
+  const sample = xToSmp((scroller?.scrollLeft ?? 0) + originX);
+  hZoom.value = clamped;
   void nextTick(() => {
     if (scroller) scroller.scrollLeft = Math.max(0, smpToX(sample) - originX);
   });
@@ -2032,6 +2944,12 @@ const effectiveCutRangeSmp = computed<{ startSmp: number; endSmp: number; source
     const endSmp = words[words.length - 1].end_smp;
     if (endSmp - startSmp >= msToSamples(15)) return { startSmp, endSmp, source: 'selection' };
   }
+  if (store.selectedSyllableId.value) {
+    const singleSyl = syllables.value.find((s) => s.id === store.selectedSyllableId.value);
+    if (singleSyl && singleSyl.end_smp - singleSyl.start_smp >= msToSamples(15)) {
+      return { startSmp: singleSyl.start_smp, endSmp: singleSyl.end_smp, source: 'selection' };
+    }
+  }
   return null;
 });
 
@@ -2045,9 +2963,15 @@ function triggerCutSelectedRange(): void {
   cutSelectionSmp.value = null;
 }
 
-function onWavePointerDown(e: PointerEvent): void {
+function startTimeRangeDrag(
+  e: PointerEvent,
+  el: HTMLElement,
+  onDragged?: () => void,
+): void {
   if (e.button !== 0) return;
-  const el = e.currentTarget as HTMLElement;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest('.rt-row-resizer, .kf-dot, .f0-target-dot, .phon-node, .rt-playhead-handle')) return;
+  const startClientX = e.clientX;
   const startSmp = xToSmp(localXFromPointer(e, el));
   let dragged = false;
   try {
@@ -2056,69 +2980,346 @@ function onWavePointerDown(e: PointerEvent): void {
     // ignore
   }
   const onMove = (ev: PointerEvent) => {
-    const curSmp = xToSmp(localXFromPointer(ev, el));
-    if (Math.abs(curSmp - startSmp) >= msToSamples(15)) {
+    if (!dragged && Math.abs(ev.clientX - startClientX) < 4) return;
+    if (!dragged) {
       dragged = true;
+      onDragged?.();
+    }
+    const curSmp = xToSmp(localXFromPointer(ev, el));
+    if (curSmp !== startSmp) {
       cutSelectionSmp.value = {
         startSmp: Math.min(startSmp, curSmp),
         endSmp: Math.max(startSmp, curSmp),
       };
+    } else {
+      cutSelectionSmp.value = null;
     }
+    store.playheadSmp.value = curSmp;
+    emit('playhead-scrub', curSmp);
   };
-  const onUp = (ev: PointerEvent) => {
+  const cleanup = registerDragCleanup(() => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    window.removeEventListener('pointercancel', onUp);
+    window.removeEventListener('pointercancel', cleanup);
+    try {
+      if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+  });
+  const onUp = (ev: PointerEvent) => {
+    cleanup();
+    const endSmp = xToSmp(localXFromPointer(ev, el));
     if (!dragged) {
       cutSelectionSmp.value = null;
-      store.playheadSmp.value = xToSmp(localXFromPointer(ev, el));
-    } else if (cutSelectionSmp.value) {
-      store.playheadSmp.value = cutSelectionSmp.value.startSmp;
+      store.playheadSmp.value = endSmp;
+      emit('playhead-scrub', endSmp);
+    } else if (endSmp !== startSmp) {
+      cutSelectionSmp.value = {
+        startSmp: Math.min(startSmp, endSmp),
+        endSmp: Math.max(startSmp, endSmp),
+      };
+      store.playheadSmp.value = endSmp;
+      emit('playhead-scrub', endSmp);
+    } else {
+      cutSelectionSmp.value = null;
+      store.playheadSmp.value = endSmp;
+      emit('playhead-scrub', endSmp);
     }
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
-  window.addEventListener('pointercancel', onUp);
+  window.addEventListener('pointercancel', cleanup);
+}
+
+function startPlayheadScrub(e: PointerEvent): void {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const rulerEl = (e.currentTarget as HTMLElement).closest('.rt-ruler') as HTMLElement | null;
+  if (!rulerEl) return;
+  const update = (ev: PointerEvent) => {
+    const smp = xToSmp(localXFromPointer(ev, rulerEl));
+    store.playheadSmp.value = smp;
+    emit('playhead-scrub', smp);
+  };
+  update(e);
+  const onMove = (ev: PointerEvent) => update(ev);
+  const cleanup = registerDragCleanup(() => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', cleanup);
+    window.removeEventListener('pointercancel', cleanup);
+  });
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', cleanup);
+  window.addEventListener('pointercancel', cleanup);
+}
+
+function onWavePointerDown(e: PointerEvent): void {
+  startTimeRangeDrag(e, e.currentTarget as HTMLElement);
+}
+
+function onArtPointerDown(e: PointerEvent): void {
+  startTimeRangeDrag(e, e.currentTarget as HTMLElement);
+}
+
+const timelineClipboard = shallowRef<AnnotationClipboardPayload | null>(null);
+
+function editContextMenuPhone(): void {
+  const target = phoneContextMenu.value;
+  phoneContextMenu.value = null;
+  if (target) void openAnnotationEdit(target.syl, target.seg);
+}
+
+function activeSyllableSelectionIds(): string[] {
+  if (selectedSyllableIds.value.length) return [...selectedSyllableIds.value];
+  if (store.selectedPhonemeIds.value.length === 0 && store.selectedSyllableId.value) {
+    return [store.selectedSyllableId.value];
+  }
+  return [];
+}
+
+function copyTimelineSelection(): boolean {
+  const clip = activeClip.value;
+  if (!clip) return false;
+  const payload = copyAnnotationSelection(
+    clip,
+    {
+      range: cutSelectionSmp.value,
+      phoneIds: store.selectedPhonemeIds.value,
+      syllableIds: activeSyllableSelectionIds(),
+    },
+    store.project.value,
+  );
+  if (!payload) return false;
+  timelineClipboard.value = payload;
+  const plain = payload.kind === 'syllables'
+    ? payload.syllables.map((s) => s.text).join(' ')
+    : payload.segments.map((s) => s.ipa).join('');
+  if (plain && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(plain).catch(() => {});
+  }
+  store.pushToast(`已复制 ${payload.summary}（Ctrl+V 粘贴）`, 'success', 2000);
+  return true;
+}
+
+function pasteTimelineClipboard(explicitPayload?: AnnotationClipboardPayload): boolean {
+  const clip = activeClip.value;
+  const payload = explicitPayload ?? timelineClipboard.value;
+  if (!clip || clip.source?.score || !payload) {
+    if (!explicitPayload && !payload) {
+      store.pushToast('剪贴板为空，请先选中音素或音节按 Ctrl+C 复制', 'info', 2200);
+    }
+    return false;
+  }
+  const lastPhoneId = store.selectedPhonemeIds.value.length > 0
+    ? flatPhones.value.filter(({ seg }) => selectedPhoneSet.value.has(seg.id)).at(-1)?.seg.id
+    : undefined;
+  const sylIds = activeSyllableSelectionIds();
+  const lastSylId = sylIds.length > 0
+    ? syllables.value.filter((s) => sylIds.includes(s.id)).at(-1)?.id
+    : undefined;
+
+  const pasted = pasteAnnotationClipboard(
+    clip,
+    payload,
+    {
+      playheadSmp: store.playheadSmp.value,
+      afterPhoneId: payload.kind === 'phones' ? lastPhoneId : undefined,
+      afterSyllableId: payload.kind === 'syllables' && !cutSelectionSmp.value ? lastSylId : undefined,
+    },
+    store.project.value,
+  );
+  if (!pasted) return false;
+  const label = `粘贴 ${payload.summary}`;
+  const res = store.executeCommand({
+    type: 'clip.edit',
+    label,
+    payload: { clip: pasted.clip, retimed: pasted },
+  });
+  if (res.ok) {
+    store.stopPlayback();
+    cutSelectionSmp.value = null;
+    if (payload.kind === 'phones' && pasted.pastedPhoneIds.length) {
+      store.selectedPhonemeIds.value = [...pasted.pastedPhoneIds];
+      phoneRangeAnchor = pasted.pastedPhoneIds[0];
+      store.selectedSyllableId.value = pasted.pastedSyllableIds[0] ?? store.selectedSyllableId.value;
+      selectedSyllableIds.value = [];
+    } else if (pasted.pastedSyllableIds.length) {
+      selectedSyllableIds.value = [...pasted.pastedSyllableIds];
+      store.selectedSyllableId.value = pasted.pastedSyllableIds[0];
+      store.selectedPhonemeIds.value = [];
+    }
+    store.playheadSmp.value = pasted.pasteEndSmp;
+    invalidateSynthesisBufferIfNeeded();
+    store.pushToast(`已${label}（可 Ctrl+Z 撤销）`, 'success', 2000);
+    return true;
+  }
+  return false;
+}
+
+function cutTimelineSelection(): boolean {
+  const clip = activeClip.value;
+  if (!clip || clip.source?.score) return false;
+  // Save to clipboard before deleting/cutting
+  const snapshot = copyAnnotationSelection(
+    clip,
+    {
+      range: cutSelectionSmp.value,
+      phoneIds: store.selectedPhonemeIds.value,
+      syllableIds: activeSyllableSelectionIds(),
+    },
+    store.project.value,
+  );
+  if (snapshot) timelineClipboard.value = snapshot;
+
+  if (cutSelectionSmp.value || singlePhone.value?.seg.role === 'rest') {
+    triggerCutSelectedRange();
+    return true;
+  }
+  if (canDeleteSelectedPhones.value) {
+    deleteSelectedPhones();
+    return true;
+  }
+  const sylIds = activeSyllableSelectionIds();
+  if (sylIds.length) {
+    const phoneIds = sylIds.flatMap((id) => clip.syllables[id]?.segments.map((s) => s.id) ?? []);
+    if (phoneIds.length) {
+      deleteSelectedPhones(phoneIds);
+      return true;
+    }
+  }
+  return false;
+}
+
+function duplicateTimelineSelection(): boolean {
+  const clip = activeClip.value;
+  if (!clip || clip.source?.score) return false;
+  const payload = copyAnnotationSelection(
+    clip,
+    {
+      range: cutSelectionSmp.value,
+      phoneIds: store.selectedPhonemeIds.value,
+      syllableIds: activeSyllableSelectionIds(),
+    },
+    store.project.value,
+  );
+  if (!payload) return false;
+  timelineClipboard.value = payload;
+  return pasteTimelineClipboard(payload);
+}
+
+function selectAllTimelinePhones(): void {
+  const ids = flatPhones.value.map(({ seg }) => seg.id);
+  if (!ids.length) return;
+  cutSelectionSmp.value = null;
+  selectedSyllableIds.value = [];
+  store.selectedPhonemeIds.value = ids;
+  phoneRangeAnchor = ids[0];
+  store.selectedSyllableId.value = flatPhones.value[0].syl.id;
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  const el = target as Element | null;
+  if (!el) return false;
+  return Boolean(el.closest('input, select, textarea, [contenteditable="true"], [contenteditable=""]'));
+}
+
+function hasTextSelection(): boolean {
+  return Boolean(window.getSelection?.()?.toString().trim());
+}
+
+function onTimelineGlobalKeys(e: KeyboardEvent): void {
+  if (isEditableKeyboardTarget(e.target)) return;
+  if (editDialog.value?.open || phonEditorOpen.value || openKfId.value) return;
+  if (document.querySelector('.export-modal-mask, dialog[open]')) return;
+
+  const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+  const k = e.key.toLowerCase();
+
+  if (mod && k === 'c') {
+    if (hasTextSelection()) return;
+    if (copyTimelineSelection()) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (mod && k === 'x') {
+    if (hasTextSelection()) return;
+    if (cutTimelineSelection()) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (mod && k === 'v') {
+    if (timelineClipboard.value && pasteTimelineClipboard()) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (mod && k === 'd') {
+    if (duplicateTimelineSelection()) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+  if (mod && k === 'a') {
+    const activeEl = document.activeElement as Element | null;
+    if (activeEl && activeEl.closest('.rt-shell')) {
+      e.preventDefault();
+      selectAllTimelinePhones();
+    }
+    return;
+  }
+  if (!mod && !e.altKey && (e.key === 'Delete' || e.key === 'Backspace')) {
+    if (cutSelectionSmp.value || singlePhone.value?.seg.role === 'rest') {
+      e.preventDefault();
+      triggerCutSelectedRange();
+    } else if (canDeleteSelectedPhones.value) {
+      e.preventDefault();
+      deleteSelectedPhones();
+    } else if (activeSyllableSelectionIds().length && activeClip.value && !activeClip.value.source?.score) {
+      const sylIds = activeSyllableSelectionIds();
+      const phoneIds = sylIds.flatMap((id) => activeClip.value?.syllables[id]?.segments.map((s) => s.id) ?? []);
+      if (phoneIds.length) {
+        e.preventDefault();
+        deleteSelectedPhones(phoneIds);
+      }
+    } else if (store.selectedPhonationAnchorId.value) {
+      e.preventDefault();
+      removeSelectedPhonationAnchor();
+    }
+  }
 }
 
 function onTimelineKeys(e: KeyboardEvent): void {
-  if ((e.target as Element | null)?.closest('input, select, textarea, [contenteditable]')) return;
-  if (['+', '=', '-'].includes(e.key)) {
+  if (isEditableKeyboardTarget(e.target)) return;
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && ['+', '=', '-'].includes(e.key)) {
     e.preventDefault();
     changeZoom(e.key === '-' ? 1 / 1.15 : 1.15);
   } else if (e.key === 'Home') {
     e.preventDefault();
     centerPlayhead();
-  } else if ((e.key === 'Delete' || e.key === 'Backspace') && (cutSelectionSmp.value || singlePhone.value?.seg.role === 'rest')) {
-    e.preventDefault();
-    triggerCutSelectedRange();
   } else if (e.key === 'Escape') {
     cutSelectionSmp.value = null;
     selectedSyllableIds.value = [];
     store.selectedPhonemeIds.value = [];
     store.selectedSyllableId.value = '';
     phoneEditMenuOpen.value = false;
+    phoneContextMenu.value = null;
+    readingMenuSyl.value = null;
+    openKfId.value = null;
+    f0DrawMode.value = false;
+    psDrawMode.value = false;
   }
 }
 
 function onRulerPointerDown(e: PointerEvent): void {
-  const el = e.currentTarget as HTMLElement;
-  if (e.shiftKey) {
-    onWavePointerDown(e);
-    return;
-  }
-  cutSelectionSmp.value = null;
-  const update = (ev: PointerEvent) => {
-    store.playheadSmp.value = xToSmp(localXFromPointer(ev, el));
-  };
-  update(e);
-  const onMove = (ev: PointerEvent) => update(ev);
-  const onUp = () => {
-    window.removeEventListener('pointermove', onMove);
-    window.removeEventListener('pointerup', onUp);
-  };
-  window.addEventListener('pointermove', onMove);
-  window.addEventListener('pointerup', onUp);
+  startTimeRangeDrag(e, e.currentTarget as HTMLElement);
 }
 
 const playheadFlash = ref(false);
@@ -2152,8 +3353,13 @@ function centerPlayhead(): void {
   if (!scroller) return;
   const x = smpToX(store.playheadSmp.value);
   const targetLeft =
-    store.playheadSmp.value === 0 ? 0 : Math.max(0, x - scroller.clientWidth * 0.5);
+    store.playheadSmp.value === 0 ? 0 : Math.max(0, x - laneWidth.value * 0.5);
   scroller.scrollTo({ left: targetLeft, behavior: 'smooth' });
+}
+
+function onLanesScroll(e: Event): void {
+  laneScrollX.value = (e.currentTarget as HTMLElement).scrollLeft;
+  if (readingMenuSyl.value) readingMenuSyl.value = null;
 }
 
 async function playSelection(): Promise<void> {
@@ -2165,10 +3371,11 @@ async function playSelection(): Promise<void> {
   const gain = waveBoost3db.value ? 10 ** (3 / 20) : 1;
   const source = store.annotationAudioBuffer.value;
   if (props.recordingActive && source) {
-    const startSmp = rangeStart ?? 0;
-    const endSmp = rangeEnd ?? Math.round(source.duration * SAMPLE_RATE_HZ);
-    const offsetSeconds = startSmp / SAMPLE_RATE_HZ;
-    const durationSeconds = Math.min(source.duration, endSmp / SAMPLE_RATE_HZ) - offsetSeconds;
+    const audioOffset = store.annotationAudioOffsetSmp.value;
+    const startSmp = Math.max(audioOffset, rangeStart ?? audioOffset);
+    const endSmp = rangeEnd ?? (audioOffset + Math.round(source.duration * SAMPLE_RATE_HZ));
+    const offsetSeconds = Math.max(0, (startSmp - audioOffset) / SAMPLE_RATE_HZ);
+    const durationSeconds = Math.min(source.duration, Math.max(0, (endSmp - audioOffset) / SAMPLE_RATE_HZ)) - offsetSeconds;
     if (durationSeconds > 0) {
       await store.playAudioBuffer(source, { gain, offsetSeconds, durationSeconds, playheadStartSmp: startSmp });
     }
@@ -2185,8 +3392,17 @@ function onDocDown(e: PointerEvent): void {
     }
   }
   if (phoneEditMenuOpen.value) {
-    if (!phoneEditMenuRef.value?.contains(t) && !phoneEditBtnRef.value?.contains(t)) {
+    if (
+      !phoneEditMenuRef.value?.contains(t) &&
+      !phoneEditBtnRef.value?.contains(t) &&
+      !insertPhoneBtnRef.value?.contains(t)
+    ) {
       phoneEditMenuOpen.value = false;
+    }
+  }
+  if (phoneContextMenu.value) {
+    if (!phoneContextMenuRef.value?.contains(t)) {
+      phoneContextMenu.value = null;
     }
   }
 }
@@ -2199,9 +3415,11 @@ onMounted(() => {
     widthObserver.observe(lanesScrollRef.value);
   }
   document.addEventListener('pointerdown', onDocDown, true);
+  window.addEventListener('keydown', onTimelineGlobalKeys);
 });
 
 watch([() => activeClip.value?.source?.lyrics, store.annotationResetVersion], () => {
+  cutSelectionSmp.value = null;
   selectedSyllableIds.value = [];
   openKfId.value = null;
   readingMenuSyl.value = null;
@@ -2219,8 +3437,14 @@ watch(flatPhones, (phones) => {
 
 onBeforeUnmount(() => {
   window.clearTimeout(playheadFlashTimer);
+  window.clearTimeout(suppressPhoneClickTimer);
+  window.clearTimeout(suppressPhonClickTimer);
+  window.clearTimeout(rigidGuardTimer);
+  for (const fn of Array.from(activeDragCleanups)) fn();
+  activeDragCleanups.clear();
   widthObserver?.disconnect();
   document.removeEventListener('pointerdown', onDocDown, true);
+  window.removeEventListener('keydown', onTimelineGlobalKeys);
 });
 </script>
 
@@ -2235,7 +3459,7 @@ onBeforeUnmount(() => {
     @drop="onShellDrop"
   >
     <!-- Timeline Toolbar -->
-    <div class="rt-toolbar">
+    <div class="rt-toolbar" data-tour="main-timeline-tools">
       <div class="rt-tb-left">
         <span class="rt-title">
           <IconSvg name="timeline" :size="13" />
@@ -2244,7 +3468,12 @@ onBeforeUnmount(() => {
         <span class="mono metric-chip">
           {{ formatTimecode(store.playheadSmp.value) }} / {{ formatTimecode(totalDurationSmp) }}
         </span>
-        <span v-if="selectedSyllableIds.length || store.selectedPhonemeIds.value.length" class="mono muted rt-hint-xs">
+        <span v-if="cutSelectionSmp" class="mono rt-range-chip" title="当前框选的时间区间（点击 × 或按 Esc 取消）">
+          选区 {{ (cutSelectionSmp.startSmp / SAMPLE_RATE_HZ).toFixed(2) }}–{{ (cutSelectionSmp.endSmp / SAMPLE_RATE_HZ).toFixed(2) }}s
+          ({{ Math.round(samplesToMs(cutSelectionSmp.endSmp - cutSelectionSmp.startSmp)) }}ms)
+          <button type="button" class="rt-range-clear" title="清除时间选区 (Esc)" aria-label="清除时间选区" @click="cutSelectionSmp = null">×</button>
+        </span>
+        <span v-else-if="selectedSyllableIds.length || store.selectedPhonemeIds.value.length" class="mono muted rt-hint-xs">
           <template v-if="selectedSyllableIds.length">已选 {{ selectedSyllableIds.length }} 音节</template>
           <template v-else>已选 {{ store.selectedPhonemeIds.value.length }} 音素</template>
         </span>
@@ -2290,6 +3519,37 @@ onBeforeUnmount(() => {
           <span>定位播放头</span>
         </button>
         <button
+          type="button"
+          class="btn xs"
+          :disabled="!store.selectedSyllableId.value && !selectedSyllableIds.length"
+          title="将当前选中字/音节的读音存入个人词典"
+          @click="emit('save-dictionary')"
+        >
+          <IconSvg name="book" :size="11" />
+          <span>存词典</span>
+        </button>
+        <button
+          ref="insertPhoneBtnRef"
+          type="button"
+          class="btn xs"
+          :disabled="!canInsertIpa"
+          title="在当前选中音素前方或后方插入新 IPA 音素（也可右键音素块操作）"
+          @click="openPhoneInsertPopover"
+        >
+          <IconSvg name="plus" :size="11" />
+          <span>插入音素</span>
+        </button>
+        <button
+          type="button"
+          class="btn xs"
+          :disabled="!canDeleteSelectedPhones"
+          title="删除当前选中的音素并自动左移衔接与同步音节标注（快捷键 Delete / Backspace）"
+          @click="deleteSelectedPhones()"
+        >
+          <IconSvg name="trash" :size="11" />
+          <span>删除音素</span>
+        </button>
+        <button
           ref="phoneEditBtnRef"
           type="button"
           class="btn xs"
@@ -2303,13 +3563,14 @@ onBeforeUnmount(() => {
         <label class="rt-zoom-box" title="横向缩放（Ctrl + 滚轮，或聚焦时间线后按 + / −）">
           <span class="muted">缩放</span>
           <input
-            v-model.number="hZoom"
+            :value="hZoom"
             type="range"
             :min="zoomMin"
             :max="zoomMax"
             step="0.05"
             class="rt-zoom-slider"
             :style="{ '--fill': `${(((hZoom - zoomMin) / (zoomMax - zoomMin)) * 100).toFixed(1)}%` }"
+            @input="setZoomAnchored(Number(($event.target as HTMLInputElement).value))"
           />
           <span class="mono">{{ Math.round(hZoom * 100) }}%</span>
         </label>
@@ -2320,8 +3581,15 @@ onBeforeUnmount(() => {
             <dt>Ctrl + 滚轮 / + / −</dt><dd>横向缩放</dd>
             <dt>Home</dt><dd>定位播放头</dd>
             <dt>Ctrl + Z / Ctrl + Shift + Z</dt><dd>撤销 / 重做</dd>
-            <dt>拖选</dt><dd>连续选取字或音素</dd>
-            <dt>双击块</dt><dd>编辑文字、调值或音素</dd>
+            <dt>Ctrl + C / X / V</dt><dd>复制 / 剪切 / 粘贴音素、音节或选区</dd>
+            <dt>Ctrl + D / Ctrl + A</dt><dd>原地复制一份 / 全选音素</dd>
+            <dt>拖选</dt><dd>连续选取字或音素（空白区可框选时间区间）</dd>
+            <dt>拖拽标尺 / 轨道</dt><dd>框选时间区间并保持高亮（可试听或剪切）</dd>
+            <dt>拖拽播放头三角</dt><dd>逐帧移动播放头并实时显示当前舌位</dd>
+            <dt>拖动已选音节 / 音素</dt><dd>在相邻无声段内左右平移（不改时长）</dd>
+            <dt>双击块 / 无声段</dt><dd>编辑文字、调值、音素或无声段时长</dd>
+            <dt>右键音素</dt><dd>插入、拆分、合并或删除音素</dd>
+            <dt>Delete / Backspace</dt><dd>删除选中音素、静音段或选区</dd>
           </dl>
         </details>
       </div>
@@ -2329,7 +3597,7 @@ onBeforeUnmount(() => {
 
     <!-- Scrollable Multi-Track Body: Fixed Track Headers + Synchronized Horizontal Scroll Lanes -->
     <div ref="lanesScrollRef" class="rt-body-scroll" tabindex="0" aria-label="时间线轨道"
-      @scroll="laneScrollX = ($event.currentTarget as HTMLElement).scrollLeft">
+      @scroll="onLanesScroll">
       <!-- Left Fixed Track Headers Column -->
       <div ref="headerRef" class="rt-headers-col">
         <div class="rt-hdr-ruler mono muted">48 kHz · s</div>
@@ -2358,7 +3626,7 @@ onBeforeUnmount(() => {
         <div class="rt-hdr-row rt-hdr-phon" :style="{ height: `${effPhonHeight}px` }">
           <div class="rt-hdr-top">
             <button type="button" class="rt-hdr-name rt-hdr-toggle" :aria-expanded="phonExpanded"
-              @click="phonExpanded = !phonExpanded">发声类型 <span aria-hidden="true">{{ phonExpanded ? '▾' : '▸' }}</span></button>
+              @click="toggleSpecialTrack('phon')">发声类型 <span aria-hidden="true">{{ phonExpanded ? '▾' : '▸' }}</span></button>
             <div class="rt-pills">
               <button
                 type="button"
@@ -2390,7 +3658,7 @@ onBeforeUnmount(() => {
         <div class="rt-hdr-row rt-hdr-f0" :style="{ height: `${effF0Height}px` }">
           <div class="rt-hdr-top">
             <button type="button" class="rt-hdr-name rt-hdr-toggle" :aria-expanded="f0Expanded"
-              @click="f0Expanded = !f0Expanded">F0 基频 <span aria-hidden="true">{{ f0Expanded ? '▾' : '▸' }}</span></button>
+              @click="toggleSpecialTrack('f0')">F0 基频 <span aria-hidden="true">{{ f0Expanded ? '▾' : '▸' }}</span></button>
             <div class="rt-pills">
               <button
                 type="button"
@@ -2462,7 +3730,7 @@ onBeforeUnmount(() => {
         <div class="rt-hdr-row rt-hdr-ps" :style="{ height: `${effPsHeight}px` }">
           <div class="rt-hdr-top">
             <button type="button" class="rt-hdr-name rt-hdr-toggle" :aria-expanded="psExpanded"
-              @click="psExpanded = !psExpanded">声门下压 <span aria-hidden="true">{{ psExpanded ? '▾' : '▸' }}</span></button>
+              @click="toggleSpecialTrack('ps')">声门下压 <span aria-hidden="true">{{ psExpanded ? '▾' : '▸' }}</span></button>
             <div class="rt-pills">
               <span class="mono muted">0–1600 Pa</span>
               <button
@@ -2497,16 +3765,30 @@ onBeforeUnmount(() => {
       <!-- Right Synchronized Horizontal-Scroll Track Lanes -->
         <div class="rt-lanes-canvas" :style="{ width: `${timelineWidthPx}px`, '--view-left': `${viewLeft}px` }">
           <div class="rt-playhead" :class="{ flash: playheadFlash }" :style="{ left: `${smpToX(store.playheadSmp.value)}px` }" />
+          <div
+            v-if="cutSelectionSmp"
+            class="rt-range-overlay"
+            :style="{
+              left: `${smpToX(cutSelectionSmp.startSmp)}px`,
+              width: `${Math.max(2, smpToX(cutSelectionSmp.endSmp) - smpToX(cutSelectionSmp.startSmp))}px`,
+            }"
+          >
+            <span class="mono rt-range-overlay-tag">
+              {{ (cutSelectionSmp.startSmp / SAMPLE_RATE_HZ).toFixed(2) }}–{{ (cutSelectionSmp.endSmp / SAMPLE_RATE_HZ).toFixed(2) }}s
+              ({{ Math.round(samplesToMs(cutSelectionSmp.endSmp - cutSelectionSmp.startSmp)) }}ms)
+            </span>
+          </div>
 
           <!-- Time Ruler -->
-          <div class="rt-ruler" title="点击定位播放头 · Shift + 拖拽可框选任意剪切区间" @pointerdown="onRulerPointerDown">
-            <div
-              v-if="cutSelectionSmp"
-              class="rt-cut-range-band"
-              :style="{
-                left: `${smpToX(cutSelectionSmp.startSmp)}px`,
-                width: `${Math.max(2, smpToX(cutSelectionSmp.endSmp) - smpToX(cutSelectionSmp.startSmp))}px`,
-              }"
+          <div class="rt-ruler" title="点击定位播放头并显示该帧舌位 · 横向拖拽框选时间区间（松手保持高亮，可试听或剪切）" @pointerdown="onRulerPointerDown">
+            <button
+              type="button"
+              class="rt-playhead-handle"
+              :style="{ left: `${smpToX(store.playheadSmp.value)}px` }"
+              title="拖拽播放头逐帧查看当前时刻舌位与声学特征"
+              aria-label="拖拽播放头"
+              @pointerdown="startPlayheadScrub"
+              @click.stop
             />
             <div
               v-for="tk in rulerTicks"
@@ -2549,15 +3831,20 @@ onBeforeUnmount(() => {
                   selected: selectedSyllableSet.has(syl.id) || focusedSyllableId === syl.id,
                   'selection-focus': focusedSyllableId === syl.id,
                   'selection-group': selectedSyllableSet.size > 1 && selectedSyllableSet.has(syl.id),
+                  'can-slide': canSlideSyllable(syl),
+                  'has-poly': Boolean(syl.reading_candidates && syl.reading_candidates.length > 1),
+                  'is-narrow': spanWidthPx(syl.start_smp, syl.end_smp) < 48,
+                  'is-tiny': spanWidthPx(syl.start_smp, syl.end_smp) < 18,
                 }"
                 :style="{
                   left: `${smpToX(syl.start_smp)}px`,
-                  width: `${Math.max(24, smpToX(syl.end_smp) - smpToX(syl.start_smp))}px`,
+                  width: `${spanWidthPx(syl.start_smp, syl.end_smp)}px`,
                 }"
-                :title="`${syl.text} · ${Math.round(samplesToMs(syl.end_smp - syl.start_smp))} ms · 拖拽左右边缘调宽 · 双击编辑文字与调值`"
+                :title="`${syl.text}${syl.tone_levels ? ' ' + syl.tone_levels : ''} · ${Math.round(samplesToMs(syl.end_smp - syl.start_smp))} ms · ${canSlideSyllable(syl) ? '可左右拖动平移至相邻无声段 · ' : ''}拖拽左右边缘调宽 · 双击编辑文字、调值与时长`"
                 role="button"
                 :aria-pressed="selectedSyllableSet.has(syl.id) || focusedSyllableId === syl.id"
                 tabindex="0"
+                @pointerdown="startSyllableSlideDrag(syl, $event)"
                 @click="selectSyllableBodyOnly(syl)"
                 @dblclick="openAnnotationEdit(syl)"
                 @keydown.enter="selectSyllableBodyOnly(syl)"
@@ -2570,8 +3857,8 @@ onBeforeUnmount(() => {
                   @click.stop
                   @dblclick.stop
                 />
-                <span class="tg-syl-txt notranslate" translate="no">{{ syl.text }}</span>
-                <span v-if="syl.tone_levels" class="mono tg-tone-tag notranslate" translate="no">{{ syl.tone_levels }}</span>
+                <span v-if="spanWidthPx(syl.start_smp, syl.end_smp) >= 18" class="tg-syl-txt notranslate" translate="no">{{ syl.text }}</span>
+                <span v-if="syl.tone_levels && spanWidthPx(syl.start_smp, syl.end_smp) >= 48" class="mono tg-tone-tag notranslate" translate="no">{{ syl.tone_levels }}</span>
                 <button
                   v-if="syl.reading_candidates && syl.reading_candidates.length > 1"
                   type="button"
@@ -2588,6 +3875,35 @@ onBeforeUnmount(() => {
                   class="syl-edge-handle right"
                   title="拖拽音节右边界弹性伸缩整音节时长（含单音节与末音节）"
                   @pointerdown="startSyllableBoundaryDrag(syl, 'right', $event)"
+                  @click.stop
+                  @dblclick.stop
+                />
+              </div>
+              <div
+                v-for="gap in visibleSilenceGaps"
+                :key="gap.id"
+                class="tg-gap-blk"
+                :class="{ 'is-narrow': spanWidthPx(gap.startSmp, gap.endSmp) < 38 }"
+                :style="{
+                  left: `${smpToX(gap.startSmp)}px`,
+                  width: `${spanWidthPx(gap.startSmp, gap.endSmp)}px`,
+                }"
+                :title="`无声段 ${Math.round(samplesToMs(gap.endSmp - gap.startSmp))} ms · 拖拽右边缘或双击直接调整时长（前后音节长度不变）`"
+                role="button"
+                tabindex="0"
+                @pointerdown.stop
+                @click.stop
+                @dblclick.stop="openSilenceGapEdit(gap)"
+                @keydown.enter.stop="openSilenceGapEdit(gap)"
+              >
+                <span v-if="spanWidthPx(gap.startSmp, gap.endSmp) >= 38" class="mono tg-gap-ms">
+                  {{ Math.round(samplesToMs(gap.endSmp - gap.startSmp)) }}ms
+                </span>
+                <div
+                  v-if="!activeClip?.source?.score"
+                  class="gap-edge-handle"
+                  title="拖拽调整无声段时长（整体平移后方音节，不改变前后音节长度）"
+                  @pointerdown="startSilenceGapDrag(gap, $event)"
                   @click.stop
                   @dblclick.stop
                 />
@@ -2612,24 +3928,29 @@ onBeforeUnmount(() => {
                   selected: selectedPhoneSet.has(item.seg.id),
                   'selection-focus': focusedPhoneId === item.seg.id,
                   'selection-group': selectedPhoneSet.size > 1 && selectedPhoneSet.has(item.seg.id),
+                  'can-slide': canSlidePhone(item.seg),
                   voiceless: !item.seg.voiced,
                   stop: Boolean(item.seg.stop_timing),
+                  'is-compact': spanWidthPx(item.seg.start_smp, item.seg.end_smp) < 42,
+                  'is-tiny': spanWidthPx(item.seg.start_smp, item.seg.end_smp) < 18,
                 }"
                 :style="{
                   left: `${smpToX(item.seg.start_smp)}px`,
-                  width: `${Math.max(22, smpToX(item.seg.end_smp) - smpToX(item.seg.start_smp))}px`,
+                  width: `${spanWidthPx(item.seg.start_smp, item.seg.end_smp)}px`,
                 }"
-                :title="`音素 [${item.seg.ipa}] · ${Math.round(samplesToMs(item.seg.end_smp - item.seg.start_smp))} ms · 双击编辑`"
+                :title="`音素 [${item.seg.ipa}] · ${Math.round(samplesToMs(item.seg.end_smp - item.seg.start_smp))} ms · ${canSlidePhone(item.seg) ? '可左右拖动平移至相邻无声段 · ' : ''}双击编辑 · 右键插入/删除 · Delete 删除`"
                 role="button"
                 :aria-pressed="selectedPhoneSet.has(item.seg.id)"
                 tabindex="0"
+                @pointerdown="startPhoneSlideDrag(item, $event)"
                 @click="onSelectSinglePhone(item, $event)"
                 @dblclick="openAnnotationEdit(item.syl, item.seg)"
+                @contextmenu.prevent="openPhoneContextMenu(item, $event)"
                 @keydown.enter="store.selectedSyllableId.value = item.syl.id; store.selectedPhonemeIds.value = [item.seg.id]; selectedSyllableIds = []"
                 @keydown.f2.prevent="openAnnotationEdit(item.syl, item.seg)"
               >
-                <span class="ipa tg-phone-sym notranslate" translate="no">{{ item.seg.ipa }}</span>
-                <span class="mono tg-phone-ms">{{ Math.round(samplesToMs(item.seg.end_smp - item.seg.start_smp)) }}</span>
+                <span v-if="spanWidthPx(item.seg.start_smp, item.seg.end_smp) >= 18" class="ipa tg-phone-sym notranslate" translate="no">{{ item.seg.ipa }}</span>
+                <span v-if="spanWidthPx(item.seg.start_smp, item.seg.end_smp) >= 42" class="mono tg-phone-ms">{{ Math.round(samplesToMs(item.seg.end_smp - item.seg.start_smp)) }}</span>
                 <span v-if="item.seg.stop_timing" class="tg-stop-release"
                   :style="stopPhaseStyle(item.seg)"
                   :title="`持阻 ${item.seg.stop_timing.closure_ms.toFixed(1)} ms · 除阻 ${item.seg.stop_timing.release_ms.toFixed(1)} ms · VOT ${item.seg.stop_timing.vot_ms} ms`" />
@@ -2644,7 +3965,7 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- 2. ART Keyframes 1:1 Aligned with Phones -->
-          <div class="rt-lane rt-lane-art" :style="{ height: `${hArt}px` }">
+          <div class="rt-lane rt-lane-art" :style="{ height: `${hArt}px` }" @pointerdown="onArtPointerDown">
             <div class="art-guide-line" />
             <button
               v-for="item in visiblePhones"
@@ -2671,7 +3992,10 @@ onBeforeUnmount(() => {
           <div
             class="rt-lane rt-lane-phon phon-lane-canvas sci-plane"
             :style="{ height: `${effPhonHeight}px` }"
+            title="单击定位播放头 · 折叠态拖拽可框选时间区间 · 双击或点轨头展开 5 泳道"
+            @pointerdown="onPhonLanePointerDown"
             @click="onPhonLaneClick"
+            @dblclick="toggleSpecialTrack('phon')"
           >
             <svg class="lane-svg" :width="viewSvgWidth" :height="effPhonHeight" :viewBox="viewSvg(effPhonHeight)">
               <line
@@ -2721,8 +4045,8 @@ onBeforeUnmount(() => {
             @wheel="onF0LaneWheel"
             @dblclick="f0AutoScale = true"
           >
-            <div class="f0-legend-pill" :style="{ left: `${viewScroll + 56}px` }">
-              <span>{{ f0ViewMinHz }}–{{ f0ViewMaxHz }}Hz ({{ f0AutoScale ? '自适应' : '手动 · 双击复位' }}) · 实线：合成基频 · 蓝点：qTA 靶标</span>
+            <div v-if="f0Expanded" class="f0-legend-pill" :style="{ left: `${viewScroll + 56}px` }">
+              <span>{{ f0ViewMinHz }}–{{ f0ViewMaxHz }}Hz ({{ f0AutoScale ? '自适应' : '手动 · 双击复位' }}) · 实线：合成基频 · 圆点：qTA 靶标</span>
               <span v-if="perturbEnabled" class="f0-perturb-badge">微扰包络已开启</span>
             </div>
             <svg class="lane-svg" :width="viewSvgWidth" :height="effF0Height" :viewBox="viewSvg(effF0Height)">
@@ -2841,14 +4165,16 @@ onBeforeUnmount(() => {
                 stroke-dasharray="3 4"
               />
               <text :x="viewScroll + 6" :y="paToPsY(800, effPsHeight) - 2" class="lane-axis-txt mono">800 Pa</text>
-              <path v-if="psAreaPath" :d="psAreaPath" fill="var(--teal-bg)" />
-              <polyline
-                v-if="psPolyline"
-                :points="psPolyline"
+              <path v-for="(areaD, aIdx) in psPaths.areaPaths" :key="`psa_${aIdx}`" :d="areaD" fill="var(--teal-bg)" />
+              <path
+                v-for="(lineD, lIdx) in psPaths.linePaths"
+                :key="`psl_${lIdx}`"
+                :d="lineD"
                 fill="none"
                 stroke="var(--track-color)"
                 stroke-width="1.6"
                 stroke-linejoin="round"
+                stroke-linecap="round"
               />
               <path
                 v-if="psDraftPath"
@@ -2866,21 +4192,9 @@ onBeforeUnmount(() => {
           <div
             class="rt-lane rt-lane-wave sci-plane"
             :style="{ height: `${hWave}px` }"
-            title="拖拽可框选任意音频剪切区间 · 点击定位播放头"
+            title="拖拽框选时间区间（松手保持高亮，可试听或剪切）· 点击定位播放头并显示该帧舌位"
             @pointerdown="onWavePointerDown"
           >
-            <div
-              v-if="cutSelectionSmp"
-              class="rt-cut-range-band wave"
-              :style="{
-                left: `${smpToX(cutSelectionSmp.startSmp)}px`,
-                width: `${Math.max(2, smpToX(cutSelectionSmp.endSmp) - smpToX(cutSelectionSmp.startSmp))}px`,
-              }"
-            >
-              <span class="mono rt-cut-range-tag">
-                {{ (cutSelectionSmp.startSmp / SAMPLE_RATE_HZ).toFixed(2) }}–{{ (cutSelectionSmp.endSmp / SAMPLE_RATE_HZ).toFixed(2) }}s
-              </span>
-            </div>
             <svg class="lane-svg" :width="viewSvgWidth" :height="hWave" :viewBox="viewSvg(hWave)">
               <line
                 x1="0"
@@ -2934,7 +4248,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="rt-pop-sec">
-          <label class="rt-pop-lbl">直接修改音标</label>
+          <label class="rt-pop-lbl">直接修改音标与时长</label>
           <div class="rt-pop-row">
             <input
               v-model="quickEditIpa"
@@ -2948,6 +4262,21 @@ onBeforeUnmount(() => {
             <button type="button" class="btn xs primary" :disabled="!singlePhone" @click="applyQuickIpaEdit">
               应用
             </button>
+          </div>
+          <div v-if="singlePhone" class="rt-pop-row">
+            <span class="muted rt-pop-unit">音段时长</span>
+            <input
+              v-model.number="quickDurationMs"
+              type="number"
+              :min="isSelectedStop ? 11 : 15"
+              max="60000"
+              step="1"
+              class="inp mono rt-insert-duration"
+              aria-label="当前音段时长（毫秒）"
+              @keydown.enter.prevent="commitQuickSegmentDuration"
+            />
+            <span class="muted">ms</span>
+            <button type="button" class="btn xs" @click="commitQuickSegmentDuration">应用时长</button>
           </div>
         </div>
 
@@ -2991,13 +4320,24 @@ onBeforeUnmount(() => {
               与后一音素合并
             </button>
           </div>
+          <button
+            type="button"
+            class="btn xs danger"
+            style="width: 100%"
+            :disabled="!canDeleteSelectedPhones"
+            title="删除当前选中的音素并自动衔接后方与同步音节标注（快捷键 Delete）"
+            @click="deleteSelectedPhones()"
+          >
+            <IconSvg name="trash" :size="11" />
+            <span>{{ store.selectedPhonemeIds.value.length > 1 ? `删除已选 ${store.selectedPhonemeIds.value.length} 个音素` : '删除选中音素' }}</span>
+          </button>
         </div>
 
-        <div v-if="!props.recordingActive && !activeClip?.source?.score" class="rt-pop-sec">
+        <div v-if="!activeClip?.source?.score" class="rt-pop-sec">
           <span class="rt-pop-lbl">插入音素</span>
           <div class="rt-pop-row">
-            <input v-model="insertIpa" type="text" class="inp ipa notranslate" translate="no"
-              aria-label="要插入的 IPA 音素" placeholder="如 ʃ" :disabled="!canInsertIpa"
+            <input ref="insertIpaInputRef" v-model="insertIpa" type="text" class="inp ipa notranslate" translate="no"
+              aria-label="要插入的 IPA 音素" placeholder="如 ʃ 或 a" :disabled="!canInsertIpa"
               @keydown.enter.prevent="insertAtSelection('after')" />
             <input v-model.number="insertIpaMs" type="number" class="inp mono rt-insert-duration"
               min="20" max="2000" aria-label="插入音素时长（毫秒）" :disabled="!canInsertIpa" />
@@ -3009,7 +4349,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="rt-pop-sec">
+        <div v-if="!props.recordingActive" class="rt-pop-sec">
           <label class="rt-pop-lbl">在后方插入静音休止段 (ms)</label>
           <div class="rt-pop-row">
             <input
@@ -3017,7 +4357,7 @@ onBeforeUnmount(() => {
               type="number"
               min="20"
               max="2000"
-              step="10"
+              step="1"
               class="inp mono"
               style="width: 84px"
               @keydown.enter.prevent="insertAtSelection('after', true)"
@@ -3035,8 +4375,13 @@ onBeforeUnmount(() => {
 
         <div v-if="isSelectedStop && singlePhone" class="rt-pop-sec">
           <label class="rt-pop-lbl">
-            塞音 VOT 嗓音起始时间 (ms)
+            塞音保护与 VOT (ms)
           </label>
+          <div v-if="singlePhone.seg.stop_timing" class="rt-stop-summary mono">
+            <span>闭塞 {{ Math.round(singlePhone.seg.stop_timing.closure_ms) }}ms (≥10)</span>
+            <span>除阻 {{ Math.round(singlePhone.seg.stop_timing.release_ms) }}ms (≥1)</span>
+            <span>VOT {{ Math.round(singlePhone.seg.stop_timing.vot_ms) }}ms</span>
+          </div>
           <div class="rt-pop-row">
             <input
               v-model.number="votDraftMs"
@@ -3072,15 +4417,112 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <div
+        v-if="phoneContextMenu"
+        ref="phoneContextMenuRef"
+        class="rt-phone-ctx panel"
+        :style="phoneContextMenu.style"
+        role="menu"
+        aria-label="音素快捷操作菜单"
+      >
+        <button
+          type="button"
+          class="rt-ctx-item"
+          @click="editContextMenuPhone()"
+        >
+          <span>编辑音标与时长…</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item"
+          @click="phoneContextMenu = null; copyTimelineSelection()"
+        >
+          <span>复制 (Ctrl+C)</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item"
+          :disabled="Boolean(activeClip?.source?.score)"
+          @click="phoneContextMenu = null; cutTimelineSelection()"
+        >
+          <span>剪切 (Ctrl+X)</span>
+        </button>
+        <button
+          v-if="timelineClipboard"
+          type="button"
+          class="rt-ctx-item"
+          :disabled="Boolean(activeClip?.source?.score)"
+          @click="phoneContextMenu = null; pasteTimelineClipboard()"
+        >
+          <span>粘贴 (Ctrl+V)</span>
+        </button>
+        <button
+          v-if="canInsertIpa"
+          type="button"
+          class="rt-ctx-item"
+          @click="openPhoneInsertPopover()"
+        >
+          <IconSvg name="plus" :size="12" />
+          <span>在前方 / 后方插入音素…</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item"
+          :disabled="!canSplitMidpoint"
+          @click="phoneContextMenu = null; splitSelectedPhone('midpoint')"
+        >
+          <span>中点拆分为两段</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item"
+          :disabled="!canMergePrevPhone"
+          @click="phoneContextMenu = null; mergeSelectedPhone('prev')"
+        >
+          <span>与前一音素合并</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item"
+          :disabled="!canMergeNextPhone"
+          @click="phoneContextMenu = null; mergeSelectedPhone('next')"
+        >
+          <span>与后一音素合并</span>
+        </button>
+        <button
+          type="button"
+          class="rt-ctx-item danger"
+          :disabled="!canDeleteSelectedPhones"
+          @click="deleteSelectedPhones()"
+        >
+          <IconSvg name="trash" :size="12" />
+          <span>{{ store.selectedPhonemeIds.value.length > 1 ? `删除已选 ${store.selectedPhonemeIds.value.length} 个音素` : '删除此音素 (Delete)' }}</span>
+        </button>
+      </div>
+
       <dialog ref="editDialog" class="rt-edit-dialog" @close="editing = null" aria-labelledby="rt-edit-title">
-        <form v-if="editing" class="rt-edit-form" @submit.prevent="applyAnnotationEdit">
-          <strong id="rt-edit-title">{{ editing.phoneId ? '编辑音素' : '编辑音节' }}</strong>
-          <label>{{ editing.phoneId ? 'IPA 符号' : '文字' }}
+        <form v-if="editing" class="rt-edit-form" novalidate @submit.prevent="applyAnnotationEdit">
+          <strong id="rt-edit-title">{{ editing.gap ? '编辑无声段' : editing.phoneId ? '编辑音素' : '编辑音节' }}</strong>
+          <label v-if="!editing.gap">{{ editing.phoneId ? 'IPA 符号' : '文字' }}
             <input v-model="editing.text" class="inp ipa notranslate" translate="no" autofocus />
           </label>
-          <label v-if="!editing.phoneId">调值
-            <input v-model="editing.tone" class="inp mono" inputmode="numeric" placeholder="如 55 或 214" />
+          <label v-if="!editing.gap && !editing.phoneId">调值
+            <input v-model="editing.tone" class="inp mono" inputmode="numeric" placeholder="如 55 或 214（留空恢复默认）" />
           </label>
+          <label>{{ editing.gap ? '无声段时长 (ms)' : editing.phoneId ? '音素时长 (ms)' : '音节时长 (ms)' }}
+            <input
+              v-model.number="editing.durationMs"
+              type="number"
+              :min="editing.gap ? 0 : 11"
+              max="60000"
+              step="1"
+              class="inp mono"
+              :autofocus="Boolean(editing.gap)"
+            />
+          </label>
+          <p v-if="editing.gap" class="muted rt-gap-hint">
+            调整无声段时前后音节时长保持不变，设为 0 可消除停顿。
+          </p>
           <p v-if="editError" class="rt-edit-error" role="alert">{{ editError }}</p>
           <div class="rt-edit-actions">
             <button type="button" class="btn" @click="editDialog?.close()">取消</button>
@@ -3092,7 +4534,7 @@ onBeforeUnmount(() => {
         v-if="readingMenuSyl"
         id="tgReadingMenu"
         ref="readingMenuRef"
-        class="vc-sel-menu"
+        class="vc-sel-menu rt-reading-menu"
         :style="readingMenuStyle"
         role="menu"
       >
@@ -3104,10 +4546,11 @@ onBeforeUnmount(() => {
           :key="cand"
           type="button"
           class="vc-sel-opt"
+          :class="{ active: isActiveReadingCandidate(readingMenuSyl, cand) }"
           @click="applyReadingCandidate(readingMenuSyl, cand)"
         >
           <span class="ipa notranslate" translate="no">{{ cand }}</span>
-          <IconSvg name="check" :size="12" />
+          <IconSvg v-if="isActiveReadingCandidate(readingMenuSyl, cand)" name="check" :size="12" />
         </button>
       </div>
     </Teleport>
@@ -3441,7 +4884,101 @@ onBeforeUnmount(() => {
   position: relative;
   border-bottom: 1px solid var(--panel-border);
   background: color-mix(in srgb, var(--app) 70%, transparent);
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+
+.rt-playhead-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  transform: translateX(-50%);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+  z-index: calc(var(--z-base) + 13);
+}
+
+.rt-playhead-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid var(--danger);
+}
+
+.rt-playhead-handle:hover::after {
+  border-left-width: 6px;
+  border-right-width: 6px;
+  border-top-width: 9px;
+}
+
+.rt-range-overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: calc(var(--z-base) + 5);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-left: 1.5px solid var(--accent);
+  border-right: 1.5px solid var(--accent);
+  pointer-events: none;
+}
+
+.rt-range-overlay-tag {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  padding: 0 5px;
+  border-radius: var(--r-ctrl);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.rt-range-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--accent);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.rt-range-clear {
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: inherit;
+  font-size: 0.9rem;
+  line-height: 1;
   cursor: pointer;
+}
+
+.rt-range-clear:hover {
+  color: var(--danger);
+}
+
+.tg-syl-blk.can-slide,
+.tg-phone-blk.can-slide {
+  cursor: grab;
+}
+
+.tg-syl-blk.can-slide:active,
+.tg-phone-blk.can-slide:active {
+  cursor: grabbing;
 }
 
 .rt-tick {
@@ -3517,13 +5054,30 @@ onBeforeUnmount(() => {
   border-radius: max(3px, calc(var(--r-ctrl) - 2px));
   border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--panel));
   background: color-mix(in srgb, var(--accent) 19%, var(--panel));
-  padding: 0 14px 0 6px;
+  padding: 0 5px;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   cursor: pointer;
   overflow: hidden;
   transition: border-color 0.12s, background-color 0.12s;
+}
+
+.tg-syl-blk.has-poly {
+  padding-right: 14px;
+}
+
+.tg-syl-blk.is-narrow {
+  padding: 0 3px;
+  justify-content: center;
+}
+
+.tg-syl-blk.is-narrow.has-poly {
+  padding-right: 12px;
+}
+
+.tg-syl-blk.is-tiny {
+  padding: 0;
 }
 
 .tg-syl-blk:hover {
@@ -3532,6 +5086,9 @@ onBeforeUnmount(() => {
 
 .tg-syl-txt {
   font-size: 0.958333rem;
+  flex: 1 0 auto;
+  min-width: 0;
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3540,6 +5097,7 @@ onBeforeUnmount(() => {
 .tg-tone-tag {
   font-size: 0.75rem;
   color: var(--muted);
+  flex: 0 1 auto;
 }
 
 .poly-tri-btn {
@@ -3591,13 +5149,22 @@ onBeforeUnmount(() => {
   border-radius: max(2px, calc(var(--r-ctrl) - 3px));
   border: 1px solid color-mix(in srgb, var(--teal) 42%, var(--border));
   background: color-mix(in srgb, var(--teal) 24%, var(--panel));
-  padding: 0 6px;
+  padding: 0 5px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 3px;
   cursor: pointer;
   overflow: hidden;
+}
+
+.tg-phone-blk.is-compact {
+  padding: 0 2px;
+  justify-content: center;
+}
+
+.tg-phone-blk.is-tiny {
+  padding: 0;
 }
 
 .tg-phone-blk.voiceless {
@@ -3751,7 +5318,7 @@ onBeforeUnmount(() => {
   border-radius: var(--r-panel);
   box-shadow: var(--popover-shadow);
 }
-.rt-edit-dialog::backdrop { background: rgb(0 0 0 / 30%); }
+.rt-edit-dialog::backdrop { background: var(--overlay); }
 .rt-edit-form { display: grid; gap: 12px; }
 .rt-edit-form label { display: grid; gap: 4px; }
 .rt-edit-error { color: var(--danger); margin: 0; }
@@ -3897,7 +5464,8 @@ onBeforeUnmount(() => {
 
 .rt-phone-popover {
   position: fixed;
-  z-index: 1200;
+  z-index: var(--z-popover);
+  zoom: var(--page-scale);
   padding: 10px 11px;
   display: flex;
   flex-direction: column;
@@ -3908,6 +5476,24 @@ onBeforeUnmount(() => {
   border-radius: var(--r-panel);
   box-shadow: var(--popover-shadow);
   font-size: 0.916667rem;
+}
+.rt-reading-menu {
+  zoom: var(--page-scale);
+  overflow-y: auto;
+}
+.rt-pop-unit {
+  font-size: 0.816667rem;
+  white-space: nowrap;
+}
+.rt-stop-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 6px;
+  border-radius: var(--r-ctrl);
+  background: var(--teal-bg);
+  color: var(--teal);
+  font-size: 0.783333rem;
 }
 .rt-pop-head {
   display: flex;
@@ -3966,5 +5552,100 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
   color: var(--danger);
   white-space: nowrap;
+}
+.rt-phone-ctx {
+  position: fixed;
+  z-index: var(--z-popover);
+  zoom: var(--page-scale);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-panel);
+  box-shadow: var(--popover-shadow);
+}
+.rt-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+}
+.rt-ctx-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.rt-ctx-item.danger {
+  color: var(--danger);
+}
+.rt-ctx-item.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+.rt-ctx-item:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.tg-gap-blk {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: var(--r-ctrl);
+  border: 1px dashed color-mix(in srgb, var(--muted) 38%, transparent);
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, border-color var(--dur-fast) ease;
+}
+.tg-gap-blk:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.tg-gap-ms {
+  font-size: 0.72rem;
+  color: var(--muted);
+  pointer-events: none;
+  user-select: none;
+}
+.tg-gap-blk:hover .tg-gap-ms {
+  color: var(--accent);
+}
+.gap-edge-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 7px;
+  cursor: ew-resize;
+}
+.gap-edge-handle::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 3px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background var(--dur-fast) ease;
+}
+.tg-gap-blk:hover .gap-edge-handle::after,
+.gap-edge-handle:hover::after {
+  background: var(--accent);
+}
+.rt-gap-hint {
+  margin: 0;
+  font-size: 0.8rem;
 }
 </style>

@@ -108,12 +108,15 @@ export function writeRecordedVoqsSpan(
     syllableId?: string;
   },
 ): PhonationAnchor | undefined {
-  const s0 = Math.max(0, Math.min(durationSmp, Math.round(Math.min(startSmp, endSmp))));
+  if (!Number.isFinite(durationSmp) || durationSmp <= 0) return undefined;
+  const s0 = Math.max(0, Math.min(Math.max(0, durationSmp - 1), Math.round(Math.min(startSmp, endSmp))));
   const s1 = Math.max(s0 + 1, Math.min(durationSmp, Math.round(Math.max(startSmp, endSmp))));
   const currentAnchors = store.phonationAnchors.value;
 
-  // Determine what phonation was active right before `s0` so we can restore it cleanly at `s1`
+  // Record prior phonation at `s0` for history metadata, and sample active state at `s1` for restoration
+  // so downstream transitions swallowed inside `[s0, s1)` are accurately resumed at `s1`.
   const priorActive = activePhonationAnchorAt(currentAnchors, Math.max(0, s0 - 1));
+  const afterActive = activePhonationAnchorAt(currentAnchors, s1);
   const beforeLabel = priorActive ? voqsLane(priorActive) : 'V';
 
   const startAnchor = buildAnchorFromProfile(profile, take, s0, {
@@ -129,13 +132,13 @@ export function writeRecordedVoqsSpan(
 
   if (s1 < durationSmp && !hasExactEndAnchor) {
     const modalProfile = voqsProfile('V');
-    const restoreAnchor: PhonationAnchor = priorActive
+    const restoreAnchor: PhonationAnchor = afterActive
       ? {
-          ...priorActive,
+          ...afterActive,
           id: `pa_${crypto.randomUUID()}`,
           t_smp: s1,
-          glottis: priorActive.glottis ? { ...priorActive.glottis } : { ...PHONATION_M27_ANCHORS.modal },
-          voqs: priorActive.voqs ? { ...priorActive.voqs } : undefined,
+          glottis: afterActive.glottis ? { ...afterActive.glottis } : { ...PHONATION_M27_ANCHORS.modal },
+          voqs: afterActive.voqs ? { ...afterActive.voqs } : undefined,
         }
       : modalProfile && modalProfile.takes[0]
         ? buildAnchorFromProfile(modalProfile, modalProfile.takes[0], s1)

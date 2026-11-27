@@ -216,6 +216,15 @@ def predict_tract_area_cm2(tract17_norm: np.ndarray) -> np.ndarray:
 # 2. IPA2Tract-Lite (ONNX)
 # ---------------------------------------------------------------------------
 
+def active_ipa2tract_cond_dim() -> int:
+    """Return the active `IPA2Tract-Lite` ONNX `cond` channel width (111 for legacy 22d, 121 for v4 32d)."""
+    sess, _ = LOCAL_MODEL_MANAGER.require_session("IPA2Tract-Lite", device="cpu")
+    shape = sess.get_inputs()[0].shape
+    if len(shape) >= 3 and isinstance(shape[2], int) and shape[2] in (111, 121):
+        return int(shape[2])
+    return 111
+
+
 def predict_ipa2tract(
     cond_111: np.ndarray,
     x_base_26: np.ndarray,
@@ -323,8 +332,8 @@ def _get_ptb_neural_module():
 def extract_swift_f0_50hz(
     wav_16k: np.ndarray,
     *,
-    fmin: float = 40.0,
-    fmax: float = 600.0,
+    fmin: float = 46.875,
+    fmax: float = 2093.75,
     num_frames: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Extract 50 Hz aligned F0 (Hz) and voiced mask using hot-pluggable `SwiftF0` ONNX."""
@@ -846,6 +855,22 @@ def _blind_decode_en_island(
     return syllables, phones
 
 
+_JOINT_ALIGN_OUT_NAMES: Tuple[str, ...] = (
+    "zh_syl_ctc_logits",
+    "phone_frame_logits",
+    "phone_ctc_logits",
+    "boundary_logits",
+    "speech_mask_logit",
+    "tone_logits",
+    "lang_logits",
+)
+
+
+def _vox2tract_has_joint_align(sess: Any) -> bool:
+    out_names = {o.name for o in sess.get_outputs()}
+    return all(name in out_names for name in _JOINT_ALIGN_OUT_NAMES)
+
+
 def run_vox2tract_chunk(
     wav_chunk_16k: np.ndarray,
     f0_norm_chunk: np.ndarray,
@@ -865,6 +890,27 @@ def run_vox2tract_chunk(
         {"mel_feats": mel_feats, "vq_cues": vq_cues, "f0_norm": np.ascontiguousarray(f0_in)},
     )
     return tr17, pr1, gl8, h_bb, mel_feats, actual
+
+
+def _run_vox2tract_joint_chunk(
+    wav_chunk_16k: np.ndarray,
+    f0_norm_chunk: np.ndarray,
+    *,
+    device: str = "cpu",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Tuple[np.ndarray, ...], np.ndarray, str]:
+    """Run unified `Vox2TractAlign` ONNX in a single pass, returning tract outputs + 7 alignment tensors."""
+    power = ofr.compute_stft_power_50hz(wav_chunk_16k)
+    mel_feats = ofr.extract_pure_logmel_50hz(wav_chunk_16k, power=power)
+    vq_cues = ofr.extract_vq_cues_50hz(wav_chunk_16k, power=power)
+    f0_in = np.asarray(f0_norm_chunk, dtype=np.float32)
+    if f0_in.ndim == 1:
+        f0_in = f0_in[None, :]
+    sess, actual = LOCAL_MODEL_MANAGER.require_session("Vox2Tract-Lite", device=device)
+    outs = sess.run(
+        ["tract17", "pr1", "glot8", "h_backbone", *_JOINT_ALIGN_OUT_NAMES],
+        {"mel_feats": mel_feats, "vq_cues": vq_cues, "f0_norm": np.ascontiguousarray(f0_in)},
+    )
+    return outs[0], outs[1], outs[2], outs[3], tuple(outs[4:]), mel_feats, actual
 
 
 def _pack_m27_norm(tr17: np.ndarray, f0_norm: np.ndarray, pr1: np.ndarray, gl8: np.ndarray) -> np.ndarray:
@@ -1012,27 +1058,47 @@ def analyze_waveform_onnx(
 
     # Ensure required models are enabled up-front before running work
     vt_sess, actual_dev = LOCAL_MODEL_MANAGER.require_session("Vox2Tract-Lite", device=device)
+    joint_align = _vox2tract_has_joint_align(vt_sess)
     del vt_sess
     need_align = alignment_mode != "none" or apply_silence_mask
+    has_custom_aligner = (
+        LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2")
+        and LOCAL_MODEL_MANAGER.slot_status("Vox2Align-Lite v2").get("source") == "external"
+    )
+    use_joint_align = (
+        joint_align
+        and not has_custom_aligner
+        and (
+            alignment_mode in ("guided", "blind")
+            or (need_align and LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2"))
+        )
+    )
     v2_sess = None
-    if need_align:
-        if alignment_mode == "guided" or LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2"):
+    if need_align and not use_joint_align:
+        if (alignment_mode == "guided" and not joint_align) or LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2"):
             v2_sess, _ = LOCAL_MODEL_MANAGER.require_session("Vox2Align-Lite v2", device=device)
 
-    f0_hz, vm_f0 = extract_swift_f0_50hz(w, fmin=40.0, fmax=600.0, num_frames=n_f)
+    f0_hz, vm_f0 = extract_swift_f0_50hz(w, fmin=46.875, fmax=2093.75, num_frames=n_f)
     f0_norm = normalize_f0_m27(f0_hz)
     f0_align_norm = normalize_f0_m27(np.clip(f0_hz, 55.0, 550.0))
 
     t_net = time.perf_counter()
     cached_full_mel: Optional[np.ndarray] = None
+    joint_align_outputs: Optional[Tuple[np.ndarray, ...]] = None
     if n_f <= 240:
-        tr17, pr1, gl8, h_bb, cached_full_mel, actual_dev = run_vox2tract_chunk(w, f0_norm, device=device)
+        if use_joint_align:
+            tr17, pr1, gl8, h_bb, joint_align_outputs, cached_full_mel, actual_dev = _run_vox2tract_joint_chunk(
+                w, f0_norm, device=device
+            )
+        else:
+            tr17, pr1, gl8, h_bb, cached_full_mel, actual_dev = run_vox2tract_chunk(w, f0_norm, device=device)
         m27_norm = _pack_m27_norm(tr17, f0_norm[None, :], pr1, gl8)
         m27_norm_for_v2 = _pack_m27_norm(tr17, f0_align_norm[None, :], pr1, gl8)
     else:
         chunks = ofr.plan_silence_chunks(w, sr=ofr.SAMPLE_RATE_16K, max_chunk_sec=4.8, min_chunk_sec=1.6, target_chunk_sec=3.8)
         ctx_f = 20
         h_parts, m_parts, mv2_parts = [], [], []
+        j_parts: List[List[np.ndarray]] = [[] for _ in range(len(_JOINT_ALIGN_OUT_NAMES))]
         for ch in chunks:
             f0_i = int(ch["start_16k"]) // ofr.HOP_SAMPLES_16K
             f1_i = int(ch["end_16k"]) // ofr.HOP_SAMPLES_16K
@@ -1040,22 +1106,43 @@ def analyze_waveform_onnx(
                 continue
             cf0 = max(0, f0_i - ctx_f)
             cf1 = min(n_f, f1_i + ctx_f)
-            tr_c, pr_c, gl_c, h_c, _, actual_dev = run_vox2tract_chunk(
-                w[cf0 * ofr.HOP_SAMPLES_16K : cf1 * ofr.HOP_SAMPLES_16K],
-                f0_norm[cf0:cf1],
-                device=device,
-            )
+            if use_joint_align:
+                tr_c, pr_c, gl_c, h_c, j_c, _, actual_dev = _run_vox2tract_joint_chunk(
+                    w[cf0 * ofr.HOP_SAMPLES_16K : cf1 * ofr.HOP_SAMPLES_16K],
+                    f0_norm[cf0:cf1],
+                    device=device,
+                )
+            else:
+                tr_c, pr_c, gl_c, h_c, _, actual_dev = run_vox2tract_chunk(
+                    w[cf0 * ofr.HOP_SAMPLES_16K : cf1 * ofr.HOP_SAMPLES_16K],
+                    f0_norm[cf0:cf1],
+                    device=device,
+                )
+                j_c = None
             s_off = f0_i - cf0
             s_end = s_off + (f1_i - f0_i)
             h_parts.append(h_c[:, s_off:s_end])
             m_parts.append(_pack_m27_norm(tr_c[:, s_off:s_end], f0_norm[None, f0_i:f1_i], pr_c[:, s_off:s_end], gl_c[:, s_off:s_end]))
             mv2_parts.append(_pack_m27_norm(tr_c[:, s_off:s_end], f0_align_norm[None, f0_i:f1_i], pr_c[:, s_off:s_end], gl_c[:, s_off:s_end]))
+            if j_c is not None:
+                for ji, arr_j in enumerate(j_c):
+                    j_parts[ji].append(arr_j[:, s_off:s_end])
         h_bb = np.concatenate(h_parts, axis=1)
         m27_norm = np.concatenate(m_parts, axis=1)
         m27_norm_for_v2 = np.concatenate(mv2_parts, axis=1)
+        if use_joint_align and j_parts[0]:
+            joint_align_outputs = tuple(np.concatenate(parts, axis=1) for parts in j_parts)
     t_vt = time.perf_counter()
 
-    if v2_sess is not None:
+    if joint_align_outputs is not None:
+        syl_lp = _log_softmax(joint_align_outputs[0][0], axis=-1)
+        frame_lp = _log_softmax(joint_align_outputs[1][0], axis=-1)
+        ctc_lp = _log_softmax(joint_align_outputs[2][0], axis=-1)
+        bnd_p = _sigmoid(joint_align_outputs[3][0])
+        sp_p = _sigmoid(joint_align_outputs[4][0])
+        tone_p = _softmax(joint_align_outputs[5][0], axis=-1)
+        lang_p = _softmax(joint_align_outputs[6][0], axis=-1)
+    elif v2_sess is not None:
         v2_out_names = [
             "zh_syl_ctc_logits", "phone_frame_logits", "phone_ctc_logits",
             "boundary_logits", "speech_mask_logit", "tone_logits", "lang_logits",
@@ -1136,7 +1223,7 @@ def analyze_waveform_onnx(
 
     text_clean = unicodedata.normalize("NFKC", text or "").replace("’", "'").strip()
     mode = alignment_mode or ("guided" if text_clean else "blind")
-    if v2_sess is None:
+    if v2_sess is None and joint_align_outputs is None:
         mode = "none"
     alignment_error = _validate_guided_text(text_clean) if mode == "guided" else None
     align_score = 0.0
@@ -1259,12 +1346,19 @@ def analyze_waveform_onnx(
     tg_str = _export_praat_textgrid(
         total_sec, syllables, phones, speech_spans=sp_spans, english_word_spans=english_word_spans
     ) if mode != "none" else ""
-    v2_file = LOCAL_MODEL_MANAGER.active_path("Vox2Align-Lite v2").name
+    if joint_align_outputs is not None:
+        v2_file = LOCAL_MODEL_MANAGER.active_path("Vox2Tract-Lite").name
+        align_ver = "joint-v4" if "v4" in v2_file.lower() else "joint-v3"
+        align_step = 10000 if align_ver == "joint-v4" else 35000
+    else:
+        v2_file = LOCAL_MODEL_MANAGER.active_path("Vox2Align-Lite v2").name
+        align_ver = "v2"
+        align_step = 20000
     return {
         "ok": True,
         "mode": mode,
         "alignment_error": alignment_error,
-        "model_meta": {"version": "v2", "step": 20000, "file": v2_file, "runtime": "onnx"},
+        "model_meta": {"version": align_ver, "step": align_step, "file": v2_file, "runtime": "onnx"},
         "total_sec": round(total_sec, 3),
         "n_frames": n_f,
         "vt_ms": round((t_vt - t_net) * 1000.0, 1),
@@ -1323,9 +1417,9 @@ _ZH_DIPHTHONG_MERGE = {
 
 
 def _semitone_rel_to_hz(st: np.ndarray, base_hz: float) -> np.ndarray:
-    safe_base = max(40.0, float(base_hz))
+    safe_base = max(1e-3, float(base_hz))
     st_c = np.clip(np.asarray(st, dtype=np.float64), -14.0, 16.0)
-    return np.clip(safe_base * (2.0 ** (st_c / 12.0)), 50.0, 550.0).astype(np.float32)
+    return np.maximum(safe_base * (2.0 ** (st_c / 12.0)), 1e-3).astype(np.float32)
 
 
 def _extract_punct_by_syllable(text: str, n_syls: int) -> Tuple[List[int], int]:
@@ -1364,11 +1458,13 @@ def predict_prosody_timeline_onnx(
 ) -> Dict[str, Any]:
     """Pure-ONNX equivalent of `ProsodyPredictor.predict_timeline`."""
     ensure_pure_numpy_imports()
-    from kf_ipa_synth.phonetics import ipa_to_phon_features, is_ipa_voiced
+    from kf_ipa_synth.phonetics import ipa_to_phon_features, ipa_to_phon_features_32, is_ipa_voiced
     from kf_ipa_synth.text2ipa import convert_text_to_timeline
 
     t0 = time.perf_counter()
     sess, _ = LOCAL_MODEL_MANAGER.require_session("Text2Prosody-Lite", device="cpu")
+    pf_shape = sess.get_inputs()[0].shape
+    phon_feat_dim = int(pf_shape[2]) if (len(pf_shape) >= 3 and isinstance(pf_shape[2], int) and pf_shape[2] in (22, 32)) else 22
     tl_rule = convert_text_to_timeline(text, lang=lang, bpm=108.0, base_f0=float(base_f0), tone_sandhi=tone_sandhi)
     kfs_rule: List[Dict[str, Any]] = [dict(k) for k in tl_rule.get("keyframes", [])]
     syls: List[Dict[str, Any]] = tl_rule.get("syllables", [])
@@ -1448,7 +1544,7 @@ def predict_prosody_timeline_onnx(
         for k, sid in enumerate(grp):
             syl_phrase_pos[sid] = float(k) / float(denom) if len(grp) > 1 else 1.0
 
-    phon_feat = np.zeros((1, n_phones, 22), dtype=np.float32)
+    phon_feat = np.zeros((1, n_phones, phon_feat_dim), dtype=np.float32)
     pos_struct = np.zeros((1, n_phones, 10), dtype=np.float32)
     lang_arr = np.zeros((1, n_phones), dtype=np.int64)
     tone_arr = np.zeros((1, n_phones), dtype=np.int64)
@@ -1468,7 +1564,7 @@ def predict_prosody_timeline_onnx(
         is_syl_end = li == s_lps[-1]
         brk_minor = 1.0 if (is_syl_end and p_code >= _PUNCT_COMMA) else 0.0
         brk_major = 1.0 if (is_syl_end and p_code in (_PUNCT_PERIOD, _PUNCT_QUESTION, _PUNCT_EXCLAIM)) else 0.0
-        phon_feat[0, li] = ipa_to_phon_features(lp["ipa"])
+        phon_feat[0, li] = ipa_to_phon_features_32(lp["ipa"]) if phon_feat_dim == 32 else ipa_to_phon_features(lp["ipa"])
         pos_struct[0, li] = np.array(
             [0.0, 1.0 if lp["is_vowel"] else 0.0, p_pos, sw_pos, syl_phrase_pos.get(sid, u_pos), u_pos, log_utt_syls, log_w, brk_minor, brk_major],
             dtype=np.float32,

@@ -85,19 +85,22 @@ class VoqsCreakTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reconstruction('test-mixed', self.manager, 'JD2')
 
-    def test_public_native_control_floor_cannot_be_lowered_in_a_payload(self):
+    def test_vtl_native_control_floor_is_40hz_and_rejects_below_hardware_bound(self):
         with self.manager.lease('JD2') as engine:
             carrier = engine.preset('@').tolist()
         payload = {
             'speaker': 'JD2', 'step_hz': 50, 'f0_hz': [40] * 8, 'pressure_pa': [800] * 8,
             'tract_frames': [carrier] * 8, 'include_geometry': False, 'voqs_reference': True,
         }
-        rejected = self.manager.synthesize_dense(payload)
-        self.assertEqual(rejected['error']['allowed']['min'], 60)
+        self.assertTrue(self.manager.synthesize_dense(payload)['ok'])
         self.assertTrue(self.manager.synthesize_dense(payload, voqs_reference=True)['ok'])
         payload['f0_hz'][0] = 39
-        rejected = self.manager.synthesize_dense(payload, voqs_reference=True)
+        rejected = self.manager.synthesize_dense(payload)
+        self.assertFalse(rejected['ok'])
         self.assertEqual(rejected['error']['allowed']['min'], 40)
+        rejected_voqs = self.manager.synthesize_dense(payload, voqs_reference=True)
+        self.assertFalse(rejected_voqs['ok'])
+        self.assertEqual(rejected_voqs['error']['allowed']['min'], 40)
 
 
 if __name__ == '__main__':

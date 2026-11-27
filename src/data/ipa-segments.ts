@@ -1,5 +1,4 @@
 import {
-  F0_LIMIT_HZ,
   SAMPLE_RATE_HZ,
   hzToSt,
   stToHz,
@@ -10,7 +9,7 @@ import {
 } from '@vocalcut/core';
 
 /** Unicode spelling is preserved on the annotation. Normalization is only for lookup. */
-const suffix = /[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒]/u;
+const suffix = /[\p{M}ʰʱʷᵝʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒]/u;
 const boundary = /[\s.·|‖#‿ꜛꜜ↑↓↗↘ˈˌ/\[\]()˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹0-9]/u;
 const ties = new Set(['͡', '͜']);
 const DOTTED_CIRCLE = '\u25cc';
@@ -35,7 +34,7 @@ const trialReferenceConsonants = new Set([
  */
 export function stripDottedCirclePlaceholders(raw: string): string {
   return raw.replace(
-    /(?<=[^\s.·|‖#‿ꜛꜜ↑↓↗↘ˈˌ/\[\]()\u25cc])\u25cc(?=[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒])/gu,
+    /(?<=[^\s.·|‖#‿ꜛꜜ↑↓↗↘ˈˌ/\[\]()\u25cc])\u25cc(?=[\p{M}ʰʱʷᵝʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒])/gu,
     '',
   );
 }
@@ -219,7 +218,7 @@ export type PhoneReleaseMode = 'oral' | 'unreleased' | 'nasal' | 'lateral';
 
 export function phoneTraits(raw: string) {
   const text = normalizedPhone(raw);
-  const base = text.replace(/[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒\u25cc]/gu, '');
+  const base = text.replace(/[\p{M}ʰʱʷᵝʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒\u25cc]/gu, '');
   const first = Array.from(base)[0] ?? '';
   let lengthScale = 1.0;
   if (raw.includes('ː')) lengthScale *= 1.65;
@@ -558,14 +557,11 @@ export function writtenToneLevels(raw: string, allowAsciiDigits = false): string
   return parseIpaSuprasegmentals(raw, { allowAsciiDigits }).effectiveTone;
 }
 
-/** Convert Chao 1..5 tone level into semitone offset relative to `fRefHz`, clamped safely within `[60, 600] Hz`. */
-export function chaoLevelToSemitone(level: number, fRefHz = 165, extraOffsetSt = 0): number {
+/** Convert Chao 1..5 tone level into semitone offset relative to `fRefHz`. */
+export function chaoLevelToSemitone(level: number, _fRefHz = 165, extraOffsetSt = 0): number {
   const clampedLevel = Math.max(1, Math.min(5, level));
   // 5-level log-F0 scale: 1 -> -5.0 st, 2 -> -2.5 st, 3 -> 0.0 st, 4 -> +2.5 st, 5 -> +5.0 st
-  const rawSt = (clampedLevel - 3) * 2.5 + extraOffsetSt;
-  const minSt = hzToSt(F0_LIMIT_HZ.min + 4, fRefHz);
-  const maxSt = hzToSt(F0_LIMIT_HZ.max - 10, fRefHz);
-  return Math.max(minSt, Math.min(maxSt, rawSt));
+  return (clampedLevel - 3) * 2.5 + extraOffsetSt;
 }
 
 /**
@@ -599,9 +595,7 @@ export function buildSyllableQtaTargets(
 
   if (digits.length === 0) {
     // Intonational stress/neutral pitch target (e.g. English stressed vs unstressed syllable)
-    const minSt = hzToSt(F0_LIMIT_HZ.min + 4, fRefHz);
-    const maxSt = hzToSt(F0_LIMIT_HZ.max - 10, fRefHz);
-    const bEnd = Math.max(minSt, Math.min(maxSt, (options.stress === 0 ? -1.0 : 0) + baseShiftSt));
+    const bEnd = (options.stress === 0 ? -1.0 : 0) + baseShiftSt;
     const mSlope = options.stress === 1 ? -4.5 : 0;
     return [
       {
@@ -647,12 +641,8 @@ export function buildSyllableQtaTargets(
     const stStart = chaoLevelToSemitone(digits[0], fRefHz, baseShiftSt);
     const stEnd = chaoLevelToSemitone(digits[1], fRefHz, baseShiftSt);
     const slope = Math.max(-95, Math.min(95, (stEnd - stStart) / durSec));
-    // Verify start Hz stays in [60, 600]
-    const safeSlope =
-      stToHz(stEnd - slope * durSec, fRefHz) < F0_LIMIT_HZ.min + 2 ||
-      stToHz(stEnd - slope * durSec, fRefHz) > F0_LIMIT_HZ.max - 5
-        ? 0
-        : slope;
+    const startHz = stToHz(stEnd - slope * durSec, fRefHz);
+    const safeSlope = Number.isFinite(startHz) && startHz > 0 ? slope : 0;
     return [
       {
         id: `${sylId}_t0`,

@@ -1,98 +1,52 @@
-<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, watchEffect } from 'vue';
-import { publishPanelSnapshot } from '@/data/panel-snapshots';
-import { SAMPLE_RATE_HZ, type TextGridDocument } from '@vocalcut/core';
-import CustomSelect from '@/components/common/CustomSelect.vue';
-import IconSvg from '@/components/common/IconSvg.vue';
-import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
-import SplitPane from '@/components/common/SplitPane.vue';
-import { clipFromTextGrid, readTextGridFile } from '@/data/textgrid-alignment';
-import { synthesisGainMode, voiceRenderLabels, type VoiceRenderMode } from '@/data/voice-renderer';
-import { sendWorkspaceAudio, takeWorkspaceAudio, type AudioDestination } from '@/data/workspace-transfer';
-import { useWorkbenchStore } from '@/stores/workbench';
-import { fetchOnboardingAudioFile, ONBOARDING_AUDIO_SLOTS } from '@/data/onboarding-samples';
-import { M27CurveEditor, type MorphKnot } from '@/vendor/m27-voice-morph/curve-editor.js';
-import MixerAlignPanel from './MixerAlignPanel.vue';
-import MixerAudioInput from './MixerAudioInput.vue';
-import MixerAudioPlayer from './MixerAudioPlayer.vue';
-import MixerIntervalCompare from './MixerIntervalCompare.vue';
-import MixerPrepModal, { type PrepSaveSlotResult, type PrepSlotId } from './MixerPrepModal.vue';
-import MixerPresetHoverCard, { type HoverAnchorRect } from './MixerPresetHoverCard.vue';
-import { buildSegmentPlateauKnots, countAnnotatedSegments, extractIntervalTiers } from './mixer-prep-utils';
-import { MixerSpectrogramCache } from './mixer-spectrogram';
-import {
-  TIMING_PROSODY_GROUP,
-  curveSparklinePath,
-  formatSemitoneShift,
-  getDisabledMixerPresetNotice,
-  isCurveEngaged,
-  isMixerPresetDisabled,
-  mixerAnchors,
-  mixerDeviceLabel,
-  mixerRequest,
-  normalizeMixerPreset,
-  parsePresetTitle,
-  parseTextGridContent,
-  type MixerAudio,
-  type MixerDevice,
-  type MixerGroup,
-  type MixerMeta,
-  type MixerPreset,
-  type MixerRender,
-  type MixerSynth,
+<script lang="ts">
+import { ref as persistedRef, shallowRef as persistedShallowRef } from 'vue';
+import type { TextGridDocument } from '@vocalcut/core';
+import type { MorphKnot } from '@/vendor/m27-voice-morph/curve-editor.js';
+import type {
+  DiplophoniaMode,
+  MixerAudio,
+  MixerDevice,
+  MixerMeta,
+  MixerRender,
+  MixerSynth,
 } from './voice-mixer';
 
 type Mode = 'preset' | 'dual';
 type InputId = 'preset' | 'a' | 'b';
 type AlignMode = 'dtw' | 'transcript' | 'textgrid';
 type BgMode = 'waveform' | 'spectrogram';
+type MixerOutputEntry = {
+  url: string;
+  blob: Blob;
+  baselineBlob: Blob | null;
+  baselineUrl: string | null;
+  result: MixerRender;
+};
 
-const store = useWorkbenchStore();
-const controller = new AbortController();
-const spectrogramCache = new MixerSpectrogramCache();
-
-const mode = ref<Mode>('preset');
-const meta = shallowRef<MixerMeta>();
-const metaBusy = ref(false);
-const metaError = ref('');
-
-const railWidth = ref(384);
-const audio = shallowRef<Record<InputId, MixerAudio | null>>({ preset: null, a: null, b: null });
-const inputBusy = ref<Record<InputId, boolean>>({ preset: false, a: false, b: false });
-const alignBusy = ref(false);
-const presetInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
-const dualAInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
-const dualBInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
-
-// Alignment, TextGrid & Prep Modal state
-const presetTranscript = ref('');
-const dualTranscript = ref('');
-const dualTranscriptB = ref('');
-const presetGrid = shallowRef<TextGridDocument | null>(null);
-const grids = shallowRef<Partial<Record<'a' | 'b', { name: string; grid: TextGridDocument }>>>({});
-const gridInputs: Partial<Record<'a' | 'b', HTMLInputElement>> = {};
-const gridPasteOpen = ref(false);
-const gridPasteText = ref<Record<'a' | 'b', string>>({ a: '', b: '' });
-const gridBusy = ref(false);
-const gridError = ref('');
-const align = ref<AlignMode>('dtw');
-const prepOpen = ref(false);
-const prepTarget = ref<PrepSlotId>('preset');
-const curveAlignTierIdx = ref(0);
-
-// Preset & Organ-Group state
-const presetId = ref('breathy');
-const newLabel = ref('');
-const deletingPresetId = ref('');
-const enabled = ref<string[]>(['glottis']);
-const drawing = ref('glottis');
-const deltaGroups = ref<string[]>(['tongue_jaw', 'larynx']);
-
-const defaultRamp = (): MorphKnot[] => [{ t: 0, v: 0 }, { t: 1, v: 0.85 }];
+const defaultFull = (): MorphKnot[] => [{ t: 0, v: 1 }, { t: 1, v: 1 }];
 const zeroCurve = (): MorphKnot[] => [{ t: 0, v: 0 }, { t: 1, v: 0 }];
-const curves = ref<Record<string, MorphKnot[]>>({
-  preset: defaultRamp(),
-  glottis: [{ t: 0, v: 0 }, { t: 1, v: 0.9 }],
+
+// Module-scoped session state so switching away from 发声调音台 and back preserves all audio, curves, alignments & renders.
+const persistedMode = persistedRef<Mode>('preset');
+const persistedMeta = persistedShallowRef<MixerMeta>();
+const persistedRailWidth = persistedRef(384);
+const persistedAudio = persistedShallowRef<Record<InputId, MixerAudio | null>>({ preset: null, a: null, b: null });
+const persistedPresetTranscript = persistedRef('');
+const persistedDualTranscript = persistedRef('');
+const persistedDualTranscriptB = persistedRef('');
+const persistedPresetGrid = persistedShallowRef<TextGridDocument | null>(null);
+const persistedGrids = persistedShallowRef<Partial<Record<'a' | 'b', { name: string; grid: TextGridDocument }>>>({});
+const persistedGridPasteOpen = persistedRef(false);
+const persistedGridPasteText = persistedRef<Record<'a' | 'b', string>>({ a: '', b: '' });
+const persistedAlign = persistedRef<AlignMode>('dtw');
+const persistedCurveAlignTierIdx = persistedRef(0);
+const persistedPresetId = persistedRef('breathy');
+const persistedEnabled = persistedRef<string[]>(['glottis']);
+const persistedDrawing = persistedRef('glottis');
+const persistedDeltaGroups = persistedRef<string[]>(['tongue_jaw', 'larynx']);
+const persistedCurves = persistedRef<Record<string, MorphKnot[]>>({
+  preset: defaultFull(),
+  glottis: defaultFull(),
   f0_pr: zeroCurve(),
   timing: zeroCurve(),
   tract_all: zeroCurve(),
@@ -102,22 +56,132 @@ const curves = ref<Record<string, MorphKnot[]>>({
   tongue_jaw: zeroCurve(),
   speaker: zeroCurve(),
 });
-
-const settings = ref({
-  preset: { interpolation: 'smoothstep' as 'smoothstep' | 'linear', smoothMs: 25, gate: true, f0: false },
+const persistedSettings = persistedRef({
+  preset: {
+    interpolation: 'smoothstep' as 'smoothstep' | 'linear',
+    smoothMs: 25,
+    gate: true,
+    f0: false,
+    creakIrregularity: 30,
+    diplophoniaMode: 'parallel' as DiplophoniaMode,
+    diplophoniaRatio: 0.73,
+  },
   dual: { interpolation: 'smoothstep' as 'smoothstep' | 'linear', smoothMs: 25, gate: true, f0: false },
 });
+const persistedShift = persistedRef<string>('');
+const persistedBgMode = persistedRef<BgMode>('waveform');
+const persistedSynth = persistedRef<MixerSynth>('neural');
+const persistedDevice = persistedRef<MixerDevice>('cpu');
+const persistedStatusNote = persistedRef('');
+const persistedOutputs = persistedShallowRef<Partial<Record<Mode, MixerOutputEntry>>>({});
+const persistedRawOrigins = persistedShallowRef<Partial<Record<InputId, Blob>>>({});
+const persistedTransferredBaselines = persistedShallowRef<Partial<Record<InputId, Blob>>>({});
+const persistedLocalBaselineCache = new Map<string, Blob>();
+const persistedCompareExpanded = persistedRef(false);
+const persistedAbActiveSlot = persistedRef<'orig' | 'recon' | 'out'>('out');
+const persistedDualActiveSlot = persistedRef<'a' | 'b' | 'out'>('out');
+let persistedF0SyncedOnce = false;
+</script>
+
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, watchEffect } from 'vue';
+import { publishPanelSnapshot } from '@/data/panel-snapshots';
+import { SAMPLE_RATE_HZ } from '@vocalcut/core';
+import CompactSlider from '@/components/common/CompactSlider.vue';
+import CustomSelect from '@/components/common/CustomSelect.vue';
+import IconSvg from '@/components/common/IconSvg.vue';
+import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
+import SplitPane from '@/components/common/SplitPane.vue';
+import { clipFromTextGrid, readTextGridFile } from '@/data/textgrid-alignment';
+import { synthesisGainMode, voiceRenderLabels, type VoiceRenderMode } from '@/data/voice-renderer';
+import { sendWorkspaceAudio, takeWorkspaceAudio, type AudioDestination } from '@/data/workspace-transfer';
+import { useWorkbenchStore } from '@/stores/workbench';
+import { fetchOnboardingAudioFile, ONBOARDING_AUDIO_SLOTS } from '@/data/onboarding-samples';
+import { M27CurveEditor } from '@/vendor/m27-voice-morph/curve-editor.js';
+import MixerAlignPanel from './MixerAlignPanel.vue';
+import MixerAudioInput from './MixerAudioInput.vue';
+import MixerAudioPlayer from './MixerAudioPlayer.vue';
+import MixerIntervalCompare from './MixerIntervalCompare.vue';
+import MixerPrepModal, { type PrepSaveSlotResult, type PrepSlotId } from './MixerPrepModal.vue';
+import MixerPresetHoverCard, { type HoverAnchorRect } from './MixerPresetHoverCard.vue';
+import { buildSegmentPlateauKnots, countAnnotatedSegments, extractIntervalTiers } from './mixer-prep-utils';
+import { MixerSpectrogramCache } from './mixer-spectrogram';
+import {
+  DIPLOPHONIA_MODE_OPTIONS,
+  TIMING_PROSODY_GROUP,
+  curveSparklinePath,
+  formatSemitoneShift,
+  getDisabledMixerPresetNotice,
+  isCreakyMixerPreset,
+  isCurveEngaged,
+  isDiplophoniaMixerPreset,
+  isMixerPresetDisabled,
+  isMixerPresetExperimental,
+  mixerAnchors,
+  mixerDeviceLabel,
+  mixerRequest,
+  normalizeMixerPreset,
+  parsePresetTitle,
+  parseTextGridContent,
+  type MixerGroup,
+  type MixerPreset,
+} from './voice-mixer';
+
+const store = useWorkbenchStore();
+const controller = new AbortController();
+const spectrogramCache = new MixerSpectrogramCache();
+
+const mode = persistedMode;
+const meta = persistedMeta;
+const metaBusy = ref(false);
+const metaError = ref('');
+
+const railWidth = persistedRailWidth;
+const audio = persistedAudio;
+const inputBusy = ref<Record<InputId, boolean>>({ preset: false, a: false, b: false });
+const alignBusy = ref(false);
+const presetInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
+const dualAInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
+const dualBInputRef = ref<InstanceType<typeof MixerAudioInput> | null>(null);
+
+// Alignment, TextGrid & Prep Modal state
+const presetTranscript = persistedPresetTranscript;
+const dualTranscript = persistedDualTranscript;
+const dualTranscriptB = persistedDualTranscriptB;
+const presetGrid = persistedPresetGrid;
+const grids = persistedGrids;
+const gridInputs: Partial<Record<'a' | 'b', HTMLInputElement>> = {};
+const gridPasteOpen = persistedGridPasteOpen;
+const gridPasteText = persistedGridPasteText;
+const gridBusy = ref(false);
+const gridError = ref('');
+const align = persistedAlign;
+const prepOpen = ref(false);
+const prepTarget = ref<PrepSlotId>('preset');
+const curveAlignTierIdx = persistedCurveAlignTierIdx;
+
+// Preset & Organ-Group state
+const presetId = persistedPresetId;
+const newLabel = ref('');
+const deletingPresetId = ref('');
+const enabled = persistedEnabled;
+const drawing = persistedDrawing;
+const deltaGroups = persistedDeltaGroups;
+
+const curves = persistedCurves;
+
+const settings = persistedSettings;
 const setup = computed(() => settings.value[mode.value]);
-const shift = ref<string>('');
+const shift = persistedShift;
 const shiftError = ref('');
-const bgMode = ref<BgMode>('waveform');
+const bgMode = persistedBgMode;
 const spectrogramBusy = ref(false);
 const currentSpectrogram = shallowRef<HTMLCanvasElement | null>(null);
 let specSeq = 0;
 
 // Default to Neural (Tract2Vox-Lite) on local ONNX CPU.
-const synth = ref<MixerSynth>('neural');
-const device = ref<MixerDevice>('cpu');
+const synth = persistedSynth;
+const device = persistedDevice;
 const synthOptions = computed(() =>
   (meta.value?.synthesizers ?? []).map((item) => ({
     value: item.id,
@@ -127,25 +191,12 @@ const synthOptions = computed(() =>
 
 const working = ref<'render' | 'preset' | null>(null);
 const error = ref('');
-const statusNote = ref('');
-const outputs = shallowRef<
-  Partial<
-    Record<
-      Mode,
-      {
-        url: string;
-        blob: Blob;
-        baselineBlob: Blob | null;
-        baselineUrl: string | null;
-        result: MixerRender;
-      }
-    >
-  >
->({});
+const statusNote = persistedStatusNote;
+const outputs = persistedOutputs;
 const output = computed(() => outputs.value[mode.value]);
-const rawOrigins = shallowRef<Partial<Record<InputId, Blob>>>({});
-const transferredBaselines = shallowRef<Partial<Record<InputId, Blob>>>({});
-const localBaselineCache = new Map<string, Blob>();
+const rawOrigins = persistedRawOrigins;
+const transferredBaselines = persistedTransferredBaselines;
+const localBaselineCache = persistedLocalBaselineCache;
 
 // Curve editor & knot precision editing state
 const canvas = ref<HTMLCanvasElement>();
@@ -153,7 +204,21 @@ const selected = ref(0);
 const nodeTime = ref('0.00');
 const nodeWeight = ref('0');
 const nodeError = ref('');
+const canUndoCurve = ref(false);
+const canRedoCurve = ref(false);
+const demoBusy = ref(false);
+const compareExpanded = persistedCompareExpanded;
+const compareDrawerRef = ref<HTMLElement | null>(null);
 let editor: M27CurveEditor | undefined;
+
+function toggleCompareExpanded() {
+  compareExpanded.value = !compareExpanded.value;
+  if (compareExpanded.value) {
+    void nextTick(() => {
+      compareDrawerRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }
+}
 
 // Comparison audio player refs for synchronized A/B/Baseline audition
 const cmpOrigRef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
@@ -162,8 +227,8 @@ const cmpOutPresetRef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
 const cmpARef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
 const cmpBRef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
 const cmpOutDualRef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
-const abActiveSlot = ref<'orig' | 'recon' | 'out'>('out');
-const dualActiveSlot = ref<'a' | 'b' | 'out'>('out');
+const abActiveSlot = persistedAbActiveSlot;
+const dualActiveSlot = persistedDualActiveSlot;
 
 const interpolationOptions = [
   { value: 'smoothstep', label: '平滑过渡 (Smoothstep)' },
@@ -175,32 +240,48 @@ const alignOptions = [
   { value: 'textgrid', label: 'TextGrid 边界锚点对齐（MFA / Praat）' },
 ];
 const presetShapes = [
-  { id: 'ramp_up', label: '渐强 0→90%' },
-  { id: 'ramp_down', label: '渐弱 90→0%' },
+  { id: 'ramp_up', label: '渐强 0→100%' },
+  { id: 'ramp_down', label: '渐弱 100→0%' },
   { id: 'arch', label: '中段凸起' },
   { id: 'tail', label: '句尾过渡' },
-  { id: 'const80', label: '全段 80%' },
+  { id: 'const100', label: '全段 100%' },
   { id: 'zero', label: '归零' },
 ];
 const dualShapes = [
   { id: 'ramp_up', label: '渐进变身 A→B' },
   { id: 'ramp_down', label: '渐进回退 B→A' },
-  { id: 'const80', label: '全局 80%' },
+  { id: 'const100', label: '全局 100%' },
   { id: 'arch', label: '中段替换' },
   { id: 'zero', label: '清零本轨' },
 ];
 
 const activeShapes = computed(() => (mode.value === 'preset' ? presetShapes : dualShapes));
 const allPresets = computed(() => (meta.value?.presets ?? []).map(normalizeMixerPreset));
+const availablePresets = computed(() =>
+  allPresets.value.filter((item) => !isMixerPresetDisabled(item) && !isMixerPresetExperimental(item)),
+);
+const experimentalPresets = computed(() =>
+  allPresets.value.filter((item) => !isMixerPresetDisabled(item) && isMixerPresetExperimental(item)),
+);
+const disabledPresets = computed(() => allPresets.value.filter((item) => isMixerPresetDisabled(item)));
 const preset = computed(() => allPresets.value.find((item) => item.id === presetId.value));
+const isExperimentalSelected = computed(() => isMixerPresetExperimental(preset.value));
 const f0Recommendation = computed(() => preset.value?.f0_target_hz
   ? `目标约 ${preset.value.f0_target_hz} Hz`
   : formatSemitoneShift(preset.value?.f0_shift_semitones ?? 0),
 );
+const f0ShiftPlaceholder = computed(() =>
+  preset.value?.f0_target_hz
+    ? `默认 ~${preset.value.f0_target_hz} Hz`
+    : `默认 ${formatSemitoneShift(preset.value?.f0_shift_semitones ?? 0)}`,
+);
 const f0ControlHint = computed(() => {
   if (mode.value === 'dual') return '开启后随着声门或音色曲线把 A 的音域移向 B。';
   if (preset.value?.f0_target_hz) {
-    return `假声高权重带声段的目标音域约为 ${preset.value.f0_target_hz} Hz，升幅随曲线权重变化。手填半音偏移可覆盖自动值。`;
+    if (preset.value.f0_target_hz < 100) {
+      return `高权重带声段会自动压低至约 ${preset.value.f0_target_hz} Hz（男女声通用），幅度随曲线变化；手填半音偏移可覆盖自动值。`;
+    }
+    return `高权重带声段会自动抬升至至少 ${preset.value.f0_target_hz} Hz，若原声本就偏高（如女声 200–360 Hz）会自动按说话人音域继续上移；手填半音偏移可覆盖自动值。`;
   }
   return '开启后基频随调制权重变化，可手填半音偏移。';
 });
@@ -231,12 +312,22 @@ const renderBaseline = computed(() => {
 const comparisonBaseline = computed(() => renderBaseline.value ?? transferredBaselines.value[baseSlot.value] ?? null);
 const baseDuration = computed(() => base.value?.analysis?.dur_sec ?? base.value?.duration ?? 3);
 const activeCurve = computed(() => (mode.value === 'preset' ? 'preset' : drawing.value));
-const nodes = computed(() => curves.value[activeCurve.value] ?? defaultRamp());
+const nodes = computed(() => curves.value[activeCurve.value] ?? defaultFull());
 const appliedCurve = computed(() => output.value?.result.applied_curves[activeCurve.value]);
 const activeGroup = computed(() => dualGroups.value.find((group) => group.id === drawing.value));
 const activeEnabled = computed(() =>
   enabled.value.filter((id) => (id !== 'speaker' || synth.value === 'neural') && isCurveEngaged(curves.value[id])),
 );
+const ghostCurves = computed(() => {
+  if (mode.value !== 'dual') return [];
+  return activeEnabled.value
+    .filter((id) => id !== drawing.value)
+    .map((id) => ({
+      id,
+      label: dualGroups.value.find((g) => g.id === id)?.label ?? id,
+      knots: curves.value[id] ?? [],
+    }));
+});
 const timingEnabled = computed(() => activeEnabled.value.includes('timing'));
 const busyInput = computed(() =>
   mode.value === 'preset'
@@ -268,8 +359,6 @@ const dualBStatusBadge = computed(() => {
   }
   return audio.value.a?.analysis ? { text: 'DTW 就绪', tone: 'good' as const } : { text: '待对齐', tone: 'warn' as const };
 });
-
-const smoothFillPercent = computed(() => `${((setup.value.smoothMs / 80) * 100).toFixed(1)}%`);
 
 const activeAlignTiers = computed(() => extractIntervalTiers(mode.value === 'preset' ? presetGrid.value : grids.value.a?.grid));
 const activeAlignIntervals = computed(() => {
@@ -376,10 +465,15 @@ async function loadMetadata() {
     if (!next.synthesizers.some((item) => item.id === synth.value)) {
       synth.value = next.synthesizers[0]?.id ?? 'physical';
     }
+    let presetReset = false;
     if (!preset.value || isMixerPresetDisabled(preset.value)) {
       presetId.value = getFirstAvailablePresetId(next.presets.map(normalizeMixerPreset));
+      presetReset = true;
     }
-    syncPresetF0Coupling(presetId.value);
+    if (!persistedF0SyncedOnce || presetReset) {
+      syncPresetF0Coupling(presetId.value);
+      persistedF0SyncedOnce = true;
+    }
   } catch (cause) {
     if (!controller.signal.aborted) metaError.value = cause instanceof Error ? cause.message : '本地引擎未连接';
   } finally {
@@ -387,10 +481,39 @@ async function loadMetadata() {
   }
 }
 
+const diplophoniaDefaultRatio = computed(() => {
+  const opt = DIPLOPHONIA_MODE_OPTIONS.find((item) => item.id === settings.value.preset.diplophoniaMode);
+  return opt?.defaultRatio ?? preset.value?.default_diplophonia_ratio ?? 0.73;
+});
+
+function selectDiplophoniaMode(nextMode: DiplophoniaMode) {
+  if (working.value) return;
+  settings.value.preset.diplophoniaMode = nextMode;
+  const opt = DIPLOPHONIA_MODE_OPTIONS.find((item) => item.id === nextMode);
+  if (opt) settings.value.preset.diplophoniaRatio = opt.defaultRatio;
+  clearOutput('preset');
+}
+
 function syncPresetF0Coupling(nextId: string) {
   const item = allPresets.value.find((p) => p.id === nextId);
   if (!item) return;
   settings.value.preset.f0 = Boolean(item.default_f0_coupling);
+  if (typeof item.default_creak_irregularity === 'number' && Number.isFinite(item.default_creak_irregularity)) {
+    settings.value.preset.creakIrregularity = Math.round(
+      Math.max(0, Math.min(1, item.default_creak_irregularity)) * 100,
+    );
+  } else if (isCreakyMixerPreset(item)) {
+    settings.value.preset.creakIrregularity = 30;
+  }
+  if (isDiplophoniaMixerPreset(item)) {
+    const validMode = DIPLOPHONIA_MODE_OPTIONS.some((m) => m.id === settings.value.preset.diplophoniaMode);
+    if (!validMode) {
+      settings.value.preset.diplophoniaMode = item.default_diplophonia_mode ?? 'parallel';
+    }
+    if (!Number.isFinite(settings.value.preset.diplophoniaRatio)) {
+      settings.value.preset.diplophoniaRatio = item.default_diplophonia_ratio ?? 0.73;
+    }
+  }
   shift.value = '';
   shiftError.value = '';
 }
@@ -398,6 +521,15 @@ function syncPresetF0Coupling(nextId: string) {
 watch(presetId, (nextId) => {
   syncPresetF0Coupling(nextId);
 });
+
+watch(
+  () => store.engineStatus.value,
+  (status) => {
+    if (status === 'python-vtl' && !meta.value && !metaBusy.value) {
+      void loadMetadata();
+    }
+  },
+);
 
 function setAudio(id: InputId, next: MixerAudio) {
   const previous = audio.value[id];
@@ -409,6 +541,9 @@ function setAudio(id: InputId, next: MixerAudio) {
     transferredBaselines.value = { ...transferredBaselines.value, [id]: undefined };
   }
   audio.value = { ...audio.value, [id]: next };
+  if (next.analysis && !meta.value && !metaBusy.value) {
+    void loadMetadata();
+  }
 }
 
 function swapSpeakers() {
@@ -416,8 +551,15 @@ function swapSpeakers() {
   const oldA = audio.value.a;
   const oldB = audio.value.b;
   if (!oldA && !oldB) return;
+  pauseAllPlayers();
   audio.value = { ...audio.value, a: oldB, b: oldA };
   grids.value = { a: grids.value.b, b: grids.value.a };
+  rawOrigins.value = { ...rawOrigins.value, a: rawOrigins.value.b, b: rawOrigins.value.a };
+  transferredBaselines.value = {
+    ...transferredBaselines.value,
+    a: transferredBaselines.value.b,
+    b: transferredBaselines.value.a,
+  };
   const oldTA = dualTranscript.value;
   dualTranscript.value = dualTranscriptB.value;
   dualTranscriptB.value = oldTA;
@@ -434,6 +576,7 @@ function openPrepModal(target: PrepSlotId) {
 async function handlePrepSave(slots: Partial<Record<PrepSlotId, PrepSaveSlotResult>>) {
   prepOpen.value = false;
   const notes: string[] = [];
+  let hadAnalyzeFailure = false;
   const applySlot = async (slotId: PrepSlotId, res: PrepSaveSlotResult | undefined) => {
     if (!res) return;
     if (slotId === 'preset') presetTranscript.value = res.transcript;
@@ -442,7 +585,11 @@ async function handlePrepSave(slots: Partial<Record<PrepSlotId, PrepSaveSlotResu
 
     const inputRef = slotId === 'preset' ? presetInputRef.value : slotId === 'a' ? dualAInputRef.value : dualBInputRef.value;
     if (res.audioChanged && res.file && inputRef) {
-      await inputRef.loadExternalBlob(res.file, res.name);
+      const ok = await inputRef.loadExternalBlob(res.file, res.name);
+      if (!ok) {
+        hadAnalyzeFailure = true;
+        return;
+      }
       notes.push(`${slotId === 'preset' ? '原声' : `说话人 ${slotId.toUpperCase()}`}已应用裁剪`);
     }
     if (slotId === 'preset') {
@@ -468,7 +615,11 @@ async function handlePrepSave(slots: Partial<Record<PrepSlotId, PrepSaveSlotResu
       notes.push(`已匹配 ${matchedAnchorCount.value} 个对齐锚点`);
     }
   }
-  if (notes.length) statusNote.value = `裁剪与标注已保存：${notes.join(' · ')}`;
+  if (hadAnalyzeFailure) {
+    error.value = '裁剪后的音频重新反演失败，请检查本地引擎状态后重试。';
+  } else if (notes.length) {
+    statusNote.value = `裁剪与标注已保存：${notes.join(' · ')}`;
+  }
 }
 
 function applySegmentSculpt(iv: { xmin: number; xmax: number; text: string }, event: MouseEvent) {
@@ -522,6 +673,7 @@ function onAlignedDual(payload: { a: TextGridDocument; b: TextGridDocument }) {
     a: { name: 'Vox2Align-Lite v2 · A', grid: payload.a },
     b: { name: 'Vox2Align-Lite v2 · B', grid: payload.b },
   };
+  dualTranscriptB.value = dualTranscript.value;
   align.value = 'transcript';
   gridError.value = '';
   statusNote.value = '已完成双轨原文对齐，可直接按精确音素边界合成';
@@ -616,6 +768,7 @@ function refreshPlot() {
     bgMode: bgMode.value,
     spectrogramCanvas: currentSpectrogram.value,
     alignIntervals: activeAlignIntervals.value,
+    ghostCurves: ghostCurves.value,
   });
 }
 
@@ -649,10 +802,16 @@ watch(
   canvas,
   (element) => {
     editor?.destroy();
+    canUndoCurve.value = false;
+    canRedoCurve.value = false;
     editor = element
       ? new M27CurveEditor(element, {
           onSelect: syncSelection,
           onChange: handleCurveChange,
+          onHistoryChange: ({ canUndo, canRedo }) => {
+            canUndoCurve.value = canUndo;
+            canRedoCurve.value = canRedo;
+          },
         })
       : undefined;
     editor?.setKnots(nodes.value, true);
@@ -677,6 +836,7 @@ watch(
     bgMode,
     currentSpectrogram,
     activeAlignIntervals,
+    ghostCurves,
     store.resolvedColorMode,
     store.surfaceStyle,
     store.paletteId,
@@ -698,9 +858,9 @@ function toggleGroupEnabled(groupId: string) {
     enabled.value = enabled.value.filter((item) => item !== groupId);
   } else {
     if (!isCurveEngaged(curves.value[groupId])) {
-      const ramp: MorphKnot[] = [{ t: 0, v: 0 }, { t: 1, v: 0.85 }];
-      curves.value = { ...curves.value, [groupId]: ramp };
-      if (drawing.value === groupId) editor?.setKnots(ramp, true);
+      const full: MorphKnot[] = defaultFull();
+      curves.value = { ...curves.value, [groupId]: full };
+      if (drawing.value === groupId) editor?.setKnots(full, true);
     }
     if (!enabled.value.includes(groupId)) enabled.value = [...enabled.value, groupId];
   }
@@ -858,6 +1018,13 @@ async function render() {
             preset_id: presetId.value,
             knots: nodes.value,
             f0_shift_semitones: effectiveShift,
+            creak_irregularity: Number((settings.value.preset.creakIrregularity / 100).toFixed(2)),
+            ...(isDiplophoniaMixerPreset(preset.value)
+              ? {
+                  diplophonia_mode: settings.value.preset.diplophoniaMode,
+                  diplophonia_ratio: Number(settings.value.preset.diplophoniaRatio.toFixed(2)),
+                }
+              : {}),
           }
         : {
             action: 'render_dual',
@@ -870,7 +1037,7 @@ async function render() {
                   source.value!.analysis!.dur_sec,
                 )
               : [],
-            curves: Object.fromEntries(activeEnabled.value.map((id) => [id, curves.value[id] ?? defaultRamp()])),
+            curves: Object.fromEntries(activeEnabled.value.map((id) => [id, curves.value[id] ?? defaultFull()])),
             delta_groups: deltaGroups.value.filter(
               (id) => id !== 'speaker' && id !== 'timing' && activeEnabled.value.includes(id),
             ),
@@ -928,6 +1095,39 @@ async function render() {
   }
 }
 
+type MixerPlayerKey = 'orig' | 'recon' | 'out' | 'a' | 'b' | 'dualOut' | 'inputA' | 'inputB';
+
+function getPlayerEntries(): Array<{ key: MixerPlayerKey; pause: () => void }> {
+  return [
+    { key: 'orig', pause: () => cmpOrigRef.value?.pause() },
+    { key: 'recon', pause: () => cmpReconPresetRef.value?.pause() },
+    { key: 'out', pause: () => cmpOutPresetRef.value?.pause() },
+    { key: 'a', pause: () => cmpARef.value?.pause() },
+    { key: 'b', pause: () => cmpBRef.value?.pause() },
+    { key: 'dualOut', pause: () => cmpOutDualRef.value?.pause() },
+    { key: 'inputA', pause: () => dualAInputRef.value?.pausePlayer() },
+    { key: 'inputB', pause: () => dualBInputRef.value?.pausePlayer() },
+  ];
+}
+
+function pauseAllPlayers(except?: MixerPlayerKey) {
+  for (const item of getPlayerEntries()) {
+    if (item.key !== except) item.pause();
+  }
+}
+
+function handlePlayerPlaying(key: MixerPlayerKey, active: boolean) {
+  if (!active) return;
+  pauseAllPlayers(key);
+  if (key === 'orig' || key === 'recon' || key === 'out') {
+    abActiveSlot.value = key;
+  } else if (key === 'a' || key === 'b') {
+    dualActiveSlot.value = key;
+  } else if (key === 'dualOut') {
+    dualActiveSlot.value = 'out';
+  }
+}
+
 function toggleComparePresetAB() {
   const players = [
     { key: 'orig' as const, ref: cmpOrigRef.value, ok: Boolean(audio.value.preset?.url) },
@@ -938,7 +1138,7 @@ function toggleComparePresetAB() {
   const activeIdx = players.findIndex((p) => p.ref!.isPlaying());
   const nextIdx = activeIdx >= 0 ? (activeIdx + 1) % players.length : players.length - 1;
   const t = activeIdx >= 0 ? players[activeIdx].ref!.getTime() : 0;
-  for (const p of players) p.ref!.pause();
+  pauseAllPlayers();
   abActiveSlot.value = players[nextIdx].key;
   void players[nextIdx].ref!.playAt(t);
 }
@@ -953,9 +1153,83 @@ function cycleCompareDual() {
   const activeIdx = players.findIndex((p) => p.ref!.isPlaying());
   const nextIdx = activeIdx >= 0 ? (activeIdx + 1) % players.length : players.length - 1;
   const t = activeIdx >= 0 ? players[activeIdx].ref!.getTime() : 0;
-  for (const p of players) p.ref!.pause();
+  pauseAllPlayers();
   dualActiveSlot.value = players[nextIdx].key;
   void players[nextIdx].ref!.playAt(t);
+}
+
+async function loadDemoSample(target: 'preset' | 'a' | 'b') {
+  if (demoBusy.value || working.value || busyInput.value) return;
+  demoBusy.value = true;
+  try {
+    const slot = target === 'b' ? ONBOARDING_AUDIO_SLOTS.zh_spk_b : ONBOARDING_AUDIO_SLOTS.zh_spk_a;
+    const res = await fetchOnboardingAudioFile(slot.relativeUrl, slot.filename, controller.signal);
+    if (controller.signal.aborted) return;
+    if (!res.ok) {
+      store.pushToast(
+        res.reason === 'missing'
+          ? `未找到内置示例音频（public/${slot.relativeUrl}），可直接拖入或上传本地 WAV/FLAC`
+          : '载入示例音频失败，可直接拖入或上传本地 WAV/FLAC',
+        'info',
+        3200,
+      );
+      return;
+    }
+    const inputRef = target === 'preset' ? presetInputRef.value : target === 'a' ? dualAInputRef.value : dualBInputRef.value;
+    const ok = await inputRef?.loadExternalBlob(res.file, slot.label);
+    if (!ok) return;
+    if (slot.transcript.trim()) {
+      if (target === 'preset') presetTranscript.value = slot.transcript;
+      else if (target === 'a') dualTranscript.value = slot.transcript;
+      else dualTranscriptB.value = slot.transcript;
+    }
+    statusNote.value = `已载入示例音频：${slot.label}`;
+  } finally {
+    demoBusy.value = false;
+  }
+}
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
+function handleWindowKeydown(ev: KeyboardEvent) {
+  if (store.researchTab.value !== 'mixer' || prepOpen.value || isEditableElement(ev.target)) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.code === 'Space' && !(ev.target instanceof HTMLButtonElement)) {
+    const candidates =
+      mode.value === 'preset'
+        ? [cmpOutPresetRef.value, cmpReconPresetRef.value, cmpOrigRef.value]
+        : [cmpOutDualRef.value, cmpARef.value, cmpBRef.value];
+    const playingRef = candidates.find((p) => p?.isPlaying());
+    if (playingRef) {
+      ev.preventDefault();
+      playingRef.pause();
+      return;
+    }
+    const preferred =
+      mode.value === 'preset'
+        ? (abActiveSlot.value === 'orig' ? cmpOrigRef.value : abActiveSlot.value === 'recon' ? cmpReconPresetRef.value : cmpOutPresetRef.value) ??
+          cmpOutPresetRef.value ??
+          cmpOrigRef.value
+        : (dualActiveSlot.value === 'a' ? cmpARef.value : dualActiveSlot.value === 'b' ? cmpBRef.value : cmpOutDualRef.value) ??
+          cmpOutDualRef.value ??
+          cmpARef.value;
+    if (preferred && ((mode.value === 'preset' && (output.value?.url || audio.value.preset?.url)) || (mode.value === 'dual' && (output.value?.url || audio.value.a?.url || audio.value.b?.url)))) {
+      ev.preventDefault();
+      void preferred.playAt(0);
+    }
+  } else if (ev.key.toLowerCase() === 'b') {
+    if (mode.value === 'preset' && audio.value.preset?.url && output.value?.url) {
+      ev.preventDefault();
+      toggleComparePresetAB();
+    } else if (mode.value === 'dual' && output.value?.url && (audio.value.a?.url || audio.value.b?.url)) {
+      ev.preventDefault();
+      cycleCompareDual();
+    }
+  }
 }
 
 const handoffBlob = computed(() => output.value?.blob ?? base.value?.file ?? null);
@@ -1023,7 +1297,12 @@ watch(
 onMounted(() => {
   void loadMetadata();
   consumeIncomingMixerAudio();
+  syncSelection(0, nodes.value[0] ?? null);
+  if (bgMode.value === 'spectrogram' && base.value?.file) {
+    void refreshSpectrogram();
+  }
   window.addEventListener('vocalcut:tour-action', handleMixerTourAction);
+  window.addEventListener('keydown', handleWindowKeydown);
 });
 
 let mixerTourAbort: AbortController | null = null;
@@ -1100,8 +1379,10 @@ watchEffect(() => {
     presetId: presetId.value,
     presetLabel: activePreset?.label ?? presetId.value,
     presetDesc: activePreset?.desc ?? '',
-    source9Phys: activePreset?.source9_phys ? [...activePreset.source9_phys] : undefined,
-    f0ShiftSt: outEntry?.result.f0_shift_st ?? (Number(shift.value) || activePreset?.f0_shift_semitones || 0),
+    source9Phys: activePreset?.source9_phys_pa ? [...activePreset.source9_phys_pa] : undefined,
+    f0ShiftSt:
+      outEntry?.result.f0_shift_st ??
+      (setup.value.f0 ? (Number(shift.value) || activePreset?.f0_shift_semitones || 0) : 0),
     interpolation: setup.value.interpolation,
     curves: curveCopy,
     enabledGroups: [...enabled.value],
@@ -1118,20 +1399,15 @@ watchEffect(() => {
 });
 
 onBeforeUnmount(() => {
+  pauseAllPlayers();
   window.removeEventListener('vocalcut:tour-action', handleMixerTourAction);
+  window.removeEventListener('keydown', handleWindowKeydown);
   mixerTourAbort?.abort();
   mixerTourAbort = null;
   controller.abort();
   spectrogramCache.destroy();
   editor?.destroy();
-  for (const key of ['preset', 'dual'] as const) {
-    const existing = outputs.value[key];
-    if (existing) {
-      URL.revokeObjectURL(existing.url);
-      if (existing.baselineUrl) URL.revokeObjectURL(existing.baselineUrl);
-    }
-  }
-  for (const entry of Object.values(audio.value)) if (entry) URL.revokeObjectURL(entry.url);
+  // Keep persisted audio & output Blob URLs alive across tab switches; they are revoked when replaced/cleared.
 });
 </script>
 
@@ -1205,13 +1481,17 @@ onBeforeUnmount(() => {
                 :disabled="!!working || alignBusy"
                 :show-prep-button="true"
                 :annotation-count="presetAnnotationCount"
+                :hide-player="true"
+                :show-demo-button="true"
+                :demo-busy="demoBusy"
                 @change="setAudio('preset', $event)"
                 @busy="inputBusy.preset = $event"
                 @playhead="handlePlayhead"
                 @open-prep="openPrepModal('preset')"
+                @load-demo="loadDemoSample('preset')"
               />
 
-              <details class="adv-box mx-align-details" :open="!!presetTranscript.trim() || !!presetGrid">
+              <details class="adv-box mx-align-details">
                 <summary>
                   <span>自动识别文本与原文对齐（可选）</span>
                   <span v-if="presetGrid" class="tree-tag">已对齐 {{ sculptableIntervals.length }} 段</span>
@@ -1235,94 +1515,197 @@ onBeforeUnmount(() => {
             <header class="p-head">
               <span>2 · 选择目标发声类型预设</span>
               <span class="muted mono mx-head-meta">
-                {{ customPresetCount ? `含 ${customPresetCount} 自定义 · 悬停查曲线` : '悬停查 8 维参数与 VoQS 曲线' }}
+                {{ customPresetCount ? `含 ${customPresetCount} 自定义 · 悬停看曲线` : '悬停查看 VoQS 曲线' }}
               </span>
             </header>
             <div class="p-body mx-preset-body">
-              <div v-if="meta" class="mx-preset-grid" role="radiogroup" aria-label="目标发声类型预设">
-                <div
-                  v-for="item in allPresets"
-                  :key="item.id"
-                  class="mx-preset-card"
-                  :class="{
-                    active: item.id === presetId && !isMixerPresetDisabled(item),
-                    disabled: !!working || isMixerPresetDisabled(item),
-                    unavailable: isMixerPresetDisabled(item),
-                  }"
-                  role="radio"
-                  tabindex="0"
-                  :aria-checked="item.id === presetId && !isMixerPresetDisabled(item)"
-                  :aria-disabled="!!working || isMixerPresetDisabled(item)"
-                  @click="selectPreset(item)"
-                  @mouseenter="showPresetHover(item, $event)"
-                  @mouseleave="clearPresetHover"
-                  @focus="showPresetHover(item, $event)"
-                  @blur="clearPresetHover"
-                  @keydown.enter.prevent="selectPreset(item)"
-                  @keydown.space.prevent="selectPreset(item)"
-                >
-                  <div class="mx-preset-top">
-                    <div class="mx-preset-names">
-                      <strong>{{ parsePresetTitle(item.label).zh }}</strong>
-                      <span v-if="parsePresetTitle(item.label).en" class="mx-preset-en">
-                        {{ parsePresetTitle(item.label).en }}
-                      </span>
-                    </div>
-                    <div class="mx-preset-badges">
-                      <span
-                        class="mx-f0-tag mono"
-                        :class="{
-                          custom: !item.builtin,
-                          'auto-f0': item.default_f0_coupling && !isMixerPresetDisabled(item),
-                          unavailable: isMixerPresetDisabled(item),
-                        }"
-                        :title="
-                          isMixerPresetDisabled(item)
-                            ? undefined
-                            : item.default_f0_coupling
-                              ? '切换到该预设时自动开启基频联动'
-                              : '可选 F0 联动参考偏移'
-                        "
-                      >
-                        {{
-                          getDisabledMixerPresetNotice(item)
-                            ? getDisabledMixerPresetNotice(item)?.badge
-                            : !item.builtin
-                              ? '自定义'
-                              : item.f0_target_hz
-                                ? `约 ${item.f0_target_hz} Hz`
+              <template v-if="meta">
+                <div class="mx-preset-grid" role="radiogroup" aria-label="目标发声类型预设">
+                  <div
+                    v-for="item in availablePresets"
+                    :key="item.id"
+                    class="mx-preset-card"
+                    :class="{
+                      active: item.id === presetId,
+                      disabled: !!working,
+                    }"
+                    role="radio"
+                    tabindex="0"
+                    :aria-checked="item.id === presetId"
+                    :aria-disabled="!!working"
+                    @click="selectPreset(item)"
+                    @mouseenter="showPresetHover(item, $event)"
+                    @mouseleave="clearPresetHover"
+                    @focus="showPresetHover(item, $event)"
+                    @blur="clearPresetHover"
+                    @keydown.enter.prevent="selectPreset(item)"
+                    @keydown.space.prevent="selectPreset(item)"
+                  >
+                    <div class="mx-preset-top">
+                      <div class="mx-preset-names">
+                        <strong>{{ parsePresetTitle(item.label).zh }}</strong>
+                        <span v-if="parsePresetTitle(item.label).en" class="mx-preset-en">
+                          {{ parsePresetTitle(item.label).en }}
+                        </span>
+                      </div>
+                      <div class="mx-preset-badges">
+                        <span
+                          class="mx-f0-tag mono"
+                          :class="{
+                            custom: !item.builtin,
+                            'auto-f0': item.default_f0_coupling,
+                            exp: Boolean(item.larynx_hy_delta_cm || isDiplophoniaMixerPreset(item)),
+                          }"
+                          :title="
+                            isDiplophoniaMixerPreset(item)
+                              ? '同声道双声源叠加，可在曲线下方切换耦合机制并调节频率比 f₂/f₁'
+                              : item.larynx_hy_delta_cm
+                                ? '随调制曲线同步施加喉位高度偏移'
                                 : item.default_f0_coupling
-                                  ? `${formatSemitoneShift(item.f0_shift_semitones)} 升调`
-                                  : formatSemitoneShift(item.f0_shift_semitones)
-                        }}
-                      </span>
-                      <button
-                        v-if="!item.builtin"
-                        type="button"
-                        class="mx-preset-del"
-                        title="删除自定义发声类型预设"
-                        aria-label="删除自定义预设"
-                        :disabled="!!working || deletingPresetId === item.id"
-                        @click.stop="removeCustomPreset(item.id)"
-                      >
-                        <IconSvg name="close" :size="10" />
-                      </button>
+                                  ? '切换到该预设时自动开启基频联动'
+                                  : '可选 F0 联动参考偏移'
+                          "
+                        >
+                          {{
+                            !item.builtin
+                              ? '自定义'
+                              : isDiplophoniaMixerPreset(item)
+                                ? `双频 ${(item.id === presetId ? settings.preset.diplophoniaRatio : (item.default_diplophonia_ratio ?? 0.73)).toFixed(2)}×`
+                                : item.larynx_hy_delta_cm
+                                  ? `HY ${item.larynx_hy_delta_cm > 0 ? '+' : ''}${item.larynx_hy_delta_cm.toFixed(1)}`
+                                  : item.f0_target_hz
+                                    ? `约 ${item.f0_target_hz} Hz`
+                                    : item.default_f0_coupling
+                                      ? `${formatSemitoneShift(item.f0_shift_semitones)} ${item.f0_shift_semitones < 0 ? '降调' : '升调'}`
+                                      : formatSemitoneShift(item.f0_shift_semitones)
+                          }}
+                        </span>
+                        <button
+                          v-if="!item.builtin"
+                          type="button"
+                          class="mx-preset-del"
+                          title="删除自定义发声类型预设"
+                          aria-label="删除自定义预设"
+                          :disabled="!!working || deletingPresetId === item.id"
+                          @click.stop="removeCustomPreset(item.id)"
+                        >
+                          <IconSvg name="close" :size="10" />
+                        </button>
+                      </div>
                     </div>
                   </div>
-                  <p class="mx-preset-desc">{{ item.desc }}</p>
                 </div>
+
+                <details
+                  v-if="experimentalPresets.length || disabledPresets.length"
+                  class="mx-unavailable-group"
+                  :open="isExperimentalSelected"
+                >
+                  <summary>
+                    <span>
+                      实验调校中（{{ experimentalPresets.length }} 项灰度试听{{ disabledPresets.length ? ` · ${disabledPresets.length} 项锁定` : '' }}）
+                    </span>
+                    <span v-if="isExperimentalSelected" class="tree-tag">当前已选</span>
+                  </summary>
+                  <div v-if="experimentalPresets.length" class="mx-exp-grid" role="radiogroup" aria-label="实验调校中发声类型预设">
+                    <div
+                      v-for="item in experimentalPresets"
+                      :key="item.id"
+                      class="mx-preset-card mx-exp-card"
+                      :class="{
+                        active: item.id === presetId,
+                        disabled: !!working,
+                      }"
+                      role="radio"
+                      tabindex="0"
+                      :aria-checked="item.id === presetId"
+                      :aria-disabled="!!working"
+                      @click="selectPreset(item)"
+                      @mouseenter="showPresetHover(item, $event)"
+                      @mouseleave="clearPresetHover"
+                      @focus="showPresetHover(item, $event)"
+                      @blur="clearPresetHover"
+                      @keydown.enter.prevent="selectPreset(item)"
+                      @keydown.space.prevent="selectPreset(item)"
+                    >
+                      <div class="mx-preset-top">
+                        <div class="mx-preset-names">
+                          <strong>{{ parsePresetTitle(item.label).zh }}</strong>
+                          <span v-if="parsePresetTitle(item.label).en" class="mx-preset-en">
+                            {{ parsePresetTitle(item.label).en }}
+                          </span>
+                        </div>
+                        <span
+                          class="mx-f0-tag mono"
+                          :class="{
+                            'auto-f0': item.default_f0_coupling,
+                            exp: !item.default_f0_coupling,
+                          }"
+                          :title="
+                            item.default_f0_coupling
+                              ? '切换到该预设时自动开启基频联动'
+                              : item.larynx_hy_delta_cm
+                                ? '随调制曲线同步施加喉位高度偏移'
+                                : '可选 F0 联动参考偏移'
+                          "
+                        >
+                          {{
+                            item.larynx_hy_delta_cm
+                              ? `HY ${item.larynx_hy_delta_cm > 0 ? '+' : ''}${item.larynx_hy_delta_cm.toFixed(1)}`
+                              : item.f0_target_hz
+                                ? `约 ${item.f0_target_hz} Hz`
+                                : formatSemitoneShift(item.f0_shift_semitones)
+                          }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="disabledPresets.length" class="mx-unavailable-list">
+                    <div
+                      v-for="item in disabledPresets"
+                      :key="item.id"
+                      class="mx-unavailable-chip"
+                      tabindex="0"
+                      aria-disabled="true"
+                      @mouseenter="showPresetHover(item, $event)"
+                      @mouseleave="clearPresetHover"
+                      @focus="showPresetHover(item, $event)"
+                      @blur="clearPresetHover"
+                    >
+                      <span>{{ parsePresetTitle(item.label).zh }}</span>
+                      <span class="mx-f0-tag unavailable mono">{{ getDisabledMixerPresetNotice(item)?.badge }}</span>
+                    </div>
+                  </div>
+                </details>
+              </template>
+              <div v-else class="mx-stack">
+                <p class="muted">连接本地引擎后即可载入内置及自定义发声类型预设。</p>
+                <button type="button" class="btn sm" :disabled="metaBusy" @click="loadMetadata">
+                  <IconSvg name="refresh" :size="12" />
+                  <span>{{ metaBusy ? '正在载入预设…' : '重新载入预设' }}</span>
+                </button>
               </div>
-              <p v-else class="muted">连接本地引擎后即可载入内置及自定义发声类型预设。</p>
 
               <form class="mx-extract-box" @submit.prevent="extractPreset">
-                <label class="mx-extract-label" for="mx-custom-preset">从当前录音提取为自定义发声类型</label>
+                <div class="mx-extract-head">
+                  <label
+                    class="mx-extract-label"
+                    for="mx-custom-preset"
+                    title="录一段自己的特殊发声（如气声、紧声或方言嗓音），提取其中间 40% 稳态帧的声门特征存成预设；之后换其他录音时点击该预设即可把这段嗓音套用过去"
+                  >
+                    <span>复刻当前录音为新预设</span>
+                    <IconSvg name="info" :size="12" />
+                  </label>
+                  <span class="mx-extract-hint mono">取中间 40% 稳态帧</span>
+                </div>
                 <div class="mx-extract-row">
                   <input
                     id="mx-custom-preset"
                     v-model="newLabel"
                     class="inp"
                     maxlength="40"
-                    placeholder="如：我的气声参考"
+                    placeholder="起个名称，如「我的气声」套用到别的录音"
+                    title="提取当前录音有效语音段中间 40% 稳态帧的 9 维声门参数中位数，保存为可复用的个人发声预设"
                     :disabled="!!working"
                   />
                   <button
@@ -1330,10 +1713,9 @@ onBeforeUnmount(() => {
                     class="btn sm"
                     :disabled="!audio.preset?.analysis || !newLabel.trim() || !meta || !!working || busyInput"
                   >
-                    {{ working === 'preset' ? '保存中…' : '保存预设' }}
+                    {{ working === 'preset' ? '保存中…' : '存为预设' }}
                   </button>
                 </div>
-                <p class="mx-help">默认取当前录音全部带声帧的声门参数中位数，保存后立即出现在上方列表并持久化。</p>
               </form>
             </div>
           </section>
@@ -1393,13 +1775,17 @@ onBeforeUnmount(() => {
                     </svg>
                     <button
                       type="button"
-                      class="mx-group-dot"
+                      role="switch"
+                      class="mx-track-switch"
                       :class="{ on: isGroupEngaged(group.id) }"
-                      :title="isGroupEngaged(group.id) ? '已启用混合曲线（点击静音/停用）' : '点击启用该混合轨'"
+                      :aria-checked="isGroupEngaged(group.id)"
+                      :title="isGroupEngaged(group.id) ? '已启用混合曲线（点击停用）' : '点击启用该混合轨'"
                       :aria-label="`${isGroupEngaged(group.id) ? '停用' : '启用'}${group.label}`"
                       :disabled="!!working || (group.id === 'speaker' && synth === 'physical')"
                       @click.stop="toggleGroupEnabled(group.id)"
-                    />
+                    >
+                      <span class="mx-track-thumb" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
                 <p class="mx-group-desc">
@@ -1545,10 +1931,14 @@ onBeforeUnmount(() => {
                 :disabled="!!working || inputBusy.b || gridBusy || alignBusy"
                 :show-prep-button="true"
                 :annotation-count="dualAAnnotationCount"
+                :show-demo-button="true"
+                :demo-busy="demoBusy"
                 @change="setAudio('a', $event)"
                 @busy="inputBusy.a = $event"
                 @playhead="handlePlayhead"
+                @playing="handlePlayerPlaying('inputA', $event)"
                 @open-prep="openPrepModal('a')"
+                @load-demo="loadDemoSample('a')"
               />
             </div>
           </article>
@@ -1579,9 +1969,13 @@ onBeforeUnmount(() => {
                 :disabled="!!working || inputBusy.a || gridBusy || alignBusy"
                 :show-prep-button="true"
                 :annotation-count="dualBAnnotationCount"
+                :show-demo-button="true"
+                :demo-busy="demoBusy"
                 @change="setAudio('b', $event)"
                 @busy="inputBusy.b = $event"
+                @playing="handlePlayerPlaying('inputB', $event)"
                 @open-prep="openPrepModal('b')"
+                @load-demo="loadDemoSample('b')"
               />
             </div>
           </article>
@@ -1604,7 +1998,8 @@ onBeforeUnmount(() => {
                 @mouseenter="showPresetHover(preset, $event)"
                 @mouseleave="clearPresetHover"
               >
-                当前预设：{{ parsePresetTitle(preset.label).zh }}（悬停看 8 维曲线）
+                <IconSvg name="info" :size="11" />
+                <span>当前：{{ parsePresetTitle(preset.label).zh }}</span>
               </span>
               <span v-else-if="mode === 'dual'" class="tree-tag">
                 已启用 {{ activeEnabled.length }} 条曲线
@@ -1654,6 +2049,27 @@ onBeforeUnmount(() => {
                 >
                   {{ shape.label }}
                 </button>
+                <span class="mx-toolbar-sep" aria-hidden="true" />
+                <button
+                  type="button"
+                  class="btn xs icon-only"
+                  title="撤销曲线修改 (Ctrl+Z)"
+                  aria-label="撤销曲线修改"
+                  :disabled="!canUndoCurve"
+                  @click="editor?.undo()"
+                >
+                  <IconSvg name="undo" :size="11" />
+                </button>
+                <button
+                  type="button"
+                  class="btn xs icon-only"
+                  title="重做曲线修改 (Ctrl+Y)"
+                  aria-label="重做曲线修改"
+                  :disabled="!canRedoCurve"
+                  @click="editor?.redo()"
+                >
+                  <IconSvg name="redo" :size="11" />
+                </button>
               </div>
 
               <label
@@ -1673,7 +2089,7 @@ onBeforeUnmount(() => {
               <span v-else class="mx-toolbar-sub">
                 {{
                   mode === 'preset'
-                    ? '0% 保留原发声类型 · 100% 目标预设（单击加点 · 拖拽调节 · 双击删点）'
+                    ? '0% 保留原发声 · 100% 目标预设（单击加点 · 拖拽调节 · 双击/右键删点）'
                     : `${activeGroup?.desc ?? ''}（0% = A，100% = B）`
                 }}
               </span>
@@ -1759,11 +2175,12 @@ onBeforeUnmount(() => {
                       {{ mode === 'dual' ? 'A 的静音/清音保护区' : '静音/清辅音保护区' }}
                     </span>
                     <span v-if="activeAlignIntervals.length" class="mx-lg align">对齐音素边界</span>
+                    <span v-if="ghostCurves.length" class="mx-lg ghost">其余已启用轨道 ({{ ghostCurves.length }})</span>
                   </div>
-                  <span class="mx-kbd-hint">聚焦画布后可用方向键 ↑↓←→ 精细微调（Shift 5×）</span>
+                  <span class="mx-kbd-hint">聚焦画布后可用方向键微调（Shift 5×）· Ctrl+Z 撤销</span>
                 </div>
 
-                <div class="mx-curve-controls" role="group" aria-label="曲线节点与调制设置">
+                <div class="mx-curve-controls" role="group" aria-label="曲线节点编辑">
                   <div class="mx-knot-bar">
                     <strong class="mx-knot-tag mono" :title="`选中点 #${selected + 1}`">#{{ selected + 1 }}</strong>
                     <label class="mx-knot-field">
@@ -1817,50 +2234,99 @@ onBeforeUnmount(() => {
                       #{{ idx + 1 }} {{ (node.t * baseDuration).toFixed(2) }}s / {{ Math.round(node.v * 100) }}%
                     </button>
                   </div>
+                </div>
 
-                  <div class="mx-acoustic-controls" role="group" aria-label="调制设置">
-                    <label
-                      class="mx-acoustic-toggle"
-                      :title="mode === 'preset'
-                        ? '保护静音与清辅音。耳语或清化使用语音活动门控。'
-                        : '保护说话人 A 的静音与清辅音。'"
-                    >
-                      <input v-model="setup.gate" type="checkbox" />
-                      <span>软门控</span>
-                    </label>
-                    <label for="mx-smooth-range" class="mx-smooth-control" title="对权重曲线做高斯平滑，减轻相位突变。">
-                      <span>平滑</span>
-                      <input
-                        id="mx-smooth-range"
-                        v-model.number="setup.smoothMs"
-                        type="range"
-                        min="0"
-                        max="80"
-                        step="5"
-                        :aria-valuetext="`${setup.smoothMs} ms`"
-                        :style="{ '--fill': smoothFillPercent }"
-                      />
-                      <output for="mx-smooth-range" class="mono mx-smooth-value">{{ setup.smoothMs }} ms</output>
-                    </label>
-                    <div class="mx-f0-control" :title="f0ControlHint">
-                      <label class="mx-acoustic-toggle">
-                        <input v-model="setup.f0" type="checkbox" />
-                        <span>F0 联动</span>
-                      </label>
-                      <template v-if="mode === 'preset'">
-                        <input
-                          v-model="shift"
-                          type="text"
-                          inputmode="decimal"
-                          class="inp mono mx-f0-inp"
-                          aria-label="半音偏移"
-                          :aria-invalid="!!shiftError"
-                          :disabled="!setup.f0"
-                          placeholder="半音 (st)"
-                        />
-                        <span v-if="!shift.trim()" class="mono muted">{{ f0Recommendation }}</span>
-                      </template>
+                <div class="mx-acoustic-row" data-tour="mixer-acoustic" role="group" aria-label="声学调制参数">
+                  <label
+                    class="mx-acoustic-toggle"
+                    :title="mode === 'preset'
+                      ? '保护静音与清辅音。耳语或清化使用语音活动门控。'
+                      : '保护说话人 A 的静音与清辅音。'"
+                  >
+                    <input v-model="setup.gate" type="checkbox" />
+                    <span>软门控</span>
+                  </label>
+                  <div class="mx-smooth-slider" title="对权重曲线做高斯平滑，减轻相位突变（双击重置 25 ms）">
+                    <CompactSlider
+                      v-model="setup.smoothMs"
+                      label="平滑"
+                      :min="0"
+                      :max="80"
+                      :step="5"
+                      :decimals="0"
+                      unit="ms"
+                      :default-value="25"
+                      :disabled="!!working"
+                    />
+                  </div>
+                  <div
+                    v-if="mode === 'preset' && isCreakyMixerPreset(preset)"
+                    class="mx-smooth-slider"
+                    title="调节脉冲/粗糙抖动的不规则度：0% 为规则周期脉冲，100% 为强不规则基频与振幅抖动（双击重置本预设默认值）"
+                  >
+                    <CompactSlider
+                      v-model="settings.preset.creakIrregularity"
+                      label="脉冲不规则"
+                      :min="0"
+                      :max="100"
+                      :step="5"
+                      :decimals="0"
+                      unit="%"
+                      :default-value="Math.round((preset?.default_creak_irregularity ?? 0.3) * 100)"
+                      :disabled="!!working"
+                    />
+                  </div>
+                  <template v-if="mode === 'preset' && isDiplophoniaMixerPreset(preset)">
+                    <div class="seg control-seg xs" role="radiogroup" aria-label="双音调耦合机制">
+                      <button
+                        v-for="opt in DIPLOPHONIA_MODE_OPTIONS"
+                        :key="opt.id"
+                        type="button"
+                        role="radio"
+                        :class="{ active: settings.preset.diplophoniaMode === opt.id }"
+                        :aria-checked="settings.preset.diplophoniaMode === opt.id"
+                        :title="opt.hint"
+                        :disabled="!!working"
+                        @click="selectDiplophoniaMode(opt.id)"
+                      >
+                        {{ opt.label }}
+                      </button>
                     </div>
+                    <div
+                      class="mx-smooth-slider"
+                      title="调节双声源振动频率比 f₂/f₁（避开 0.5 / 1.0 / 1.5 等整数倍双音调感更明显；双击重置当前机制默认值）"
+                    >
+                      <CompactSlider
+                        v-model="settings.preset.diplophoniaRatio"
+                        label="频率比 f₂/f₁"
+                        :min="0.4"
+                        :max="1.8"
+                        :step="0.01"
+                        :decimals="2"
+                        unit="×"
+                        :default-value="diplophoniaDefaultRatio"
+                        :disabled="!!working"
+                      />
+                    </div>
+                  </template>
+                  <div class="mx-f0-control" :title="f0ControlHint">
+                    <label class="mx-acoustic-toggle">
+                      <input v-model="setup.f0" type="checkbox" />
+                      <span>F0 联动</span>
+                    </label>
+                    <template v-if="mode === 'preset'">
+                      <input
+                        v-model="shift"
+                        type="text"
+                        inputmode="decimal"
+                        class="inp mono mx-f0-inp"
+                        aria-label="半音偏移"
+                        :aria-invalid="!!shiftError"
+                        :disabled="!setup.f0"
+                        :placeholder="f0ShiftPlaceholder"
+                      />
+                      <span v-if="setup.f0 && !shift.trim()" class="mono muted mx-f0-active-hint">{{ f0Recommendation }}</span>
+                    </template>
                   </div>
                 </div>
                 <p v-if="nodeError || (mode === 'preset' && shiftError)" class="mx-err-text" role="status">
@@ -1903,40 +2369,53 @@ onBeforeUnmount(() => {
         </section>
 
         <!-- Bottom Comparison, Export & Workspace Handoff Dock -->
-        <section class="panel mx-compare-panel">
+        <section class="panel mx-compare-panel" data-tour="mixer-compare">
           <header class="p-head">
             <div class="mx-curve-title-group">
               <span>{{ mode === 'preset' ? '4 · 试听对比与导出' : '三轨试听对比与导出' }}</span>
               <span v-if="output" class="metric-chip mono">
                 {{ output.result.label }} · {{ mixerDeviceLabel(output.result.device_effective) }}
                 <template v-if="typeof output.result.synth_ms === 'number'">
-                  · {{ output.result.synth_ms.toFixed(0) }} ms
+                  · {{ output.result.synth_ms.toFixed(0)}}{{ ' ms' }}
                 </template>
               </span>
             </div>
 
             <div class="mx-compare-head-actions">
               <button
+                v-if="base?.file && (comparisonBaseline || output?.blob)"
+                type="button"
+                class="btn xs"
+                :class="{ active: compareExpanded }"
+                :aria-expanded="compareExpanded"
+                title="展开或收起选区语谱图叠印、功率谱与 12 项发声声学参数对比"
+                @click="toggleCompareExpanded"
+              >
+                <IconSvg name="waveform" :size="11" />
+                <span>{{ compareExpanded ? '收起频谱对比' : '频谱与声学对比' }}</span>
+              </button>
+
+              <button
                 v-if="mode === 'preset'"
                 type="button"
                 class="btn xs"
                 :disabled="!audio.preset?.url || !output?.url"
-                title="在当前播放时刻无缝轮切试听原声、声道重建合成与发声调音结果"
+                title="在当前播放时刻无缝轮切试听原声、声道重建合成与发声调音结果（快捷键 B，空格播停）"
                 @click="toggleComparePresetAB"
               >
                 <IconSvg name="shuffle" :size="11" />
-                <span>{{ output?.baselineUrl ? '轮切 原声 / 重建 / 调音' : 'A/B 切换试听' }}</span>
+                <span>{{ output?.baselineUrl ? '轮切 原声 / 重建 / 调音 (B)' : 'A/B 切换试听 (B)' }}</span>
               </button>
               <button
                 v-else
                 type="button"
                 class="btn xs"
                 :disabled="!output?.url || (!audio.a?.url && !audio.b?.url)"
-                title="在当前播放时刻快速轮切说话人 A、B 与混合结果"
+                title="在当前播放时刻快速轮切说话人 A、B 与混合结果（快捷键 B，空格播停）"
                 @click="cycleCompareDual"
               >
                 <IconSvg name="shuffle" :size="11" />
-                <span>轮切 A / B / 混合</span>
+                <span>轮切 A / B / 混合 (B)</span>
               </button>
 
               <a
@@ -1964,6 +2443,7 @@ onBeforeUnmount(() => {
                   :peaks="audio.preset?.analysis?.waveform_peaks ?? []"
                   placeholder="载入原声后可在此对照试听"
                   @playhead="handlePlayhead"
+                  @playing="handlePlayerPlaying('orig', $event)"
                 />
               </div>
 
@@ -1980,6 +2460,7 @@ onBeforeUnmount(() => {
                   :duration-hint="audio.preset?.analysis?.dur_sec ?? audio.preset?.duration ?? 0"
                   placeholder="声道重建基线音频"
                   @playhead="handlePlayhead"
+                  @playing="handlePlayerPlaying('recon', $event)"
                 />
               </div>
 
@@ -1993,6 +2474,7 @@ onBeforeUnmount(() => {
                   :download-name="output ? handoffSourceName : ''"
                   placeholder="点击「生成时变调制音频」后试听与导出"
                   @playhead="handlePlayhead"
+                  @playing="handlePlayerPlaying('out', $event)"
                 />
               </div>
             </div>
@@ -2009,6 +2491,7 @@ onBeforeUnmount(() => {
                   :peaks="audio.a?.analysis?.waveform_peaks ?? []"
                   placeholder="尚未载入说话人 A"
                   @playhead="handlePlayhead"
+                  @playing="handlePlayerPlaying('a', $event)"
                 />
               </div>
 
@@ -2021,6 +2504,7 @@ onBeforeUnmount(() => {
                   :duration-hint="audio.b?.analysis?.dur_sec ?? audio.b?.duration ?? 0"
                   :peaks="audio.b?.analysis?.waveform_peaks ?? []"
                   placeholder="尚未载入说话人 B"
+                  @playing="handlePlayerPlaying('b', $event)"
                 />
               </div>
 
@@ -2034,31 +2518,59 @@ onBeforeUnmount(() => {
                   :download-name="output ? handoffSourceName : ''"
                   placeholder="点击「生成双人时变混合音频」后试听"
                   @playhead="handlePlayhead"
+                  @playing="handlePlayerPlaying('dualOut', $event)"
                 />
               </div>
             </div>
 
-            <!-- Selected-Interval Overlaid Spectrogram & Voice Quality Acoustic Comparison -->
-            <MixerIntervalCompare
-              v-if="base?.file && (comparisonBaseline || output?.blob)"
-              :raw-blob="rawOrigins[baseSlot] ?? base.file"
-              :reconstructed-blob="comparisonBaseline"
-              :after-blob="output?.blob ?? null"
-              :raw-label="mode === 'preset' ? '原声 (原始录音)' : '原声 (说话人 A 原始录音)'"
-              :reconstructed-label="renderBaseline ? `声道重建合成 (${voiceRenderLabels[synth]} · 0% 基线)` : '声道重建合成 (来自声道重建工作区)'"
-              :after-label="mode === 'preset' ? `发声调音后 (${parsePresetTitle(preset?.label ?? '调制结果').zh})` : '发声调音后 (A → B 混合)'"
-              :applied-curve="appliedCurve ?? []"
-              :voiced-gate="base.analysis?.voiced_gate ?? []"
-              :align-intervals="activeAlignIntervals"
-              :dark-mode="store.resolvedColorMode.value === 'dark'"
-            />
+            <!-- Collapsible Selected-Interval Overlaid Spectrogram & Voice Quality Acoustic Comparison -->
+            <div v-if="base?.file && (comparisonBaseline || output?.blob)" ref="compareDrawerRef" class="mx-compare-drawer">
+              <button
+                type="button"
+                class="btn mx-compare-toggle"
+                :class="{ active: compareExpanded }"
+                :aria-expanded="compareExpanded"
+                @click="toggleCompareExpanded"
+              >
+                <span class="mx-compare-icon" aria-hidden="true">
+                  <IconSvg name="waveform" :size="14" />
+                </span>
+                <span class="mx-compare-copy">
+                  <strong>选区语谱图叠印与 12 项发声声学参数对比</strong>
+                  <span class="mx-compare-sub">窄/宽带语谱图 · 谱差 ΔdB · H1−H2* / CPP / HNR / 谱倾斜 · 支持 CSV 导出</span>
+                </span>
+                <span class="mx-compare-cta">
+                  <span>{{ compareExpanded ? '收起频谱图' : '展开查看频谱图' }}</span>
+                  <IconSvg :name="compareExpanded ? 'chevron-up' : 'chevron-down'" :size="13" />
+                </span>
+              </button>
+              <MixerIntervalCompare
+                v-if="compareExpanded"
+                :raw-blob="rawOrigins[baseSlot] ?? base.file"
+                :reconstructed-blob="comparisonBaseline"
+                :after-blob="output?.blob ?? null"
+                :raw-label="mode === 'preset' ? '原声 (原始录音)' : '原声 (说话人 A 原始录音)'"
+                :reconstructed-label="renderBaseline ? `声道重建合成 (${voiceRenderLabels[synth]} · 0% 基线)` : '声道重建合成 (来自声道重建工作区)'"
+                :after-label="mode === 'preset' ? `发声调音后 (${parsePresetTitle(preset?.label ?? '调制结果').zh})` : '发声调音后 (A → B 混合)'"
+                :applied-curve="appliedCurve ?? []"
+                :voiced-gate="base.analysis?.voiced_gate ?? []"
+                :align-intervals="activeAlignIntervals"
+                :dark-mode="store.resolvedColorMode.value === 'dark'"
+              />
+            </div>
 
             <!-- Unified One-Click Workspace Handoff Strip -->
-            <div class="mx-handoff-strip">
+            <div class="mx-handoff-strip" data-tour="mixer-handoff">
               <div class="mx-handoff-title">
                 <strong>一键流转至工作区</strong>
-                <span class="muted">
-                  {{ output ? '当前发送：合成结果' : base ? '当前发送：当前原声' : '载入或生成音频后可流转' }}
+                <span class="muted" :class="{ 'mx-handoff-warn': !output && !!base }">
+                  {{
+                    output
+                      ? '当前发送：调音成品'
+                      : base
+                        ? '当前发送：未调制原声（点击上方「生成」后将发送调音成品）'
+                        : '载入或生成音频后可流转'
+                  }}
                 </span>
               </div>
               <div class="mx-handoff-btns">
@@ -2166,8 +2678,8 @@ onBeforeUnmount(() => {
 
 /* Left-rail Mode & Engine Card */
 .mx-ctrl-card {
-  padding: 8px 9px;
-  gap: 7px;
+  padding: 6px 8px;
+  gap: 5px;
   overflow: visible;
 }
 
@@ -2287,10 +2799,14 @@ onBeforeUnmount(() => {
   overflow: visible;
 }
 
+.mx-rail .mx-card > .p-body {
+  padding: 7px 9px;
+}
+
 .mx-stack {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .mx-help {
@@ -2330,29 +2846,29 @@ onBeforeUnmount(() => {
 }
 
 .mx-align-details-body {
-  margin-top: 7px;
-  padding-top: 7px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 64%, transparent);
 }
 
-/* Mode 1 Rich 2-Col Phonation Presets */
+/* Mode 1 Compact 2-Col Phonation Presets */
 .mx-preset-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .mx-preset-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  gap: 5px;
 }
 
 .mx-preset-card {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 7px 8px;
+  gap: 2px;
+  padding: 5px 7px;
   border-radius: var(--r-ctrl);
   border: var(--border-w, 1px) solid var(--ctrl-border, var(--panel-border));
   background: var(--ctrl-bg);
@@ -2393,27 +2909,98 @@ onBeforeUnmount(() => {
 
 .mx-preset-top {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
 }
 
 .mx-preset-names {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .mx-preset-names strong {
-  font-size: 0.94rem;
+  font-size: 0.86rem;
+  line-height: 1.2;
   color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mx-preset-en {
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+  line-height: 1.15;
   color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-unavailable-group {
+  border-radius: var(--r-ctrl);
+  border: 1px dashed color-mix(in srgb, var(--panel-border) 88%, transparent);
+  background: color-mix(in srgb, var(--app) 45%, transparent);
+  padding: 5px 7px;
+}
+
+.mx-unavailable-group summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.mx-exp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.mx-exp-card {
+  border-style: dashed;
+  padding: 4px 6px;
+}
+
+.mx-exp-card.active {
+  border-style: solid;
+}
+
+.mx-f0-tag.exp {
+  background: color-mix(in srgb, var(--violet) 16%, transparent);
+  color: var(--violet);
+}
+
+.mx-unavailable-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.mx-unavailable-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: var(--r-ctrl);
+  border: 1px dashed color-mix(in srgb, var(--muted) 42%, var(--panel-border));
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  color: var(--muted);
+  font-size: 0.78rem;
+  cursor: help;
 }
 
 .mx-preset-badges {
@@ -2426,7 +3013,7 @@ onBeforeUnmount(() => {
 .mx-f0-tag {
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 600;
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
@@ -2461,25 +3048,35 @@ onBeforeUnmount(() => {
   color: var(--danger);
 }
 
-.mx-preset-desc {
-  margin: 0;
-  font-size: 0.79rem;
-  line-height: 1.38;
-  color: var(--muted);
-}
-
 .mx-extract-box {
   margin-top: auto;
-  padding-top: 9px;
+  padding-top: 7px;
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 76%, transparent);
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+.mx-extract-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 6px;
 }
 
 .mx-extract-label {
-  font-size: 0.88rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.82rem;
   font-weight: 600;
+  cursor: help;
+}
+
+.mx-extract-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .mx-extract-row {
@@ -2575,21 +3172,43 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
-.mx-group-dot {
-  width: 11px;
-  height: 11px;
+.mx-track-switch {
+  position: relative;
+  width: 28px;
+  height: 16px;
   padding: 0;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--muted) 56%, transparent);
-  background: transparent;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--muted) 48%, var(--panel-border));
+  background: color-mix(in srgb, var(--app) 76%, var(--panel));
   cursor: pointer;
-  transition: background-color 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+  flex: none;
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
 
-.mx-group-dot.on {
+.mx-track-switch .mx-track-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--dur-fast) var(--ease-out-expo), background-color var(--dur-fast) ease;
+}
+
+.mx-track-switch.on {
   border-color: var(--success);
+  background: color-mix(in srgb, var(--success) 24%, var(--panel));
+}
+
+.mx-track-switch.on .mx-track-thumb {
+  transform: translateX(12px);
   background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 24%, transparent);
+}
+
+.mx-track-switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .mx-group-desc {
@@ -2722,6 +3341,13 @@ onBeforeUnmount(() => {
   gap: 5px;
 }
 
+.mx-toolbar-sep {
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--panel-border);
+}
+
 .mx-toolbar-label {
   font-size: 0.84rem;
   font-weight: 600;
@@ -2795,7 +3421,7 @@ onBeforeUnmount(() => {
   --vm-knot-fill: var(--panel);
   --vm-knot-stroke: var(--accent);
   --vm-knot-active: var(--warning);
-  --vm-tooltip-bg: var(--popover-bg, rgba(15, 23, 42, 0.92));
+  --vm-tooltip-bg: var(--popover-bg);
   --vm-tooltip-fg: var(--text);
   --vm-tooltip-border: var(--panel-border);
   --vm-playhead: var(--warning);
@@ -2803,6 +3429,7 @@ onBeforeUnmount(() => {
   --vm-align-strip-bg: color-mix(in srgb, var(--sidebar) 76%, transparent);
   --vm-align-bound: color-mix(in srgb, var(--teal) 44%, transparent);
   --vm-align-text: var(--text);
+  --vm-ghost-curve: color-mix(in srgb, var(--muted) 70%, var(--accent));
   width: 100%;
   height: 100%;
   display: block;
@@ -2877,6 +3504,7 @@ onBeforeUnmount(() => {
 .mx-lg.effective { --lg-c: var(--accent); }
 .mx-lg.gate { --lg-c: color-mix(in srgb, var(--danger) 42%, transparent); }
 .mx-lg.align { --lg-c: var(--teal); }
+.mx-lg.ghost { --lg-c: color-mix(in srgb, var(--muted) 70%, var(--accent)); }
 
 .mx-kbd-hint {
   font-size: 0.8rem;
@@ -2889,20 +3517,42 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 6px 1px 2px;
   min-width: 0;
-  overflow-x: auto;
   white-space: nowrap;
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 62%, transparent);
 }
 
+.mx-acoustic-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 6px 1px 1px;
+  font-size: 0.84rem;
+  border-top: 1px dashed color-mix(in srgb, var(--panel-border) 55%, transparent);
+}
+
 .mx-knot-bar,
-.mx-acoustic-controls,
 .mx-acoustic-toggle,
-.mx-smooth-control,
 .mx-f0-control {
   display: flex;
   flex: none;
   align-items: center;
   gap: 6px;
+}
+
+.mx-smooth-slider {
+  width: 162px;
+  flex: none;
+}
+
+.mx-smooth-slider :deep(.p-row) {
+  gap: 1px;
+  margin: 0;
+}
+
+.mx-smooth-slider :deep(.p-row-top) {
+  font-size: 0.78rem;
+  line-height: 1.15;
 }
 
 .mx-knot-tag {
@@ -2927,9 +3577,9 @@ onBeforeUnmount(() => {
 
 .mx-knot-pills {
   display: flex;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   gap: 5px;
-  min-width: min(12rem, 16vw);
+  min-width: 0;
   padding: 2px 1px;
   overflow-x: auto;
   scrollbar-width: thin;
@@ -2959,14 +3609,6 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.mx-acoustic-controls {
-  margin-inline-start: auto;
-  padding-inline-start: 10px;
-  border-inline-start: 1px solid var(--panel-border);
-  gap: 12px;
-  font-size: 0.84rem;
-}
-
 .mx-acoustic-toggle {
   cursor: pointer;
 }
@@ -2979,22 +3621,15 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.mx-smooth-control input {
-  inline-size: 72px;
-  margin: 0;
-}
-
-.mx-smooth-value {
-  min-inline-size: 4ch;
-  color: var(--accent);
-  font-weight: 600;
-}
-
 .mx-f0-inp {
-  width: 70px;
+  width: 114px;
   height: 22px;
   padding: 0 6px;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
+}
+
+.mx-f0-active-hint {
+  font-size: 0.8rem;
 }
 
 /* Action & Status Footer */
@@ -3143,7 +3778,111 @@ onBeforeUnmount(() => {
   color: var(--success);
 }
 
+.mx-compare-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mx-compare-toggle {
+  width: 100%;
+  height: auto;
+  min-height: 44px;
+  padding: 7px 10px;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--panel-border));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 12%, var(--ctrl-bg)),
+    color-mix(in srgb, var(--teal) 7%, var(--ctrl-bg))
+  );
+  box-shadow: var(--ctrl-shadow);
+  transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease, transform var(--dur-fast) ease;
+}
+
+.mx-compare-toggle:hover {
+  border-color: var(--accent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 18%, var(--ctrl-bg)),
+    color-mix(in srgb, var(--teal) 11%, var(--ctrl-bg))
+  );
+  transform: translateY(-0.5px);
+}
+
+.mx-compare-toggle.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--selected) 84%, var(--panel));
+  box-shadow: var(--ctrl-inset);
+}
+
+.mx-compare-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-ctrl);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.mx-compare-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mx-compare-copy strong {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.mx-compare-sub {
+  font-size: 0.77rem;
+  color: var(--muted);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mx-compare-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--on-accent);
+  white-space: nowrap;
+}
+
+.mx-compare-toggle.active .mx-compare-cta {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, transparent);
+}
+
+.mx-handoff-warn {
+  color: var(--warning);
+}
+
 .mx-hover-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   cursor: help;
 }
 
@@ -3257,9 +3996,6 @@ onBeforeUnmount(() => {
 }
 
 @container desktop (max-width: 1180px) {
-  .mx-glottis-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
   .mx-compare-grid.cols-3 {
     grid-template-columns: 1fr;
   }

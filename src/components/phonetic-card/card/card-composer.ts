@@ -115,6 +115,8 @@ export interface ComposeCardInput {
   ipaAsset?: ResolvedIpaRichAsset | null;
   continuumAsset?: ResolvedContinuumAsset | null;
   continuumCellIndex?: number;
+  /** When true (during final export), empty slots stay cleanly blank to preserve WYSIWYG whitespace. */
+  hideEmptyPlaceholders?: boolean;
 }
 
 export interface ComposeCardGeometry {
@@ -289,6 +291,9 @@ export function composeCardToCanvas(input: ComposeCardInput): ComposeCardGeometr
   } else {
     for (const mb of moduleBoxes) {
       if (mb.moduleId === null) {
+        if (input.hideEmptyPlaceholders) {
+          continue;
+        }
         ctx.save();
         drawStyledSurfaceBox(ctx, mb, theme.moduleRadiusFactor * u, theme.moduleSurface, theme, u, false);
         ctx.strokeStyle = theme.strongBorder;
@@ -301,12 +306,12 @@ export function composeCardToCanvas(input: ComposeCardInput): ComposeCardGeometr
         ctx.fillStyle = theme.text;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const posLbl = `第 ${mb.rowIndex + 1} 行 · 第 ${mb.colIndex + 1} 列`;
+        const posLbl = '留白空槽';
         ctx.fillText(posLbl, mb.x + mb.w / 2, mb.y + mb.h / 2 - 10 * u);
-        ctx.font = `500 ${Math.max(9, 10.8 * u * textScale)}px ${fontFamily}`;
+        ctx.font = `500 ${Math.max(9, 10.5 * u * textScale)}px ${fontFamily}`;
         ctx.fillStyle = theme.muted;
         ctx.fillText(
-          fitTextEllipsis(ctx, '空槽位 · 点击选中后从左侧添加模块或拖入', mb.w - 24 * u),
+          fitTextEllipsis(ctx, '点击填入模块 · 导出时保留此留白', mb.w - 24 * u),
           mb.x + mb.w / 2,
           mb.y + mb.h / 2 + 11 * u,
         );

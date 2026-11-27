@@ -9,10 +9,14 @@ const maxZoom = 5;
 export function useContinuumViewport() {
   const center = ref(CENTER);
   const zoom = ref(1);
+  const viewBoxObj = computed(() => {
+    const w = WIDTH / zoom.value;
+    const h = HEIGHT / zoom.value;
+    return { x: center.value.x - w / 2, y: center.value.y - h / 2, w, h };
+  });
   const viewBox = computed(() => {
-    const width = WIDTH / zoom.value;
-    const height = HEIGHT / zoom.value;
-    return `${center.value.x - width / 2} ${center.value.y - height / 2} ${width} ${height}`;
+    const { x, y, w, h } = viewBoxObj.value;
+    return `${x} ${y} ${w} ${h}`;
   });
   const dragging = ref(false);
   let suppressClick = false;
@@ -77,5 +81,5 @@ export function useContinuumViewport() {
     center.value = CENTER;
   }
 
-  return { viewBox, zoom, dragging, zoomBy, wheel, pointerDown, pointerMove, pointerEnd, consumeDragClick, reset };
+  return { viewBox, viewBoxObj, zoom, dragging, zoomBy, wheel, pointerDown, pointerMove, pointerEnd, consumeDragClick, reset };
 }

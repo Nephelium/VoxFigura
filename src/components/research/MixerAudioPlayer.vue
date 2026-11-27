@@ -128,13 +128,46 @@ function seekByRatio(ratio: number) {
   if (!el.paused) emit('playhead', clamped);
 }
 
-function onTrackPointerDown(ev: PointerEvent) {
-  if (!props.src || props.disabled) return;
-  const target = ev.currentTarget as HTMLElement | null;
-  if (!target) return;
-  const rect = target.getBoundingClientRect();
+let seeking = false;
+let seekTrackEl: HTMLElement | null = null;
+
+function seekFromPointer(ev: PointerEvent) {
+  if (!seekTrackEl) return;
+  const rect = seekTrackEl.getBoundingClientRect();
   if (rect.width <= 0) return;
   seekByRatio((ev.clientX - rect.left) / rect.width);
+}
+
+function onTrackPointerDown(ev: PointerEvent) {
+  if (ev.button !== 0 || !ev.isPrimary || !props.src || props.disabled) return;
+  const target = ev.currentTarget as HTMLElement | null;
+  if (!target) return;
+  seeking = true;
+  seekTrackEl = target;
+  try {
+    target.setPointerCapture(ev.pointerId);
+  } catch {
+    // ignore synthetic pointer events
+  }
+  seekFromPointer(ev);
+}
+
+function onTrackPointerMove(ev: PointerEvent) {
+  if (!seeking || !ev.isPrimary) return;
+  seekFromPointer(ev);
+}
+
+function onTrackPointerUp(ev: PointerEvent) {
+  if (!seeking) return;
+  seeking = false;
+  if (seekTrackEl?.hasPointerCapture?.(ev.pointerId)) {
+    try {
+      seekTrackEl.releasePointerCapture(ev.pointerId);
+    } catch {
+      // ignore
+    }
+  }
+  seekTrackEl = null;
 }
 
 function pause() {
@@ -212,6 +245,10 @@ defineExpose({
       :aria-valuemax="100"
       :aria-valuenow="Math.round(progressRatio * 100)"
       @pointerdown="onTrackPointerDown"
+      @pointermove="onTrackPointerMove"
+      @pointerup="onTrackPointerUp"
+      @pointercancel="onTrackPointerUp"
+      @lostpointercapture="onTrackPointerUp"
       @keydown.left.prevent="seekByRatio(progressRatio - 0.05)"
       @keydown.right.prevent="seekByRatio(progressRatio + 0.05)"
     >

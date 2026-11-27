@@ -116,10 +116,30 @@ class VoiceMorphBridge:
 
     @staticmethod
     def _public_preset(preset):
-        return {key: preset.get(key) for key in (
+        out = {key: preset.get(key) for key in (
             "id", "label", "desc", "f0_shift_semitones", "f0_target_hz", "default_f0_coupling",
-            "is_voiceless_target", "builtin", "source9_phys",
+            "is_voiceless_target", "larynx_hy_delta_cm", "supports_creak_irregularity",
+            "default_creak_irregularity", "supports_diplophonia", "default_diplophonia_mode",
+            "default_diplophonia_ratio", "experimental", "builtin",
         )}
+        raw_src9 = preset.get("source9_phys")
+        if isinstance(raw_src9, (list, tuple)) and len(raw_src9) == 9:
+            # Convert internal dPa -> public Pa strictly at the Python engine boundary.
+            pr_pa = round(float(raw_src9[0]) / 10.0, 2)
+            tail = [round(float(x), 5) for x in raw_src9[1:]]
+            out["source9_phys_pa"] = [pr_pa, *tail]
+            out["source_params"] = {
+                "pr_pa": pr_pa,
+                "xb_cm": tail[0],
+                "xt_cm": tail[1],
+                "ca_cm2": tail[2],
+                "lag_rad": tail[3],
+                "ra": tail[4],
+                "ps": tail[5],
+                "fl_pct": tail[6],
+                "shim_pct": tail[7],
+            }
+        return out
 
     @staticmethod
     def _decode_audio_16k(wav_bytes: bytes, max_sec: float = 15.0) -> np.ndarray:
@@ -178,7 +198,7 @@ class VoiceMorphBridge:
         if not 2 <= n_frames <= MAX_FRAMES:
             raise ValueError(f"{name}音频帧数不在可处理范围内")
 
-        f0_hz, voiced = extract_swift_f0_50hz(wav_16k, fmin=40.0, fmax=600.0, num_frames=n_frames)
+        f0_hz, voiced = extract_swift_f0_50hz(wav_16k, fmin=46.875, fmax=2093.75, num_frames=n_frames)
         f0_norm = normalize_f0_m27(f0_hz)
         tr, pr, gl, _, _, _ = run_vox2tract_chunk(wav_16k, f0_norm, device=device)
         m27_norm = np.concatenate([tr[0], f0_norm[:, None], pr[0], gl[0]], axis=-1).astype(np.float32)
@@ -302,9 +322,14 @@ class VoiceMorphBridge:
                 if not isinstance(label, str) or not 1 <= len(label.strip()) <= 40:
                     raise ValueError("请填写 1–40 字的预设名称")
                 voiced = clip.voiced_gate > 0.5
-                if not np.any(voiced):
-                    raise ValueError("未找到可提取发声类型的带声帧")
-                extracted = extract_phonation_preset_from_m27_phys(clip.m27_phys, voiced_mask=voiced)
+                active_mask = voiced if np.any(voiced) else (clip.speech_gate > 0.5)
+                if not np.any(active_mask):
+                    raise ValueError("未找到可提取发声类型的有效语音帧")
+                extracted = extract_phonation_preset_from_m27_phys(
+                    clip.m27_phys,
+                    voiced_mask=active_mask,
+                    center_fraction=0.4,
+                )
                 extracted.pop("frames_used")
                 entry = self._get_preset_store().save_custom(uuid4().hex, label=label.strip(), **extracted)
                 return {"ok": True, "preset": self._public_preset(entry)}
@@ -314,15 +339,22 @@ class VoiceMorphBridge:
             try:
                 return self._render_mixer(data, action, clip, device)
             except F0ShiftOutOfRange as error:
-                raise AnnotationControlError(validate_scalar_range("f0_hz", error.hz, 60, 600, "Hz", tol=0)) from error
+                err = validate_scalar_range("f0_hz", error.hz, 40, 600, "Hz", tol=0)
+                if err:
+                    err["error"]["hint"] = f"f0_hz ({error.hz:.1f} Hz) 超出 VTL 2.4 物理声门原生范围 [40, 600] Hz；请切换 Tract2Vox-Lite 神经合成或调整移调"
+                raise AnnotationControlError(err) from error
 
     def _render_mixer(self, data, action, clip, device):
         ensure_pure_numpy_imports()
         from m27_voice_morph.morpher import (
+            DIPLOPHONIA_MODES,
             DualMorphConfig,
             PresetMorphConfig,
             apply_dual_speaker_morph,
             apply_preset_phonation_morph,
+            apply_subharmonic_creaky_falsetto,
+            apply_voiced_falsetto_softening,
+            mix_diplophonia_audio,
         )
         from m27_voice_morph.presets import ORGAN_GROUPS
 
@@ -338,7 +370,7 @@ class VoiceMorphBridge:
         if err := validate_scalar_range("smooth_ms", smooth, 0, 80, "ms", tol=0):
             raise AnnotationControlError(err)
         options = dict(interp_mode=interp, smooth_ms=smooth, enable_voicing_gate=gate, enable_f0_coupling=f0,
-                       output_f0_range_hz=(60.0, 600.0))
+                       output_f0_range_hz=(40.0, 600.0) if synth == "physical" else None)
         if action == "render_preset":
             preset_id = data.get("preset_id")
             preset = self._presets().get(preset_id) if isinstance(preset_id, str) else None
@@ -347,15 +379,36 @@ class VoiceMorphBridge:
             shift = data.get("f0_shift_semitones")
             if shift is not None and (err := validate_scalar_range("f0_shift_semitones", shift, -12, 12, "st", tol=0)):
                 raise AnnotationControlError(err)
+            default_irreg = preset.get("default_creak_irregularity", 0.30)
+            creak_irreg = data.get("creak_irregularity", default_irreg)
+            if err := validate_scalar_range("creak_irregularity", creak_irreg, 0, 1, "ratio", tol=0):
+                raise AnnotationControlError(err)
+            dip_mode = data.get("diplophonia_mode", preset.get("default_diplophonia_mode", "parallel"))
+            if dip_mode not in DIPLOPHONIA_MODES:
+                raise ValueError("双音调耦合机制无效，须为 parallel、ventricular 或 vertical")
+            default_dip_ratio = preset.get("default_diplophonia_ratio", DIPLOPHONIA_MODES[dip_mode]["default_ratio"])
+            dip_ratio = data.get("diplophonia_ratio", default_dip_ratio)
+            if err := validate_scalar_range("diplophonia_ratio", dip_ratio, 0.35, 2.00, "ratio", tol=0):
+                raise AnnotationControlError(err)
             if "f0_coupling" not in data and preset.get("default_f0_coupling"):
                 options["enable_f0_coupling"] = True
-            config = PresetMorphConfig(preset_id=preset_id, knots=self._knots(data.get("knots"), "发声类型"),
-                                       f0_shift_semitones=shift, **options)
+            config = PresetMorphConfig(
+                preset_id=preset_id,
+                knots=self._knots(data.get("knots"), "发声类型"),
+                f0_shift_semitones=shift,
+                creak_irregularity=float(creak_irreg),
+                diplophonia_mode=str(dip_mode),
+                diplophonia_ratio=float(dip_ratio),
+                **options,
+            )
             result = apply_preset_phonation_morph(clip.m27_norm, config, preset_dict=preset, f0_voiced=clip.f0_voiced)
             speakers = clip.spk_emb
             extra = {"applied_curves": {"preset": result["w_eff"].tolist()}, "f0_shift_st": result["applied_semitones"]}
             if result["f0_target_hz"] is not None:
                 extra["f0_target_hz"] = result["f0_target_hz"]
+            if result.get("diplophonia") is not None:
+                extra["diplophonia_mode"] = result["diplophonia"]["mode"]
+                extra["diplophonia_ratio"] = result["diplophonia"]["ratio"]
         else:
             source = self._clip(data, "source_id")
             curves = data.get("curves")
@@ -388,15 +441,80 @@ class VoiceMorphBridge:
 
         gain = data.get("audio_gain", "peak")
         t_synth = time.perf_counter()
+        dip = result.get("diplophonia")
+        dip_active = dip is not None and float(np.max(dip["mix_curve_50hz"])) > 1e-4
+        audio_post = result.get("audio_post") or {}
+        has_post = bool(audio_post) and float(np.max(result["w_eff"])) > 1e-4
+
+        def _apply_post_fx(wav_arr: np.ndarray, sample_rate: int, synth_mode: str) -> np.ndarray:
+            out_w = wav_arr
+            if "soft_falsetto" in audio_post:
+                out_w = apply_voiced_falsetto_softening(out_w, result["w_eff"], sample_rate, **audio_post["soft_falsetto"])
+            if "subharmonic_creak" in audio_post:
+                out_w = apply_subharmonic_creaky_falsetto(
+                    out_w, result["f0_after_hz"], result["w_eff"], sample_rate, **audio_post["subharmonic_creak"]
+                )
+            air_spec = audio_post.get("whisper_air")
+            if air_spec is not None and float(np.max(air_spec["mix_curve_50hz"])) > 1e-4:
+                if synth_mode == "neural":
+                    wav_air, _ = self._synthesize_neural_onnx(air_spec["m27_whisper_norm"], speakers, device)
+                else:
+                    air_bytes = self.native_engine._synthesize_vtl_from_m27(air_spec["m27_whisper_phys"], audio_gain="raw")
+                    wav_air, _ = sf.read(BytesIO(air_bytes), dtype="float32")
+                out_w = mix_diplophonia_audio(
+                    out_w,
+                    wav_air,
+                    air_spec["mix_curve_50hz"],
+                    result["f0_after_hz"],
+                    sample_rate,
+                    ratio_b_max=air_spec["ratio_b_max"],
+                    am_depth_max=0.0,
+                )
+            return out_w
+
         if synth == "neural":
             if error := self.native_engine._validate_requested_device(device):
                 raise AnnotationControlError(error)
             wav, rate = self._synthesize_neural_onnx(result["m27_norm"], speakers, device)
+            if dip_active:
+                wav_b, _ = self._synthesize_neural_onnx(dip["m27_secondary_norm"], speakers, device)
+                wav = mix_diplophonia_audio(
+                    wav,
+                    wav_b,
+                    dip["mix_curve_50hz"],
+                    dip["f_b_50hz"],
+                    rate,
+                    ratio_b_max=dip["ratio_b_max"],
+                    am_depth_max=dip["am_depth_max"],
+                )
+            if has_post:
+                wav = _apply_post_fx(wav, rate, "neural")
             wav_bytes = pcm_float_to_wav_bytes(apply_synthesis_gain(wav, gain), rate)
             eff_device = device
         else:
-            wav_bytes = self.native_engine._synthesize_vtl_from_m27(result["m27_phys"], audio_gain=gain)
-            rate = 48_000
+            if dip_active or has_post:
+                bytes_a = self.native_engine._synthesize_vtl_from_m27(result["m27_phys"], audio_gain="raw")
+                wav_a, rate_a = sf.read(BytesIO(bytes_a), dtype="float32")
+                out_p = wav_a
+                if dip_active:
+                    bytes_b = self.native_engine._synthesize_vtl_from_m27(dip["m27_secondary_phys"], audio_gain="raw")
+                    wav_b, _ = sf.read(BytesIO(bytes_b), dtype="float32")
+                    out_p = mix_diplophonia_audio(
+                        out_p,
+                        wav_b,
+                        dip["mix_curve_50hz"],
+                        dip["f_b_50hz"],
+                        int(rate_a),
+                        ratio_b_max=dip["ratio_b_max"],
+                        am_depth_max=dip["am_depth_max"],
+                    )
+                if has_post:
+                    out_p = _apply_post_fx(out_p, int(rate_a), "physical")
+                wav_bytes = pcm_float_to_wav_bytes(apply_synthesis_gain(out_p, gain), int(rate_a))
+                rate = int(rate_a)
+            else:
+                wav_bytes = self.native_engine._synthesize_vtl_from_m27(result["m27_phys"], audio_gain=gain)
+                rate = 48_000
             eff_device = "cpu"
         if bool(data.get("include_baseline")):
             base_bytes, base_rate = self._synthesize_baseline_cached(clip, synth, device, gain)
@@ -426,7 +544,7 @@ class VoiceMorphBridge:
     def _controls(value):
         if value is None:
             return None
-        controls, err = validate_m27_pa(value, field="rows_pa", min_frames=2, max_frames=MAX_FRAMES, f0_min=40.0, f0_max=600.0)
+        controls, err = validate_m27_pa(value, field="rows_pa", min_frames=2, max_frames=MAX_FRAMES)
         if err:
             raise AnnotationControlError(err)
         assert controls is not None

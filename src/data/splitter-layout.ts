@@ -192,6 +192,26 @@ export function setConfiguredSplitterDefault(rawKey: string, rawValue: number): 
       hint: `${spec.label} 允许范围为 ${spec.min}–${spec.max} ${spec.unit}`,
     };
   }
+  const pronIdx = PRONUNCIATION_SPLITTERS.findIndex((item) => item.storageKey === key);
+  if (pronIdx !== -1 && spec) {
+    const MIN_GAP_PCT = 5;
+    const prevSpec = PRONUNCIATION_SPLITTERS[pronIdx - 1];
+    const nextSpec = PRONUNCIATION_SPLITTERS[pronIdx + 1];
+    const minAllowed = prevSpec
+      ? Math.max(spec.min, getConfiguredSplitterDefault(prevSpec.storageKey, prevSpec.factoryDefault) + MIN_GAP_PCT)
+      : spec.min;
+    const maxAllowed = nextSpec
+      ? Math.min(spec.max, getConfiguredSplitterDefault(nextSpec.storageKey, nextSpec.factoryDefault) - MIN_GAP_PCT)
+      : spec.max;
+    if (rounded < minAllowed || rounded > maxAllowed) {
+      return {
+        ok: false,
+        code: 'out_of_range',
+        allowed: [minAllowed, maxAllowed],
+        hint: `${spec.label} 需保持在相邻分界之间，当前允许范围为 ${minAllowed}–${maxAllowed} ${spec.unit}`,
+      };
+    }
+  }
   const map = readConfiguredSplitterDefaults();
   if (spec && rounded === spec.factoryDefault) {
     delete map[key];

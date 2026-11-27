@@ -82,6 +82,9 @@ export {
   tokens,
   pauseMark,
   longPause,
+  IPA_SPACE_PAUSE_MS,
+  IPA_LONG_PAUSE_MS,
+  IPA_SPACE_PAUSE_TOKEN,
   startsIpa,
   speechTokens,
   isKanaRun,
@@ -120,8 +123,10 @@ export {
 export {
   basicKanaReading,
   basicKanaInventory,
+  narrowJapaneseMoraIpa,
   reviewKana,
   type KanaLexicon,
+  type ReviewKanaOptions,
 } from './kana-readings.ts';
 
 export {

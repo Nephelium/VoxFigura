@@ -1,7 +1,17 @@
-import { parseNumberedScore, SAMPLE_RATE_HZ, type Clip, type SegmentAnchor, type Syllable, type VcProject } from '@vocalcut/core';
+import {
+  formatPitchInNotation,
+  parseNumberedScore,
+  SAMPLE_RATE_HZ,
+  wrapSyllableGroup,
+  type Clip,
+  type SegmentAnchor,
+  type Syllable,
+  type VcProject,
+} from '@vocalcut/core';
 import { createInitialProject } from '@/stores/workbench';
 import { resolveKanaPhones } from '@/components/research/japanese-annotation';
 import { buildSegmentsForSyllable, splitIpaToPhonemes } from '@/components/research/research-utils';
+import { encodeWavFromAudioBuffer } from '@/components/modals/download';
 import { stageLayer, timelineKeys, type NleClip, type StageTargetId } from './nle-timeline';
 import { sessionMedia, type SessionMedia } from './studio-media';
 
@@ -42,6 +52,11 @@ export interface DuetScene {
   name: string;
 }
 export const duetScenes = new Map<string, DuetScene>();
+export function pruneDuetScenes(keepProjectId?: string): void {
+  for (const id of [...duetScenes.keys()]) {
+    if (id !== keepProjectId) duetScenes.delete(id);
+  }
+}
 
 const MAX_BYTES = 512 * 1024 ** 2;
 const MAX_MANIFEST = 128 * 1024 ** 2;
@@ -136,89 +151,91 @@ function alignedSyllables(asset: LegacyAsset, words: Word[], timing: TimeMap[], 
   return syllables;
 }
 
-function numberedTone(midi: number|null) {
-  const degrees = ['1','#1','2','#2','3','4','#4','5','#5','6','#6','7'];
+function numberedTone(midi: number | null) {
   if (midi === null || !Number.isFinite(midi)) return '0';
-  const relative = midi-50;
-  const octaves = Math.floor(relative/12);
-  return degrees[(relative%12+12)%12] + (octaves>=0 ? '+'.repeat(Math.min(octaves,5)) : '-'.repeat(Math.min(-octaves,5)));
+  return formatPitchInNotation(midi, 'D3', 'je');
 }
 function scoreFor(asset: LegacyAsset, syllables: Syllable[]) {
   const pitch = asset.motion?.source?.pitch_curve ?? [];
-  const dense = asset.motion?.dense?.score?.words?.filter(word => word.text?.trim()) ?? [];
-  const notation = (hz: number, duration: number) => {
-    return numberedTone(hz > 0 ? Math.round(69 + 12*Math.log2(hz/440)) : null) + ':' + (duration*148/(60*SAMPLE_RATE_HZ)).toFixed(7);
+  const dense = asset.motion?.dense?.score?.words?.filter((word) => word.text?.trim()) ?? [];
+  const durationToken = (hz: number, duration: number) => {
+    const beats = (duration * 148) / (60 * SAMPLE_RATE_HZ);
+    const body = `${numberedTone(hz > 0 ? Math.round(69 + 12 * Math.log2(hz / 440)) : null)}:${beats.toFixed(6)}`;
+    return hz > 0 ? wrapSyllableGroup(body) : body;
   };
   const result: string[] = [];
-  let seek = 0, last = 0;
+  let seek = 0;
+  let last = 0;
   for (const [i, syl] of syllables.entries()) {
-    if (syl.start_smp > last) result.push(notation(0,syl.start_smp-last));
-    const center = (syl.start_smp+syl.end_smp)/(2*SAMPLE_RATE_HZ);
-    while (seek+1 < pitch.length && pitch[seek+1][0] <= center) seek++;
-    const hz = dense[i]?.pitch?.base?.hz ?? pitch[seek]?.[1] ??
-      dense[i]?.pitch?.points?.find(point => point.hz > 0)?.hz;
+    if (syl.start_smp > last) result.push(durationToken(0, syl.start_smp - last));
+    const center = (syl.start_smp + syl.end_smp) / (2 * SAMPLE_RATE_HZ);
+    while (seek + 1 < pitch.length && pitch[seek + 1][0] <= center) seek++;
+    const hz = dense[i]?.pitch?.base?.hz ?? pitch[seek]?.[1]
+      ?? dense[i]?.pitch?.points?.find((point) => point.hz > 0)?.hz;
     if (!hz) return;
-    result.push(notation(hz,syl.end_smp-syl.start_smp));
+    result.push(durationToken(hz, syl.end_smp - syl.start_smp));
     last = syl.end_smp;
   }
-  if (asset.length > last) result.push(notation(0,asset.length-last));
-  return result.join(' | ');
+  if (asset.length > last) result.push(durationToken(0, asset.length - last));
+  return result.join(' ');
 }
 
 export function applyDuetScorebook(project: VcProject, timeline: readonly NleClip[], text: string) {
-  if (!project.id.startsWith('duet_') || !text.slice(0,800).includes('人是猫｜完整人声语法简谱与歌词')) return 0;
-  const rows = text.replaceAll('\r','').split(/\n(?=\d{2}\s)/).slice(1);
-  const scorebook = rows.flatMap(row => {
+  if (!project.id.startsWith('duet_') || !text.slice(0, 800).includes('人是猫｜完整人声语法简谱与歌词')) return 0;
+  const rows = text.replaceAll('\r', '').split(/\n(?=\d{2}\s)/).slice(1);
+  const scorebook = rows.flatMap((row) => {
     const match = /^.+\n原视频定位\s+(\d+(?:\.\d+)?)[^\n]+\n歌词[：:]\s*\n([^\n]+)\n简谱[：:]\s*\n([^\n]+)/u.exec(row);
     if (!match) return [];
-    // Spaces in the source syntax are timed rests.
     const origin = Number(match[1]);
-    const score = match[3].trim().replace(/[ \u3000]/gu,'|0|');
+    const score = match[3].trim();
     const units = match[2].trim().match(/.[ゃゅょぁぃぅぇぉ]?/gu) ?? [];
-    const parsed = parseNumberedScore(score,'D3',148,false,units.length);
+    const parsed = parseNumberedScore(score, 'D3', 148, false, units.length, { notation: 'je' });
     if (!parsed.ok) return [];
     const starts: { note: number; time: number }[] = [];
     let time = origin;
     const { notes } = parsed.score;
     for (const [note, value] of notes.entries()) {
-      if (!value.carry && value.midi !== null) starts.push({ note,time });
-      time += value.beats*60/148;
+      if (!value.carry && value.midi !== null) starts.push({ note, time });
+      time += (value.beats * 60) / 148;
     }
     return [{ units, score, notes, starts }];
   });
   let count = 0;
   for (const clip of Object.values(project.clips)) {
     if (!clip.source?.lyrics || !clip.syllable_order.length) continue;
-    const syllables = clip.syllable_order.map(id=>clip.syllables[id]);
-    const items = timeline.filter(item=>item.phraseId===clip.id && (item.track==='a1' || item.track==='a2'));
-    const candidates = scorebook.flatMap(chapter => chapter.units.flatMap((_,start) => {
-      if (start+syllables.length > chapter.units.length || !syllables.every((syllable,i)=>syllable.text===chapter.units[start+i])) return [];
-      const distance = Math.min(...items.map(item=>Math.abs(chapter.starts[start].time-(item.startSmp+syllables[0].start_smp-item.sourceStartSmp)/SAMPLE_RATE_HZ)));
-      return [{ chapter,start,distance }];
+    const syllables = clip.syllable_order.map((id) => clip.syllables[id]);
+    const items = timeline.filter((item) => item.phraseId === clip.id && (item.track === 'a1' || item.track === 'a2'));
+    const candidates = scorebook.flatMap((chapter) => chapter.units.flatMap((_, start) => {
+      if (start + syllables.length > chapter.units.length || !syllables.every((syllable, i) => syllable.text === chapter.units[start + i])) return [];
+      const distance = Math.min(...items.map((item) => Math.abs(chapter.starts[start].time - (item.startSmp + syllables[0].start_smp - item.sourceStartSmp) / SAMPLE_RATE_HZ)));
+      return [{ chapter, start, distance }];
     }));
-    const best = candidates.sort((a,b)=>a.distance-b.distance)[0];
+    const best = candidates.sort((a, b) => a.distance - b.distance)[0];
     if (!best) continue;
-    const { chapter,start } = best;
-    const stop = start+syllables.length;
+    const { chapter, start } = best;
+    const stop = start + syllables.length;
     let score = chapter.score;
-    if (start || stop<chapter.units.length) {
-      const notes = chapter.notes.slice(chapter.starts[start].note,chapter.starts[stop]?.note ?? chapter.notes.length);
-      while (notes[notes.length-1]?.midi === null) notes.pop();
+    if (start || stop < chapter.units.length) {
+      const notes = chapter.notes.slice(chapter.starts[start].note, chapter.starts[stop]?.note ?? chapter.notes.length);
+      while (notes[notes.length - 1]?.midi === null) notes.pop();
       const parts: string[] = [];
       let group: string[] = [];
-      const closeGroup = () => { if (group.length) parts.push(group.length===1 ? group[0] : '('+group.join('|')+')'); group=[]; };
+      const closeGroup = () => {
+        if (group.length) parts.push(wrapSyllableGroup(group.join(' ')));
+        group = [];
+      };
       for (const note of notes) {
         if (!note.carry) closeGroup();
         const dynamic = note.dynamic ?? 0;
-        const token = numberedTone(note.midi)+':'+note.beats.toFixed(8)+(dynamic<0?'p':'f').repeat(Math.abs(dynamic));
+        const token = `${numberedTone(note.midi)}:${note.beats.toFixed(6)}${(dynamic < 0 ? 'p' : 'f').repeat(Math.abs(dynamic))}`;
         if (note.midi === null && !note.carry) parts.push(token);
         else group.push(token);
       }
       closeGroup();
-      score = parts.join('|');
+      score = parts.join(' ');
     }
-    if (!parseNumberedScore(score,'D3',148,false,syllables.length).ok) continue;
-    clip.source = { ...clip.source, score };
+    if (!parseNumberedScore(score, 'D3', 148, false, syllables.length, { notation: 'je' }).ok) continue;
+    clip.source = { ...clip.source, score, score_notation: 'je' };
     count++;
   }
   return count;
@@ -235,7 +252,8 @@ export async function importLegacyDuet(file: File): Promise<{ project: VcProject
   assert(inner.byteLength === 12 && ascii(inner) === 'PTBDUET1', '文件不是 PhoneticToolbox 双人剪辑工程');
   const manifestLength = inner.getUint32(8,true);
   assert(integer(manifestLength,2,Math.min(MAX_MANIFEST,length-12)), 'Stella 工程清单长度无效');
-  const manifest: LegacyManifest = JSON.parse(await file.slice(offset+12,offset+12+manifestLength).text());
+  const manifestRaw = await file.slice(offset + 12, offset + 12 + manifestLength).text();
+  const manifest: LegacyManifest = JSON.parse(manifestRaw);
   const base = manifest.project;
   assert(base?.version === 1 && base.sampleRate === SAMPLE_RATE_HZ && Array.isArray(base.tracks) && Array.isArray(manifest.assets), '此版本的 Stella 工程暂不支持');
   const trackCount = base.tracks.length, voiceTracks = base.tracks.filter(track => track.kind === 'voice');
@@ -246,8 +264,8 @@ export async function importLegacyDuet(file: File): Promise<{ project: VcProject
   validateStage(stage);
   const media = new Map<string, SessionMedia>(), assetMap = new Map<string,LegacyAsset>();
   const project = createInitialProject();
-  // Reopen a saved VocalCut edit and relink it to the same source file.
-  const headerHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(file.name + ':' + file.size + ':' + file.lastModified)));
+  // Content-addressed ID based on manifest + file size so copying/renaming keeps relink stable.
+  const headerHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(file.size + ':' + manifestRaw)));
   project.id = 'duet_' + Array.from(headerHash.slice(0,12), byte => byte.toString(16).padStart(2,'0')).join('');
   project.name = file.name.replace(/\.ptb-duet$/i,'');
   project.assets = {}; project.asset_order = []; project.clips = {}; project.clip_order = [];
@@ -280,7 +298,7 @@ export async function importLegacyDuet(file: File): Promise<{ project: VcProject
       cursor += spec.length*4;
     }
     assetMap.set(spec.id,spec);
-    media.set(id,{ audio, url: '' });
+    media.set(id,{ audio, url: URL.createObjectURL(encodeWavFromAudioBuffer(audio)) });
     project.assets[id] = { id, kind: 'audio', path: spec.name, duration_smp: spec.length, sha256: id, role: 'ptb_duet_audio' };
     project.asset_order.push(id);
   }
@@ -314,7 +332,12 @@ export async function importLegacyDuet(file: File): Promise<{ project: VcProject
       linkedPhrases.set(key,phraseId);
       if (asset.motion?.geometry?.length) cache.motion.set(assetId,{ geometry: asset.motion.geometry, timeMap });
     }
-    timeline.push({ ...clip, track: audioTrack }, { ...clip, id: 'v1_' + item.id, track: 'v1' }, { ...clip, id: 'v3_' + item.id, track: 'v3' });
+    const { gain: _g, muted: _m, ...visualMeta } = clip;
+    timeline.push(
+      { ...clip, track: audioTrack },
+      { ...visualMeta, id: 'v1_' + item.id, track: 'v1', linkedAudioId: item.id },
+      { ...visualMeta, id: 'v3_' + item.id, track: 'v3', linkedAudioId: item.id },
+    );
   }
   assert(project.clip_order.length > 0 && timeline.length > 0, 'Stella 工程没有可编辑声部');
   project.tracks.trk_tg.clip_order = project.clip_order;

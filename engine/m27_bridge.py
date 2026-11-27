@@ -38,6 +38,7 @@ from validation import (
     out_of_range_error,
     validate_glottis_frames,
     validate_m27_pa,
+    validate_positive_series,
     validate_scalar_range,
     validate_scalar_series,
     validate_shape_frames,
@@ -253,13 +254,19 @@ class M27Bridge:
 
     def probe_status(self) -> Dict[str, Any]:
         pr_ok = LOCAL_MODEL_MANAGER.is_enabled("Vox2Tract-Lite") and LOCAL_MODEL_MANAGER.active_path("Vox2Tract-Lite").is_file()
-        motor_ok = LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2") and LOCAL_MODEL_MANAGER.active_path("Vox2Align-Lite v2").is_file()
+        has_aligner_file = LOCAL_MODEL_MANAGER.active_path("Vox2Align-Lite v2").is_file()
+        motor_ok = LOCAL_MODEL_MANAGER.is_enabled("Vox2Align-Lite v2") and has_aligner_file
+        joint_or_motor_ok = motor_ok or (pr_ok and not has_aligner_file)
         neural_ok = LOCAL_MODEL_MANAGER.is_enabled("Tract2Vox-Lite") and LOCAL_MODEL_MANAGER.active_path("Tract2Vox-Lite").is_file()
         cuda_avail = ort_cuda_available()
         return {
             "tt3_root_exists": TT3_ROOT.is_dir(),
-            "stage4_ready": pr_ok and motor_ok,
-            "alignment_model": VOX2ALIGN_LABEL if pr_ok and motor_ok else None,
+            "stage4_ready": pr_ok and joint_or_motor_ok,
+            "alignment_model": (
+                VOX2ALIGN_LABEL
+                if pr_ok and motor_ok
+                else (LOCAL_MODEL_MANAGER.active_path("Vox2Tract-Lite").name if pr_ok and not has_aligner_file else None)
+            ),
             "stage5_ready": neural_ok,
             "default_voice_profile": DEFAULT_TIMBRE_PROFILE.name,
             "default_voice_ready": DEFAULT_TIMBRE_PROFILE.is_file(),
@@ -530,7 +537,7 @@ class M27Bridge:
         if not 1 <= count <= max_frames:
             return out_of_range_error("f0_hz.length", count, 1, max_frames, "frames", "单次 Tract2Vox-Lite 合成最多 60 秒")
 
-        f0, err = validate_scalar_series("f0_hz", f0_raw, count, 60.0, 600.0, "Hz")
+        f0, err = validate_positive_series("f0_hz", f0_raw, count, "Hz")
         if err:
             return err
         pressure, err = validate_scalar_series("pressure_pa", payload.get("pressure_pa"), count, 0.0, 1600.0, "Pa")
@@ -756,7 +763,7 @@ class M27Bridge:
         if not 1 <= count <= max_frames:
             yield out_of_range_error("f0_hz.length", count, 1, max_frames, "frames", "单次 Tract2Vox-Lite 合成最多 60 秒")
             return
-        f0, err = validate_scalar_series("f0_hz", f0_raw, count, 60.0, 600.0, "Hz")
+        f0, err = validate_positive_series("f0_hz", f0_raw, count, "Hz")
         if err:
             yield err
             return
@@ -975,7 +982,7 @@ class M27Bridge:
         count = payload.get("frames")
         if type(count) is not int or not 25 <= count <= 150:
             return out_of_range_error("frames", count, 25, 150, "frames", "预览帧数须为 25–150 帧")
-        arr, err = validate_m27_pa([row] if isinstance(row, list) else None, field="controls", min_frames=1, max_frames=1, f0_min=60.0, f0_max=600.0)
+        arr, err = validate_m27_pa([row] if isinstance(row, list) else None, field="controls", min_frames=1, max_frames=1)
         if err:
             return err
         assert arr is not None
@@ -1011,7 +1018,7 @@ class M27Bridge:
         }
 
     def extract_anim_from_pa(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        arr_pa, err = validate_m27_pa(payload.get("m27_50hz_pa"), field="m27_50hz_pa", min_frames=1, max_frames=3000, f0_min=40.0, f0_max=600.0)
+        arr_pa, err = validate_m27_pa(payload.get("m27_50hz_pa"), field="m27_50hz_pa", min_frames=1, max_frames=3000)
         if err:
             return err
         assert arr_pa is not None
@@ -1174,14 +1181,26 @@ class M27Bridge:
 
     def resynthesize(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raw_rows = payload.get("m27_50hz_pa") if payload.get("m27_50hz_pa") is not None else payload.get("trajectory_pa")
-        arr_pa, err = validate_m27_pa(raw_rows, field="m27_50hz_pa", min_frames=1, max_frames=3000, f0_min=40.0, f0_max=600.0)
-        if err:
-            return err
-        assert arr_pa is not None
-
         synth_mode = payload.get("synth_mode", "both")
         if synth_mode not in ("vtl", "neural", "both"):
             return validation_error("synth_mode", "synth_mode 须为 vtl、neural 或 both")
+        f0_bounds = (40.0, 600.0) if synth_mode in ("vtl", "both") else (None, None)
+        arr_pa, err = validate_m27_pa(
+            raw_rows,
+            field="m27_50hz_pa",
+            min_frames=1,
+            max_frames=3000,
+            f0_min=f0_bounds[0],
+            f0_max=f0_bounds[1],
+        )
+        if err:
+            if synth_mode in ("vtl", "both") and err["error"].get("code") == "out_of_range" and "[17]" in str(err["error"].get("field", "")):
+                err["error"]["hint"] = (
+                    f"{err['error']['hint']}（VTL 2.4 物理声门原生范围仅支持 40–600 Hz；"
+                    "超宽域基频请切换为 Tract2Vox-Lite 神经合成）"
+                )
+            return err
+        assert arr_pa is not None
         req_dev = payload.get("device", "cpu")
         if synth_mode in ("neural", "both"):
             dev_err = self._validate_requested_device(req_dev)
@@ -1238,7 +1257,7 @@ class M27Bridge:
         return out
 
     def neural_reference_audio(self, rows_pa, speaker_path: Path) -> bytes:
-        native, err = validate_m27_pa(rows_pa, field="m27_50hz_pa", min_frames=1, max_frames=3000, f0_min=40.0, f0_max=600.0)
+        native, err = validate_m27_pa(rows_pa, field="m27_50hz_pa", min_frames=1, max_frames=3000)
         if err:
             raise ValueError(err["error"]["hint"])
         assert native is not None

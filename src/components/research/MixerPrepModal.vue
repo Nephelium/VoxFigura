@@ -33,6 +33,7 @@ export type PrepSlotId = 'preset' | 'a' | 'b';
 
 export interface PrepSlotDraft {
   file: Blob | null;
+  initialFile: Blob | null;
   name: string;
   duration: number;
   audioChanged: boolean;
@@ -129,6 +130,7 @@ const PAD_X = 12;
 function emptyDraft(): PrepSlotDraft {
   return {
     file: null,
+    initialFile: null,
     name: '',
     duration: 0,
     audioChanged: false,
@@ -160,8 +162,9 @@ const deepSeekAsrKey = computed(() =>
     : '',
 );
 
+const transcribingMode = ref<'local' | 'cloud' | null>(null);
 const localAsr = useLocalAsrSetup(
-  computed(() => props.open && hasAudio.value && !deepSeekAsrKey.value),
+  computed(() => props.open && hasAudio.value),
   store.localWhisperModel,
   store.setLocalWhisperModel,
 );
@@ -242,6 +245,7 @@ async function initDraft(slot: PrepSlotId, audio: MixerAudio | null, grid: TextG
   const basePeaks = audio.analysis?.waveform_peaks?.length ? [...audio.analysis.waveform_peaks] : [];
   drafts.value[slot] = {
     file: audio.file,
+    initialFile: audio.file,
     name: audio.name,
     duration: audio.analysis?.dur_sec ?? audio.duration,
     audioChanged: false,
@@ -663,6 +667,7 @@ async function undoAudioEdit() {
     slot.duration = measured.duration;
     slot.peaks = measured.peaks;
     slot.grid = prev.grid;
+    slot.audioChanged = slot.file !== slot.initialFile;
     selStart.value = null;
     selEnd.value = null;
     selectedIntervalIdx.value = null;
@@ -686,18 +691,22 @@ function parseGuidedAlignment(textgrid: string): TextGridDocument {
   return cleanTextGridWordLabels(parsed.value);
 }
 
-async function runTranscribeCurrent() {
+async function runTranscribeCurrent(mode: 'local' | 'cloud' = 'local') {
   const slot = currentDraft.value;
   if (!slot.file || busy.value) return;
-  const key = deepSeekAsrKey.value;
+  const key = mode === 'cloud' ? deepSeekAsrKey.value : '';
   asrAbort?.abort();
   const req = new AbortController();
   asrAbort = req;
   transcribing.value = true;
+  transcribingMode.value = mode;
   statusFailed.value = false;
-  statusText.value = key ? '正在通过 DeepSeek API 识别当前音轨文本…' : '正在使用本地 Whisper 识别当前音轨文本…';
+  statusText.value = mode === 'cloud'
+    ? '正在通过 DeepSeek API 识别当前音轨文本…'
+    : '正在使用本地 SenseVoice-Small 识别当前音轨文本…';
   try {
     const result = await requestTranscription(slot.file, lang.value, req.signal, {
+      mode,
       deepSeekKey: key,
       model: store.localWhisperModel.value,
     });
@@ -708,17 +717,20 @@ async function runTranscribeCurrent() {
       const other: PrepSlotId = activeSlot.value === 'a' ? 'b' : 'a';
       if (!drafts.value[other].transcript.trim()) drafts.value[other].transcript = result.text;
     }
-    statusText.value = '已识别文本，可校对后点击「按原文对齐」';
+    statusText.value = mode === 'cloud'
+      ? 'DeepSeek API 已转写文本，可校对后点击「按原文对齐」'
+      : 'SenseVoice-Small 已转写文本，可校对后点击「按原文对齐」';
   } catch (err) {
     if (asrAbort === req) {
       statusFailed.value = true;
       statusText.value = '自动识别未完成：' + (err instanceof Error ? err.message : String(err));
-      if (!key) void localAsr.refresh();
+      if (mode === 'local') void localAsr.refresh();
     }
   } finally {
     if (asrAbort === req) {
       asrAbort = null;
       transcribing.value = false;
+      transcribingMode.value = null;
     }
   }
 }
@@ -1208,11 +1220,13 @@ onBeforeUnmount(() => {
                     :cloud="!!deepSeekAsrKey"
                     :blocked="busy"
                     :transcribing="transcribing"
+                    :transcribing-mode="transcribingMode"
                     :install="localAsrStatus"
                     :install-message="localAsrMessage"
                     :pending-model="localAsrPending"
                     @transcribe="runTranscribeCurrent"
                     @choose="localAsr.choose"
+                    @remove="localAsr.remove"
                     @refresh="localAsr.refresh"
                   />
                   <button
@@ -1286,8 +1300,8 @@ onBeforeUnmount(() => {
 .mx-prep-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 980;
-  background: rgba(8, 12, 20, 0.56);
+  z-index: var(--z-modal);
+  background: var(--overlay);
   backdrop-filter: blur(5px);
   display: grid;
   place-items: center;
@@ -1300,7 +1314,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: var(--popover-shadow, 0 18px 48px rgba(0, 0, 0, 0.36));
+  box-shadow: var(--popover-shadow);
 }
 
 .mx-prep-head {

@@ -52,7 +52,32 @@ export interface AnnotationControlReference {
   preservePressure?: boolean;
 }
 
-export type AnnotationIpaPoseSource = 'current' | 'model';
+export type AnnotationIpaPoseSource = 'auto' | 'current' | 'model';
+
+const BRACKETED_IPA_SYLLABLE_RE = /^[\[［][\s\S]+[\]］]$/u;
+
+/** True when a syllable originated from bracketed narrow `[IPA]` / `［IPA］` input rather than plain language text. */
+export function isBracketedIpaSyllable(syllable: Pick<Syllable, 'text'> | null | undefined): boolean {
+  return Boolean(syllable?.text && BRACKETED_IPA_SYLLABLE_RE.test(syllable.text.trim()));
+}
+
+/**
+ * Resolve the effective per-syllable pose source:
+ * - `'model'` → always model default poses
+ * - `'current'` → always current IPA pose library / timeline targets
+ * - `'auto'` → bracketed `[IPA]` syllables use `'current'`, plain text (zh/en/ja/dialect) uses `'model'`
+ */
+export function resolveSyllablePoseSource(
+  poseSource: AnnotationIpaPoseSource | undefined,
+  syllable: Pick<Syllable, 'text'> | null | undefined,
+): 'current' | 'model' {
+  if (poseSource === 'model') return 'model';
+  if (poseSource === 'current') return 'current';
+  if (poseSource === 'auto') {
+    return isBracketedIpaSyllable(syllable) ? 'current' : 'model';
+  }
+  return 'current';
+}
 
 const nativeTractIndices = [...Array.from({ length: 14 }, (_, i) => i), 16, 17, 18];
 const lateralBases = new Set(['l', 'ɭ', 'ʎ', 'ʟ']);
@@ -235,8 +260,22 @@ export function buildPiecewiseReferenceMapper(
         if (!matchedSrc) return;
         const dstActiveSegs = dstSyl.segments.filter((s) => s.role !== 'rest');
         const srcActiveSegs = matchedSrc.segments.filter((s) => s.role !== 'rest');
-        // Subdivide to phone-level piecewise warp when phoneme counts match; otherwise warp at syllable boundaries
-        if (dstActiveSegs.length > 0 && dstActiveSegs.length === srcActiveSegs.length) {
+        const srcById = new Map(srcActiveSegs.map((s) => [s.id, s] as const));
+        const hasIdMatches = dstActiveSegs.some((d) => srcById.has(d.id));
+        // Subdivide to phone-level piecewise warp by segment ID first (survives phone deletion/insertion),
+        // then by matching index when counts agree, falling back to syllable boundaries.
+        if (hasIdMatches) {
+          for (const dSeg of dstActiveSegs) {
+            const sSeg = srcById.get(dSeg.id);
+            if (!sSeg || dSeg.end_smp <= dSeg.start_smp) continue;
+            intervals.push({
+              t0: dSeg.start_smp,
+              t1: dSeg.end_smp,
+              u0: Math.max(0, Math.min(1, (sSeg.start_smp - srcOrigin) / srcDur)),
+              u1: Math.max(0, Math.min(1, (sSeg.end_smp - srcOrigin) / srcDur)),
+            });
+          }
+        } else if (dstActiveSegs.length > 0 && dstActiveSegs.length === srcActiveSegs.length) {
           for (let k = 0; k < dstActiveSegs.length; k++) {
             const dSeg = dstActiveSegs[k];
             const sSeg = srcActiveSegs[k];
@@ -330,6 +369,7 @@ export function buildAnnotationSynthesis(
   fallback: { f0Hz: number; tract: number[]; releaseTract: number[]; lipWidth: number; larynxHeight: number },
   reference?: AnnotationControlReference,
   poseSource?: AnnotationIpaPoseSource,
+  speakerBaseF0Hz?: number,
 ) {
   const stepHz = 200;
   const stepSmp = SAMPLE_RATE_HZ / stepHz;
@@ -337,12 +377,18 @@ export function buildAnnotationSynthesis(
   const syllables = clip.syllable_order.map((id) => clip.syllables[id]).filter(Boolean);
   const phones = syllables.flatMap((syllable) => syllable.segments);
   const referenceHz = voice?.f0_ref_hz ?? fallback.f0Hz;
-  const pitch = evaluateControlPitch(project, syllables, clip.end_smp, referenceHz, true, false, anchors);
+  const useReference = Boolean(reference?.frames?.length || reference?.m27RowsPa?.length);
+  const speechRegisterRatio =
+    !useReference && typeof speakerBaseF0Hz === 'number' && Number.isFinite(speakerBaseF0Hz) && speakerBaseF0Hz > 0 && referenceHz > 0
+      ? speakerBaseF0Hz / referenceHz
+      : 1;
+  const pitch = evaluateControlPitch(project, syllables, clip.end_smp, referenceHz, true, false, anchors, {
+    speechRegisterRatio,
+  });
   if (!pitch.ok) return pitch;
   const fixedNotes = absolutePianoNotes(syllables, referenceHz);
   const scoreNotes = syllables.flatMap((syllable) => syllable.targets.filter(isArrangedNote));
   const isSingingClip = scoreNotes.length > 0 || fixedNotes.length > 0;
-  const useReference = Boolean(reference?.frames?.length || reference?.m27RowsPa?.length);
   const controlledVoicing = new Map(phones.flatMap(phone => {
     const devoicedNasal = nasalPoseIpa(phone.ipa) !== phone.ipa;
     const start = segmentVoicingStartSmp(phone);
@@ -353,20 +399,28 @@ export function buildAnnotationSynthesis(
       ? [[phone.id, { nasal: devoicedNasal, start }]] as const
       : [];
   }));
+  const editedReferenceIds = new Set(reference?.editedPhoneIds);
+  const explicitPoseOverrideIds = new Set<string>();
   const authoredPoseIds = new Set(reference?.editedPhoneIds);
   for (const syllable of syllables) {
     for (const pose of syllable.overrides?.poses ?? []) {
       const id = pose.seg_id ?? syllable.segments[pose.seg_index]?.id;
-      if (id) authoredPoseIds.add(id);
+      if (id) {
+        authoredPoseIds.add(id);
+        explicitPoseOverrideIds.add(id);
+      }
     }
   }
   const speaker = voice?.speaker ?? 'JD2';
-  const protectedPoses = new Map(!useReference && poseSource !== 'model' && ['JD2', 'JD2-2D'].includes(speaker)
-    ? phones.flatMap(phone => {
-        if (authoredPoseIds.has(phone.id) || phone.role === 'rest') return [];
-        const params = getProtectedIpaPose(phone.ipa);
-        if (!params) return [];
-        return [[phone.id, { params, extras: getFullPoseForIpa(phone.ipa, undefined, speaker).extras }]] as const;
+  const protectedPoses = new Map(!useReference && ['JD2', 'JD2-2D'].includes(speaker)
+    ? syllables.flatMap(syllable => {
+        if (resolveSyllablePoseSource(poseSource, syllable) === 'model') return [];
+        return syllable.segments.flatMap(phone => {
+          if (authoredPoseIds.has(phone.id) || phone.role === 'rest') return [];
+          const params = getProtectedIpaPose(phone.ipa);
+          if (!params) return [];
+          return [[phone.id, { params, extras: getFullPoseForIpa(phone.ipa, undefined, speaker).extras }]] as const;
+        });
       })
     : []);
   const lateralGestures = useReference ? undefined : lateralGesturesForSynthesis(syllables, speaker, authoredPoseIds, protectedPoses);
@@ -458,12 +512,13 @@ export function buildAnnotationSynthesis(
     const timedVoice = phone && controlledVoicing.get(phone.id);
     const pressureLocked = voiceLocked || (Boolean(syllable) && authoredPressureIds.has(syllable!.id));
     const allowsSource = Boolean(syllable) && phone?.role !== 'rest' && (singingNote || lead);
+    const manualPose = Boolean(phone && authoredPoseIds.has(phone.id));
     payload.phonation_locks.push(voiceLocked || Boolean(timedVoice));
     payload.pressure_locks.push(pressureLocked);
     payload.pressure_pa.push(
       !allowsSource && (isSingingClip || reference?.preserveArticulationOnly)
         ? 0
-        : row && (reference?.preservePressure || !pressureLocked)
+        : row && !manualPose && (reference?.preservePressure || !pressureLocked)
           ? row[18]
           : allowsSource && syllable
             ? (isSingingClip && pressureLocked ? pressureAt(syllable, sample, g.pr_pa)
@@ -471,7 +526,6 @@ export function buildAnnotationSynthesis(
             : 0,
     );
 
-    const manualPose = Boolean(phone && authoredPoseIds.has(phone.id));
     const protectedPose = phone && protectedPoses.get(phone.id);
     const staticPose = protectedPose?.params ?? (manualPose
       ? cosineCoarticulatedStaticPose(sample, phone, prevPhone, nextPhone, fallback.tract)
@@ -556,7 +610,7 @@ export function buildAnnotationSynthesis(
       }
     }
     const glottis =
-      row && !voiceLocked && !(reference?.preserveArticulationOnly && frameF0 > 220)
+      row && !manualPose && !voiceLocked && !(reference?.preserveArticulationOnly && frameF0 > 220)
         ? row.slice(19)
         : ordinaryGlottis;
     glottis[6] = Math.max(payload.flutter, glottis[6]);
@@ -585,13 +639,18 @@ export function buildAnnotationSynthesis(
         } : undefined;
         const traits = phoneTraits(phone.ipa);
         const lateral = lateralGestures?.get(phone.id);
+        const syllableUsesModel = resolveSyllablePoseSource(poseSource, syllable) === 'model';
         const makeSpan = (start: number, end: number, phase: string, voiced: boolean) => {
           const start_frame = frameAt(start);
           const end_frame = frameAt(end);
           const start_sample = Math.max(0, start - startSmp);
           const end_sample = Math.min(endSmp, end) - startSmp;
           if (start_sample >= end_sample) return [];
-          const locked = authoredPoseIds.has(phone.id) || poseProtected;
+          const isEditedRefPhone = useReference && authoredPoseIds.has(phone.id);
+          const isRefAnchor = useReference && !isEditedRefPhone;
+          const locked = useReference
+            ? explicitPoseOverrideIds.has(phone.id) || poseProtected
+            : authoredPoseIds.has(phone.id) || poseProtected;
           const anchor = activePhonationAnchorAt(anchors, Math.floor((start + end) / 2));
           const phonationLocked = isExplicitNonModalAnchor(anchor);
           const diacriticPhonation =
@@ -618,9 +677,10 @@ export function buildAnnotationSynthesis(
               phase,
               voiced,
               locked,
+              ...(isRefAnchor ? { reference_anchor: true } : {}),
               pose_protected: poseProtected,
               protected_phone: protectedPhone,
-              pose_target_19: phase === 'silence' || poseSource === 'model' ? undefined : phone.params,
+              pose_target_19: phase === 'silence' || syllableUsesModel || isRefAnchor ? undefined : phone.params,
               ...(lateral && { lateral_ending: lateral.release ? 'release' as const : 'hold' as const }),
               pressure_locked: authoredPressureIds.has(syllable.id) || phonationLocked,
               phonation_locked: phonationLocked,
@@ -718,9 +778,27 @@ export function buildAnnotationSynthesis(
       });
     }
   }
-  const canPredict = !useReference && ['JD2', 'JD2-2D'].includes(payload.speaker) && articulationSpans.length > 0;
+  const canPredictText = !useReference && ['JD2', 'JD2-2D'].includes(payload.speaker) && articulationSpans.length > 0;
+  const canInpaintReference =
+    useReference &&
+    (editedReferenceIds.size > 0 || explicitPoseOverrideIds.size > 0) &&
+    ['JD2', 'JD2-2D'].includes(payload.speaker) &&
+    articulationSpans.length > 0;
+  const canPredict = canPredictText || canInpaintReference;
+  const inpaintSpans: Array<[number, number]> = [];
+  if (canInpaintReference) {
+    const rawIntervals = articulationSpans
+      .filter((span) => !(span as { reference_anchor?: boolean }).reference_anchor && span.end_frame > span.start_frame)
+      .map((span) => [span.start_frame, span.end_frame] as [number, number])
+      .sort((a, b) => a[0] - b[0]);
+    for (const [a, b] of rawIntervals) {
+      const prev = inpaintSpans[inpaintSpans.length - 1];
+      if (prev && a <= prev[1] + 2) prev[1] = Math.max(prev[1], b);
+      else inpaintSpans.push([a, b]);
+    }
+  }
   const hasPoseTargets = articulationSpans.some((span) => span.pose_target_19 !== undefined);
-  const referenceSpans = canPredict ? phones.flatMap((phone, index) => {
+  const referenceSpans = canPredictText ? phones.flatMap((phone, index) => {
     if (phone.end_smp <= startSmp || phone.start_smp >= endSmp ||
         authoredPoseIds.has(phone.id) || protectedPoses.has(phone.id) || lateralGestures?.has(phone.id) ||
         !usesTrialReferenceTrajectory(phone.ipa)) return [];
@@ -748,7 +826,12 @@ export function buildAnnotationSynthesis(
       ? {
           ...payload,
           predict_articulation: true,
-          ...(hasPoseTargets ? { pose_source: poseSource === 'current' ? 'custom' : 'stored' } : {}),
+          ...(canInpaintReference && inpaintSpans.length > 0
+            ? { reference_inpaint: true, inpaint_spans: inpaintSpans }
+            : {}),
+          ...(hasPoseTargets
+            ? { pose_source: poseSource === 'current' || poseSource === 'auto' ? 'custom' : 'stored' }
+            : {}),
           articulation_spans: articulationSpans,
           ...(referenceSpans.length ? { reference_spans: referenceSpans } : {}),
         }

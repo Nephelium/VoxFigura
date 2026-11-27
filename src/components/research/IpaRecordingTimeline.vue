@@ -22,6 +22,7 @@ const props = defineProps<{
   target?: { start_s: number; end_s: number };
   themeKey: string;
   loudness: boolean;
+  canRetryReferences?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -29,6 +30,7 @@ const emit = defineEmits<{
   seek: [seconds: number];
   source: [source: 'audio' | 'reconstruction' | 'revision'];
   loudness: [enabled: boolean];
+  retryReferences: [];
 }>();
 
 const WAVE_W = 1000;
@@ -52,6 +54,15 @@ const ticks = computed(() => {
   if (total.value <= 0) return ['0.00', '0.25', '0.50', '0.75', '1.00'];
   const dec = total.value >= 10 ? 1 : 2;
   return [0, 0.25, 0.5, 0.75, 1].map((ratio) => (total.value * ratio).toFixed(dec));
+});
+
+const freqTicks = computed(() => {
+  const maxHz = analysis.value?.maximumHz || 6000;
+  const fmtKhz = (hz: number) => {
+    const khz = hz / 1000;
+    return Number.isInteger(Number(khz.toFixed(1))) ? `${Math.round(khz)}k` : `${khz.toFixed(1)}k`;
+  };
+  return [fmtKhz(maxHz), fmtKhz((maxHz * 2) / 3), fmtKhz(maxHz / 3), '0Hz'];
 });
 
 const selection = computed(() => {
@@ -122,8 +133,8 @@ const statusLineText = computed(() => {
   if (!props.hasAudio) return '暂无实录参考音频 · 悬停或点击有实录的音标可即时检视波形与语谱图';
   if (loading.value || props.mediaLoading) return '正在解码实录音频并计算 Hann 窗语谱图…';
   if (failed.value) return '当前录音波形与语谱分析未完成';
-  if (!props.hasTrajectory) return '实录音频就绪（此条目无反演声道轨迹，支持原音试听与定位）';
-  return '实录音频与 50 Hz 声道反演轨迹就绪 · 在波形或语谱图上拖拽可逐帧定位';
+  if (!props.hasTrajectory) return '点击「原录音」直接播放或暂停（此条目无反演声道轨迹，支持原音试听与定位）';
+  return '点击「原录音 / 重建音」直接播放或暂停 · 在波形或语谱图上拖拽可逐帧定位';
 });
 
 const analysisRunner = new IpaRecordingAnalysisRunner();
@@ -248,47 +259,44 @@ onBeforeUnmount(() => {
   <!-- T-16: Strictly constant 216px outer container; zero layout shift across any IPA hover -->
   <section class="ipa-recording" aria-label="参考录音波形与语谱图">
     <header class="recording-bar">
-      <button
-        type="button"
-        class="btn sm icon-only"
-        :disabled="!hasAudio"
-        :aria-label="playing ? '暂停参考录音' : '播放参考录音'"
-        @click="emit('togglePlay')"
-      >
-        <IconSvg :name="playing ? 'stop' : 'play'" :size="12" />
-      </button>
       <strong>波形与语谱图</strong>
       <span class="recording-title" :title="title || '暂无实录音频'" translate="no">
         {{ title || '暂无实录音频' }}
       </span>
 
-      <span class="seg control-seg sm recording-sources" aria-label="波形音源">
+      <span class="seg control-seg sm recording-sources" aria-label="波形音源与播放控制">
         <button
           type="button"
           :disabled="!hasAudio"
           :aria-pressed="source === 'audio'"
           :class="{ active: hasAudio && source === 'audio' }"
+          :title="playing && source === 'audio' ? '点击暂停播放' : `点击直接播放${personal ? '个人录音' : '原录音'}`"
           @click="emit('source', 'audio')"
         >
-          {{ personal ? '个人录音' : '原录音' }}
+          <IconSvg :name="playing && source === 'audio' ? 'stop' : 'play'" :size="10" />
+          <span>{{ personal ? '个人录音' : '原录音' }}</span>
         </button>
         <button
           type="button"
           :disabled="!canReconstruct"
           :aria-pressed="source === 'reconstruction'"
           :class="{ active: canReconstruct && source === 'reconstruction' }"
+          :title="playing && source === 'reconstruction' ? '点击暂停播放' : `点击直接播放${canRevision ? '原重建' : '重建音'}`"
           @click="emit('source', 'reconstruction')"
         >
-          {{ canRevision ? '原重建' : '重建音' }}
+          <IconSvg :name="playing && source === 'reconstruction' ? 'stop' : 'play'" :size="10" />
+          <span>{{ canRevision ? '原重建' : '重建音' }}</span>
         </button>
         <button
           v-if="canRevision"
           type="button"
           :aria-pressed="source === 'revision'"
           :class="{ active: source === 'revision' }"
+          :title="playing && source === 'revision' ? '点击暂停播放' : '点击直接播放修订音'"
           @click="emit('source', 'revision')"
         >
-          修订音
+          <IconSvg :name="playing && source === 'revision' ? 'stop' : 'play'" :size="10" />
+          <span>修订音</span>
         </button>
       </span>
 
@@ -384,9 +392,7 @@ onBeforeUnmount(() => {
       <div class="stage-col">
         <div class="stage-plot-row">
           <div class="stage-y mono" aria-hidden="true">
-            <span>{{ ((analysis?.maximumHz || 6000) / 1000).toFixed(0) }}k</span>
-            <span>{{ ((analysis?.maximumHz || 6000) / 2000).toFixed(0) }}k</span>
-            <span>0Hz</span>
+            <span v-for="lbl in freqTicks" :key="lbl">{{ lbl }}</span>
           </div>
           <div
             ref="specBox"
@@ -447,9 +453,19 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <p class="recording-status" role="status" :title="statusLineText">
-      {{ statusLineText }}
-    </p>
+    <div class="recording-status-row">
+      <p class="recording-status" role="status" :title="statusLineText">
+        {{ statusLineText }}
+      </p>
+      <button
+        v-if="canRetryReferences && !hasAudio"
+        type="button"
+        class="btn xs"
+        @click="emit('retryReferences')"
+      >
+        重试载入实录
+      </button>
+    </div>
   </section>
 </template>
 
@@ -501,6 +517,12 @@ onBeforeUnmount(() => {
   flex: none;
   line-height: 1.1;
   white-space: nowrap;
+}
+
+.recording-sources > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .recording-time {
@@ -673,8 +695,19 @@ onBeforeUnmount(() => {
   line-height: 13px;
 }
 
+.recording-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  height: 16px;
+}
+
 .recording-status {
   margin: 0;
+  min-width: 0;
+  flex: 1;
   height: 16px;
   line-height: 16px;
   color: var(--muted);

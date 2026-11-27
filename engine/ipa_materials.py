@@ -111,9 +111,23 @@ def _read_formal_grid(path, _mtime):
     return tuple(tiers)
 
 
+@lru_cache(maxsize=512)
+def _cached_audio_info(path_str: str, _mtime_ns: int, _size: int):
+    info = sf.info(path_str)
+    return info.frames, info.samplerate
+
+
+def _audio_frames_and_rate(audio):
+    if isinstance(audio, Path):
+        st = audio.stat()
+        return _cached_audio_info(str(audio), st.st_mtime_ns, st.st_size)
+    info = sf.info(_wave_input(audio))
+    return info.frames, info.samplerate
+
+
 def _formal_window(original, grid):
-    info = sf.info(_wave_input(original))
-    full = RecordingWindow(0, info.frames, info.samplerate, info.frames)
+    frames, samplerate = _audio_frames_and_rate(original)
+    full = RecordingWindow(0, frames, samplerate, frames)
     tiers = _read_formal_grid(grid, grid.stat().st_mtime_ns) if grid else ()
     labeled = [(a, b) for _, intervals in tiers for a, b, label in intervals if label.strip()]
     if not labeled:

@@ -98,30 +98,30 @@ html:root[data-style="glass"] {
   --gap-layout: 10px;
   --pad-shell: 10px;
   --border-w: 1px;
-  --glass-alpha: 46%;
-  --panel-border: rgba(255, 255, 255, 0.84);
-  --ctrl-border: rgba(255, 255, 255, 0.72);
+  --glass-alpha: 30%;
+  --panel-border: color-mix(in srgb, var(--panel) 84%, var(--border));
+  --ctrl-border: color-mix(in srgb, var(--panel) 72%, var(--border));
   --panel-shadow:
-    0 12px 32px rgba(15, 23, 42, 0.09),
-    inset 0 1.5px 0 rgba(255, 255, 255, 0.92),
-    inset 0 0 16px rgba(255, 255, 255, 0.22);
+    0 12px 32px color-mix(in srgb, var(--shadow-ink) 10%, transparent),
+    inset 0 1.5px 0 color-mix(in srgb, var(--panel) 92%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--panel) 24%, transparent);
   --ctrl-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.06),
-    inset 0 1px 0 rgba(255, 255, 255, 0.88);
+    0 2px 8px color-mix(in srgb, var(--shadow-ink) 7%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--panel) 86%, transparent);
 }
 html:root[data-style="glass"][data-theme="dark"] {
-  --glass-alpha: 42%;
-  --panel-border: rgba(255, 255, 255, 0.20);
-  --ctrl-border: rgba(255, 255, 255, 0.18);
+  --glass-alpha: 26%;
+  --panel-border: color-mix(in srgb, var(--text) 18%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--text) 16%, transparent);
   --panel-shadow:
-    0 14px 36px rgba(0, 0, 0, 0.48),
-    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    0 14px 36px color-mix(in srgb, var(--shadow-ink) 52%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 20%, transparent);
   --ctrl-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    0 2px 8px color-mix(in srgb, var(--shadow-ink) 38%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 14%, transparent);
 }
 
-/* 4. Flagship Precision Instrument (精致仪器风 — Octathlon Scientific Publication Style) */
+/* 4. Flagship Precision Instrument (精致仪器风 — Pure Neutral Minimalism) */
 html:root[data-style="minimal"] {
   --r-panel: 6px;
   --r-ctrl: 4px;
@@ -130,40 +130,42 @@ html:root[data-style="minimal"] {
   --gap-layout: 8px;
   --pad-shell: 8px;
   --border-w: 1px;
-  --instrument-app: color-mix(in srgb, #f7f7fa 88%, var(--app));
-  --instrument-panel: color-mix(in srgb, #ffffff 92%, var(--panel));
-  --instrument-head: color-mix(in srgb, #f1f2f7 86%, var(--sidebar));
+  --instrument-app: color-mix(in srgb, var(--app) 88%, var(--sidebar));
+  --instrument-panel: color-mix(in srgb, var(--panel) 96%, var(--app));
+  --instrument-head: color-mix(in srgb, var(--sidebar) 88%, var(--panel));
   --panel-bg: var(--instrument-panel);
   --panel-strong: var(--instrument-head);
-  --panel-border: rgba(15, 23, 42, 0.105);
-  --ctrl-border: rgba(15, 23, 42, 0.145);
-  --line: rgba(15, 23, 42, 0.10);
+  --panel-border: color-mix(in srgb, var(--text) 11%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--text) 15%, transparent);
+  --line: color-mix(in srgb, var(--text) 10%, transparent);
+  --selected: color-mix(in srgb, var(--accent) 9%, var(--instrument-panel));
   --panel-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    0 8px 20px -10px rgba(15, 23, 42, 0.07);
+    0 1px 2px color-mix(in srgb, var(--shadow-ink) 4%, transparent),
+    0 8px 20px -10px color-mix(in srgb, var(--shadow-ink) 7%, transparent);
   --shadow-panel: none;
-  --ctrl-shadow: 0 1px 1px rgba(15, 23, 42, 0.03);
-  --ctrl-inset: inset 0 1px 2px rgba(15, 23, 42, 0.045);
-  --popover-bg: #ffffff;
+  --ctrl-shadow: 0 1px 1px color-mix(in srgb, var(--shadow-ink) 3%, transparent);
+  --ctrl-inset: inset 0 1px 2px color-mix(in srgb, var(--shadow-ink) 5%, transparent);
+  --popover-bg: var(--instrument-panel);
   --glass-backdrop: none;
 }
 
 html:root[data-style="minimal"][data-theme="dark"] {
-  --instrument-app: color-mix(in srgb, #0e0d15 90%, var(--app));
-  --instrument-panel: color-mix(in srgb, #151420 90%, var(--panel));
-  --instrument-head: color-mix(in srgb, #1b1928 88%, var(--sidebar));
+  --instrument-app: color-mix(in srgb, var(--shadow-ink) 64%, var(--app));
+  --instrument-panel: color-mix(in srgb, var(--shadow-ink) 46%, var(--panel));
+  --instrument-head: color-mix(in srgb, var(--shadow-ink) 36%, var(--sidebar));
   --panel-bg: var(--instrument-panel);
   --panel-strong: var(--instrument-head);
-  --panel-border: rgba(255, 255, 255, 0.09);
-  --ctrl-border: rgba(255, 255, 255, 0.13);
-  --line: rgba(255, 255, 255, 0.085);
-  --vm-canvas-bg: #12111c;
+  --panel-border: color-mix(in srgb, var(--text) 10%, transparent);
+  --ctrl-border: color-mix(in srgb, var(--text) 14%, transparent);
+  --line: color-mix(in srgb, var(--text) 9%, transparent);
+  --selected: color-mix(in srgb, var(--accent) 11%, var(--instrument-panel));
+  --vm-canvas-bg: color-mix(in srgb, var(--shadow-ink) 54%, var(--panel));
   --panel-shadow:
-    0 10px 28px -8px rgba(0, 0, 0, 0.65),
-    inset 0 1px 0 rgba(255, 255, 255, 0.045);
-  --ctrl-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  --ctrl-inset: inset 0 1px 2px rgba(0, 0, 0, 0.46);
-  --popover-bg: #181725;
+    0 10px 28px -8px color-mix(in srgb, var(--shadow-ink) 70%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
+  --ctrl-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent);
+  --ctrl-inset: inset 0 1px 2px color-mix(in srgb, var(--shadow-ink) 52%, transparent);
+  --popover-bg: color-mix(in srgb, var(--shadow-ink) 40%, var(--panel));
 }
 
 html:root[data-style="minimal"] .app-shell {
@@ -173,12 +175,15 @@ html:root[data-style="minimal"] .app-shell {
 html:root[data-style="minimal"] .tech-backdrop .material-surface {
   background-color: var(--instrument-app);
   background-image:
-    radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 45%),
-    radial-gradient(circle at 84% 82%, color-mix(in srgb, var(--teal) 6%, transparent), transparent 46%),
-    linear-gradient(to right, color-mix(in srgb, var(--text) 3.2%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--text) 3.2%, transparent) 1px, transparent 1px);
-  background-size: 100% 100%, 100% 100%, 36px 36px, 36px 36px;
+    linear-gradient(to right, color-mix(in srgb, var(--text) 3%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--text) 3%, transparent) 1px, transparent 1px);
+  background-size: 36px 36px, 36px 36px;
   filter: none;
+}
+
+html:root[data-style="minimal"] .tech-backdrop .custom-background,
+html:root[data-style="minimal"] .tech-backdrop .wallpaper-veil {
+  display: none;
 }
 
 html:root[data-style="minimal"] :is(.work-header, .subbar, .actbar, .set-nav, .statusbar) {
@@ -188,7 +193,6 @@ html:root[data-style="minimal"] :is(.work-header, .subbar, .actbar, .set-nav, .s
 }
 
 html:root[data-style="minimal"] .panel {
-  position: relative;
   background: var(--instrument-panel);
   backdrop-filter: none;
 }
@@ -196,13 +200,13 @@ html:root[data-style="minimal"] .panel {
 html:root[data-style="minimal"] .panel > .p-head {
   background: var(--instrument-head);
   border-bottom: 1px solid var(--panel-border);
-  box-shadow: inset 0 1.5px 0 0 color-mix(in srgb, var(--accent) 68%, transparent);
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--accent) 36%, var(--border));
 }
 
 html:root[data-style="minimal"] .work-header .header-tools > button {
   border-radius: var(--r-ctrl);
   border: 1px solid var(--ctrl-border);
-  background: color-mix(in srgb, var(--instrument-head) 72%, transparent);
+  background: color-mix(in srgb, var(--accent) 4%, var(--instrument-panel));
 }
 
 /* 5. Material 3 Elevation (现代材质分层) */

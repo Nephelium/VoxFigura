@@ -175,7 +175,12 @@ export function exciseAudioBufferRange(
     sampleRate: sr,
   });
 
-  const fadeSamples = Math.min(Math.round(sr * 0.005), s0, buffer.length - s1);
+  const halfFade = Math.min(
+    Math.round(sr * 0.0025),
+    s0,
+    buffer.length - s1,
+    Math.floor(cutLen / 2),
+  );
 
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
     const src = buffer.getChannelData(ch);
@@ -188,25 +193,28 @@ export function exciseAudioBufferRange(
     if (tailAvail > 0) {
       dst.set(src.subarray(s1, s1 + tailAvail), headCount);
     }
-    // Smooth 5 ms splice crossfade when joining two interior regions, or edge micro-fade
-    if (fadeSamples > 1 && headCount >= fadeSamples && tailAvail >= fadeSamples) {
-      for (let i = 0; i < fadeSamples; i++) {
-        const u = (i + 0.5) / fadeSamples;
+    // Smooth centered 5 ms raised-cosine splice crossfade when joining two interior regions
+    // Uses contiguous lookahead past s0 and lookbehind before s1 so no tail audio is duplicated.
+    if (halfFade >= 1 && headCount >= halfFade && tailAvail >= halfFade) {
+      const fadeLen = halfFade * 2;
+      for (let k = 0; k < fadeLen; k++) {
+        const u = (k + 0.5) / fadeLen;
         const wAfter = 0.5 * (1 - Math.cos(Math.PI * u));
-        const beforeVal = src[s0 - fadeSamples + i] ?? 0;
-        const afterVal = src[s1 + i] ?? 0;
-        dst[headCount - fadeSamples + i] = beforeVal * (1 - wAfter) + afterVal * wAfter;
+        const leftVal = src[s0 - halfFade + k] ?? 0;
+        const rightVal = src[s1 - halfFade + k] ?? 0;
+        dst[headCount - halfFade + k] = leftVal * (1 - wAfter) + rightVal * wAfter;
       }
     } else {
-      const edgeFade = Math.min(Math.round(sr * 0.004), Math.floor(nextLen / 4));
-      if (s0 === 0) {
+      const actualEnd = Math.min(nextLen, headCount + tailAvail);
+      const edgeFade = Math.min(Math.round(sr * 0.004), Math.floor(actualEnd / 4));
+      if (s0 === 0 && edgeFade > 0) {
         for (let i = 0; i < edgeFade; i++) {
           dst[i] *= 0.5 * (1 - Math.cos((Math.PI * i) / edgeFade));
         }
       }
-      if (s1 === buffer.length) {
+      if (s1 === buffer.length && edgeFade > 0) {
         for (let i = 0; i < edgeFade; i++) {
-          const idx = nextLen - 1 - i;
+          const idx = actualEnd - 1 - i;
           if (idx >= 0) dst[idx] *= 0.5 * (1 - Math.cos((Math.PI * i) / edgeFade));
         }
       }
@@ -317,7 +325,7 @@ export function exciseM27TrajectoryRange(
       .filter((f) => f.t < c0 - 1e-5 || f.t >= c1 - 1e-5)
       .map((f) => ({
         ...f,
-        t: Number((f.t >= c1 ? Math.max(0, f.t - cutDur) : f.t).toFixed(4)),
+        t: Number((f.t >= c1 - 1e-5 ? Math.max(0, f.t - cutDur) : f.t).toFixed(4)),
       }));
     const safeFrames = keptFrames.length > 0 ? keptFrames : [{ ...anim.frames[0], t: 0 }];
     nextAnim = {
@@ -376,7 +384,9 @@ export function exciseClipAndControlsRange(
     }
 
     const nextSegs: SegmentAnchor[] = [];
-    for (const seg of syl.segments) {
+    const oldToNewSegIndex = new Map<number, number>();
+    for (let oldIdx = 0; oldIdx < syl.segments.length; oldIdx++) {
+      const seg = syl.segments[oldIdx];
       if (seg.start_smp >= c0 && seg.end_smp <= c1) continue;
       const ns0 = mapSmp(seg.start_smp);
       const ns1 = mapSmp(seg.end_smp);
@@ -385,16 +395,25 @@ export function exciseClipAndControlsRange(
       const clonedSeg: SegmentAnchor = { ...seg, start_smp: ns0, end_smp: ns1 };
       if (clonedSeg.stop_timing) {
         const durMs = ((ns1 - ns0) / SAMPLE_RATE_HZ) * 1000;
-        if (clonedSeg.stop_timing.closure_ms + clonedSeg.stop_timing.release_ms > durMs) {
+        const st = clonedSeg.stop_timing;
+        const asp = st.aspiration_ms ?? 0;
+        if (st.closure_ms + st.release_ms + asp > durMs || st.vot_ms < -st.closure_ms) {
+          const nextClosure = Math.max(10, Math.min(st.closure_ms, Math.floor(durMs - 1)));
+          const remAfterClosure = Math.max(1, Math.floor(durMs - nextClosure));
+          const nextRelease = Math.max(1, Math.min(st.release_ms, remAfterClosure));
+          const nextAsp = Math.max(0, Math.min(asp, remAfterClosure - nextRelease));
+          const minVot = -nextClosure;
+          const maxVot = nextRelease + nextAsp;
           clonedSeg.stop_timing = {
-            ...clonedSeg.stop_timing,
-            closure_ms: Math.max(10, Math.floor(durMs - 1)),
-            release_ms: 1,
-            aspiration_ms: 0,
-            vot_ms: Math.min(clonedSeg.stop_timing.vot_ms, Math.max(1, Math.floor(durMs - 10))),
+            ...st,
+            closure_ms: nextClosure,
+            release_ms: nextRelease,
+            aspiration_ms: nextAsp,
+            vot_ms: Math.max(minVot, Math.min(maxVot, st.vot_ms)),
           };
         }
       }
+      oldToNewSegIndex.set(oldIdx, nextSegs.length);
       nextSegs.push(clonedSeg);
     }
 
@@ -403,12 +422,47 @@ export function exciseClipAndControlsRange(
     const sylStart = nextSegs[0].start_smp;
     const sylEnd = nextSegs[nextSegs.length - 1].end_smp;
     const nextTargets = syl.targets
-      .map((t) => ({
-        ...t,
-        start_smp: Math.max(sylStart, mapSmp(t.start_smp)),
-        end_smp: Math.min(sylEnd, mapSmp(t.end_smp)),
-      }))
+      .map((t) => {
+        const mappedStart = Math.max(sylStart, mapSmp(t.start_smp));
+        const mappedEnd = Math.min(sylEnd, mapSmp(t.end_smp));
+        const rightClippedSec = t.end_smp > c0 && t.end_smp < c1 ? (t.end_smp - c0) / SAMPLE_RATE_HZ : 0;
+        let nextCandidates = t.candidates;
+        if (rightClippedSec > 1e-6) {
+          const adjustCand = <T extends { m_st_per_s: number; b_end_st: number } | undefined>(cand: T): T =>
+            cand
+              ? {
+                  ...cand,
+                  b_end_st: Number((cand.b_end_st - cand.m_st_per_s * rightClippedSec).toFixed(3)),
+                }
+              : cand;
+          nextCandidates = {
+            ...t.candidates,
+            default: adjustCand(t.candidates.default) ?? t.candidates.default,
+            user: adjustCand(t.candidates.user),
+            transfer: adjustCand(t.candidates.transfer),
+            score: adjustCand(t.candidates.score),
+          };
+        }
+        return {
+          ...t,
+          start_smp: mappedStart,
+          end_smp: mappedEnd,
+          candidates: nextCandidates,
+        };
+      })
       .filter((t) => t.end_smp > t.start_smp);
+
+    const nextPoses = (syl.overrides?.poses ?? [])
+      .map((pose) => {
+        const mappedIdx = oldToNewSegIndex.get(pose.seg_index);
+        if (mappedIdx === undefined) return null;
+        return {
+          ...pose,
+          seg_index: mappedIdx,
+          seg_id: nextSegs[mappedIdx]?.id ?? pose.seg_id,
+        };
+      })
+      .filter((pose): pose is NonNullable<typeof pose> => pose !== null);
 
     const nucIdx = nextSegs.findIndex((s) => s.role === 'nucleus');
     keptSyllableOrder.push(sid);
@@ -420,6 +474,10 @@ export function exciseClipAndControlsRange(
       nucleus_index: nucIdx >= 0 ? nucIdx : 0,
       segments: nextSegs,
       targets: nextTargets,
+      overrides: {
+        ...syl.overrides,
+        poses: nextPoses,
+      },
     };
   }
 
@@ -429,32 +487,62 @@ export function exciseClipAndControlsRange(
   const lastEnd = lastSid ? keptSyllables[lastSid]?.end_smp ?? 0 : 0;
   nextClip.end_smp = Math.max(msToSamples(80), nextClip.end_smp - cutLen, lastEnd);
 
-  // Shift / prune phonation anchors
+  // Shift / prune phonation anchors, carrying over the last excised transition at c0 when needed
+  const orderedOrigAnchors = nextProject.phonation_anchor_order
+    .map((aid) => nextProject.phonation_anchors[aid])
+    .filter((anc): anc is PhonationAnchor => Boolean(anc))
+    .sort((a, b) => a.t_smp - b.t_smp);
+  const hasBoundaryAtC1 = orderedOrigAnchors.some((anc) => anc.t_smp === c1);
+  let lastDroppedInside: PhonationAnchor | null = null;
+  for (const anc of orderedOrigAnchors) {
+    if (anc.t_smp > c0 && anc.t_smp < c1) {
+      lastDroppedInside = anc;
+    }
+  }
+
+  const nextAnchorList: PhonationAnchor[] = [];
+  for (const anc of orderedOrigAnchors) {
+    if (anc.t_smp > c0 && anc.t_smp < c1) continue;
+    // When both c0 and a post-cut anchor (either at c1 or carried from inside (c0, c1)) land on c0,
+    // prefer the post-cut regime so downstream phonation stays faithful.
+    if (anc.t_smp === c0 && (hasBoundaryAtC1 || lastDroppedInside)) continue;
+    nextAnchorList.push({ ...anc, t_smp: mapSmp(anc.t_smp) });
+  }
+  if (lastDroppedInside && !hasBoundaryAtC1) {
+    nextAnchorList.push({ ...lastDroppedInside, t_smp: c0 });
+  }
+  nextAnchorList.sort((a, b) => a.t_smp - b.t_smp);
   const nextAnchorOrder: string[] = [];
   const nextAnchors: Record<string, PhonationAnchor> = {};
-  for (const aid of nextProject.phonation_anchor_order) {
-    const anc = nextProject.phonation_anchors[aid];
-    if (!anc) continue;
-    if (anc.t_smp > c0 && anc.t_smp < c1) continue;
-    const shiftedT = mapSmp(anc.t_smp);
-    nextAnchorOrder.push(aid);
-    nextAnchors[aid] = { ...anc, t_smp: shiftedT };
+  for (const anc of nextAnchorList) {
+    nextAnchorOrder.push(anc.id);
+    nextAnchors[anc.id] = anc;
   }
   nextProject.phonation_anchor_order = nextAnchorOrder;
   nextProject.phonation_anchors = nextAnchors;
 
-  // Shift / prune F0 pins
+  // Shift / prune F0 pins (prevent degenerate zero-span pins or duplicate timestamps)
   const nextPins: F0PinSegment[] = [];
   for (const pin of nextProject.f0_pins ?? []) {
-    const pts = pin.points
+    const rawPts = pin.points
       .filter((pt) => pt.t_smp <= c0 || pt.t_smp >= c1)
-      .map((pt) => ({ ...pt, t_smp: mapSmp(pt.t_smp) }));
-    if (pts.length >= 2) {
+      .map((pt) => ({ ...pt, t_smp: mapSmp(pt.t_smp) }))
+      .sort((a, b) => a.t_smp - b.t_smp);
+    const dedupPts: typeof rawPts = [];
+    for (const pt of rawPts) {
+      const prev = dedupPts[dedupPts.length - 1];
+      if (prev && prev.t_smp === pt.t_smp) {
+        dedupPts[dedupPts.length - 1] = pt;
+      } else {
+        dedupPts.push(pt);
+      }
+    }
+    if (dedupPts.length >= 2 && dedupPts[dedupPts.length - 1].t_smp > dedupPts[0].t_smp) {
       nextPins.push({
         ...pin,
-        start_smp: pts[0].t_smp,
-        end_smp: pts[pts.length - 1].t_smp,
-        points: pts,
+        start_smp: dedupPts[0].t_smp,
+        end_smp: dedupPts[dedupPts.length - 1].t_smp,
+        points: dedupPts,
       });
     }
   }

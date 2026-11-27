@@ -60,7 +60,7 @@ describe('pronunciation dictionary management', () => {
       new Map([['かな', [['ka', 'na']]]]));
     const entry = personalEntryForReading('かな', 'ja', 'nɯ', { syllableIndex: 1, syllableCount: 2 })!;
     expect(writeUserLexiconEntries(id, [entry])).toBe(true);
-    expect(rows.map(row => lookupUserLexiconReading(row)?.ipaJoined ?? row.ipa)).toEqual(['ka', 'nɯ', 'ka', 'nɯ', 'na']);
+    expect(rows.map(row => lookupUserLexiconReading(row)?.ipaJoined ?? row.ipa)).toEqual(['kä', 'nɯ', 'kä', 'nɯ', 'nä']);
     updateDictionaryPrefs({ jaMode: 'standard-only' });
     expect(lookupUserLexiconReading(rows[1])).toBeUndefined();
   });
@@ -87,5 +87,10 @@ describe('pronunciation dictionary management', () => {
     const cmn = builtInDialectProfile('cmn');
     expect(coreDialect({ ...cmn, id: 'dialect:mandarin-copy' }).sandhi).toEqual([]);
     expect(coreDialect(builtInDialectProfile('yue')).sandhi.length).toBeGreaterThan(0);
+  });
+
+  it('allows splitting a single-unit IPA into multiple units when replacing without prosody preservation', () => {
+    expect(replaceDictionaryUnits('ma˥pa˧', [0], 'ma˥ pa˧', false)).toBe('ma˥ pa˧');
+    expect(dictionaryIpaUnits(replaceDictionaryUnits('ma˥pa˧', [0], 'ma˥ pa˧', false))).toEqual(['ma˥', 'pa˧']);
   });
 });

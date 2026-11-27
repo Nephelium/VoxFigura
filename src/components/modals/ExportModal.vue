@@ -12,6 +12,7 @@ import {
 import { stageSubtitleRows } from './stage-subtitles';
 import { stageLayer } from '@/components/studio/nle-timeline';
 import StageMovieExport from '@/components/studio/StageMovieExport.vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { encodeWavFromAudioBuffer, triggerDownload } from './download';
 import { exportOptions, type ExportOptionEntry } from './export-options';
@@ -28,10 +29,21 @@ const exportAudio = computed(() => arrangement.value
   ? arrangement.value.audio
   : store.lastAudioBuffer.value);
 const visibleOptions = computed(() => exportOptions.filter(item => {
-  if (arrangement.value) return item.kind === 'vcproj' || (!!arrangement.value.clip && (item.kind === 'textgrid' || item.kind === 'pitchtier'));
+  const arrangerScoreFormat = item.kind === 'mid' || item.kind === 'vsqx' || item.kind === 'svp';
+  if (arrangement.value) {
+    if (item.kind === 'mid') return Boolean(arrangement.value.exportMidi);
+    if (item.kind === 'vsqx') return Boolean(arrangement.value.exportVsqx);
+    if (item.kind === 'svp') return Boolean(arrangement.value.exportSvp);
+    return item.kind === 'vcproj' || (!!arrangement.value.clip && (item.kind === 'textgrid' || item.kind === 'pitchtier'));
+  }
+  if (arrangerScoreFormat) return false;
   const stageFormat = item.kind === 'ass' || item.kind === 'srt';
   return research.value ? !stageFormat : stageFormat || item.kind === 'vcproj';
 }));
+const ARRANGEMENT_AUDIO_FORMATS: ReadonlyArray<SelectOption<'wav' | 'mp3'>> = [
+  { value: 'wav', label: 'WAV · 无损 PCM' },
+  { value: 'mp3', label: 'MP3 · 256 kbps' },
+];
 const format = ref<'wav'|'mp3'>('wav');
 const exporting = ref(false);
 let audioRequest: AbortController | undefined;
@@ -54,10 +66,19 @@ async function saveArrangement(separate: boolean, vocal=false) {
 }
 const modalCard = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
+const movieExportRef = ref<{ isBusy: () => boolean } | null>(null);
 const activeHelp = shallowRef<{ option: ExportOptionEntry; anchor: HTMLButtonElement } | null>(null);
 const helpPosition = ref<CSSProperties>({});
 let previousFocus: HTMLElement | null = null;
 let dismissTimer: number | undefined;
+
+function requestCloseExport(): void {
+  if (exporting.value || movieExportRef.value?.isBusy()) {
+    const confirmed = window.confirm('当前正在导出成片或音频，关闭窗口将中断导出任务。确认取消并关闭吗？');
+    if (!confirmed) return;
+  }
+  store.closeExportModal();
+}
 
 function positionHelp(): void {
   if (!activeHelp.value || !modalCard.value) return;
@@ -135,9 +156,13 @@ watch(workspace, (value, previous) => {
   }
 }, { flush: 'post' });
 watch(store.pageScale, positionHelp, { flush: 'post' });
-onMounted(() => window.addEventListener('resize', positionHelp));
+onMounted(() => {
+  window.addEventListener('resize', positionHelp);
+  window.addEventListener('vocalcut:request-close-export', requestCloseExport);
+});
 onBeforeUnmount(() => {
   window.removeEventListener('resize', positionHelp);
+  window.removeEventListener('vocalcut:request-close-export', requestCloseExport);
   cancelHelpDismissal();
 });
 
@@ -187,18 +212,27 @@ function buildTimeSeriesContent(mode: TimeSeriesSamplingMode): string | null {
   return res.csv;
 }
 
-function saveMidi() {
-  try {
-    const file=arrangement.value?.exportMidi?.();
-    if(file) triggerDownload(file,project.value.name+'.mid');
-  } catch(error) {store.pushToast(error instanceof Error ? error.message : 'MIDI 导出失败','warning');}
-}
 function saveOriginalGrid() {
   const grid = arrangement.value?.originalGrid;
   if (grid) triggerDownload(new Blob([stringifyTextGrid(grid)], {type:'text/plain;charset=utf-8'}), project.value.name+'-原始标注.TextGrid');
 }
 function save({ kind, suffix }: ExportOptionEntry): void {
   const current = project.value;
+  if (kind === 'mid' || kind === 'vsqx' || kind === 'svp') {
+    try {
+      const builder = kind === 'mid'
+        ? arrangement.value?.exportMidi
+        : kind === 'vsqx'
+          ? arrangement.value?.exportVsqx
+          : arrangement.value?.exportSvp;
+      const file = builder?.();
+      if (file) triggerDownload(file, (current.name || current.id) + '.' + suffix);
+    } catch (error) {
+      const label = kind === 'mid' ? 'MIDI' : kind === 'vsqx' ? 'VSQX' : 'SVP';
+      store.pushToast(error instanceof Error ? error.message : `${label} 导出失败`, 'warning');
+    }
+    return;
+  }
   let payload: Blob;
   if (kind === 'vcproj') {
     payload = new Blob([store.exportProjectJson()], { type: 'application/json' });
@@ -230,12 +264,13 @@ function save({ kind, suffix }: ExportOptionEntry): void {
       const f0 = evaluateControlPitch(current, syllables, clip.end_smp, voice?.f0_ref_hz ?? 220);
       if (!f0.ok) return store.pushToast(f0.error.hint, 'warning');
       const { f0_hz, times_smp } = f0.value;
+      // Praat PitchTier defines a closed domain [xmin, xmax], so include any point at `clip.end_smp`.
       const points = times_smp.flatMap((t, i) => t >= clip.start_smp && t <= clip.end_smp ? [{ time_s: t / SAMPLE_RATE_HZ, f0_hz: f0_hz[i] }] : []);
       content = exportPitchTier(points, clip.start_smp / SAMPLE_RATE_HZ, clip.end_smp / SAMPLE_RATE_HZ);
     } else {
       if (arrangement.value) {
         const clip = exportClip.value;
-        if (!clip) return store.pushToast('当前声部没有可导出的标注', 'warning');
+        if (!clip) return store.pushToast('当前轨道没有可导出的标注', 'warning');
         content = exportTextGrid({ ...current, clips: { [clip.id]: clip }, clip_order: [clip.id] });
       } else {
         content = exportTextGrid(current);
@@ -244,17 +279,17 @@ function save({ kind, suffix }: ExportOptionEntry): void {
     const isCsv = kind === 'csv' || kind === 'csv_50hz' || kind === 'csv_norm10';
     payload = new Blob([content], { type: isCsv ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' });
   }
-  triggerDownload(payload, current.id + '.' + suffix);
+  triggerDownload(payload, (current.name || current.id) + '.' + suffix);
 }
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="workspace === 'studio' || workspace === 'research'" class="export-modal-mask" role="dialog" aria-modal="true" aria-labelledby="artifact-title" @click.self="store.closeExportModal()" @keydown.esc="dismissHelpOnEscape">
+    <div v-if="workspace === 'studio' || workspace === 'research'" class="export-modal-mask" role="dialog" aria-modal="true" aria-labelledby="artifact-title" @click.self="requestCloseExport" @keydown.esc="dismissHelpOnEscape">
       <section ref="modalCard" class="export-modal-card output-dialog">
         <header class="p-head">
           <strong id="artifact-title">{{ research ? '导出' : '导出剪辑工程' }}</strong>
-          <button ref="closeButton" type="button" class="btn xs icon-only" aria-label="关闭导出窗口" @click="store.closeExportModal()"><IconSvg name="close" :size="14" /></button>
+          <button ref="closeButton" type="button" class="btn xs icon-only" aria-label="关闭导出窗口" @click="requestCloseExport"><IconSvg name="close" :size="14" /></button>
         </header>
         <div class="p-body output-options" @scroll.passive="positionHelp">
           <div class="output-intro">
@@ -262,13 +297,22 @@ function save({ kind, suffix }: ExportOptionEntry): void {
             <p class="output-hint"><IconSvg name="info" :size="13" />悬停或按 Tab 聚焦选项，查看文件内容、用途和导入方法。</p>
           </div>
           <div v-if="arrangement?.renderAudio" class="arrangement-audio">
-            <label>音频格式 <select v-model="format" class="inp" :disabled="exporting"><option value="wav">WAV · 无损 PCM</option><option value="mp3">MP3 · 256 kbps</option></select></label>
+            <div class="arrangement-fmt-field">
+              <span class="arrangement-fmt-label">音频格式</span>
+              <CustomSelect
+                :model-value="format"
+                :options="ARRANGEMENT_AUDIO_FORMATS"
+                :disabled="exporting"
+                size="sm"
+                aria-label="编曲导出音频格式"
+                @update:model-value="v => { format = v as 'wav' | 'mp3'; }"
+              />
+            </div>
             <button class="btn primary" :disabled="exporting" @click="saveArrangement(false)">导出总混音</button>
             <button v-if="arrangement.renderVoice" class="btn" :disabled="exporting" @click="saveArrangement(false,true)">仅导出当前人声</button>
-            <button class="btn" :disabled="exporting" @click="saveMidi">导出 MIDI 乐谱</button>
             <button class="btn" :disabled="exporting" @click="saveArrangement(true)">批量导出分轨 ZIP</button>
             <button v-if="arrangement.originalGrid" class="btn" @click="saveOriginalGrid">保存原始 TextGrid</button>
-            <small role="status">{{ exporting ? '正在渲染并编码…' : '导出全部启用声部，分轨从同一零点开始。' }}</small>
+            <small role="status">{{ exporting ? '正在渲染并编码…' : '导出全部启用轨道，分轨从同一零点开始；下方可导出多轨 MIDI / VSQX / SVP 乐谱。' }}</small>
           </div>
           <button
             v-for="option in visibleOptions"
@@ -290,7 +334,7 @@ function save({ kind, suffix }: ExportOptionEntry): void {
             </span>
             <IconSvg name="download" :size="14" />
           </button>
-          <StageMovieExport v-if="!research" />
+          <StageMovieExport v-if="!research" ref="movieExportRef" />
         </div>
       </section>
       <div
@@ -324,27 +368,29 @@ function save({ kind, suffix }: ExportOptionEntry): void {
 </template>
 
 <style scoped>
-.arrangement-audio { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 0 }.arrangement-audio small{width:100%;color:var(--muted)}
+.arrangement-audio { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 0 }
+.arrangement-audio small { width:100%; color:var(--muted) }
+.arrangement-fmt-field { display:flex; align-items:center; gap:6px; }
+.arrangement-fmt-label { font-size:0.916667rem; color:var(--muted); white-space:nowrap; }
 .output-dialog { max-width: 540px; }
 .output-options { display: grid; gap: 7px; padding: 14px; }
 .output-intro { display: grid; gap: 4px; margin-bottom: 3px; }
 .output-name { margin: 0; font-weight: 650; }
 .output-hint { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); font-size: 0.916667rem; }
 .output-hint svg { flex: none; }
-.output-option { display: grid; grid-template-columns: 82px 1fr 16px; gap: 12px; align-items: center; background: var(--ctrl-bg, var(--panel)); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-ctrl); padding: 10px; text-align: left; }
+.output-option { display: grid; grid-template-columns: 82px 1fr 16px; gap: 12px; align-items: center; background: var(--ctrl-bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-ctrl); padding: 10px; text-align: left; }
 .output-option:not([aria-disabled="true"]) { cursor: pointer; }
 .output-option[aria-describedby] { border-color: var(--accent); background: var(--selected); }
 .output-option[aria-disabled="true"] { opacity: .65; cursor: default; }
 .output-suffix { color: var(--accent); font-size: 0.875rem; white-space: nowrap; }
 .output-option small { display: block; margin-top: 3px; color: var(--muted); font-size: 0.916667rem; line-height: 1.55; }
-.output-help { position: absolute; display: flex; flex-direction: column; z-index: 1; }
+.output-help { position: absolute; display: flex; flex-direction: column; z-index: var(--z-popover); }
 .output-help-card {
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   user-select: text;
-  zoom: var(--page-scale);
-  font-size: max(1rem, calc(12px / var(--page-scale, 1)));
+  font-size: 1rem;
   color: var(--text);
   background: var(--popover-bg);
   backdrop-filter: var(--glass-backdrop);

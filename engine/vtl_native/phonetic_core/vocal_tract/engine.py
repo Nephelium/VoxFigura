@@ -249,7 +249,7 @@ class Engine:
         else:
             settings=validate_source(source,self.source_presets)
             pressure=settings['pressure_pa']*10 # native dPa
-        if not np.isfinite([f0,pressure]).all() or not 60 <= f0 <= min(600,self.gmax[0]) or not 0 <= pressure <= 16000:
+        if not np.isfinite([f0,pressure]).all() or not self.gmin[0] <= f0 <= self.gmax[0] or not 0 <= pressure <= 16000:
             raise ValueError('Invalid source parameters')
         g=self.gneutral.copy(); g[0]=f0; g[1]=pressure
         g[self.gnames.index('flutter')]=self.flutter
@@ -511,12 +511,16 @@ class Engine:
             contours = self._current_contours()
             nasal_lengths,nasal_areas,nasal_port = self._current_nasal()
             airway_sections=[]
+            up=np.empty(96);lo=np.empty(96)
             for i in range(self.section_count):
-                up=np.empty(96);lo=np.empty(96);self.geom.p3_profile(i,dp(up),dp(lo))
+                self.geom.p3_profile(i,dp(up),dp(lo))
                 ok=(np.abs(up)<100)&(np.abs(lo)<100)&(up>=lo)
                 gap=np.where(ok,np.maximum(0,up-lo),0)
+                ok_list=ok.tolist()
+                up_r=np.round(up,5).tolist()
+                lo_r=np.round(lo,5).tolist()
                 airway_sections.append({'index':i,'area':float(np.sum((gap[:-1]+gap[1:])*.5)*(7/96)),
-                    'upper':[round(float(v),5) if flag else None for v,flag in zip(up,ok)],'lower':[round(float(v),5) if flag else None for v,flag in zip(lo,ok)]})
+                    'upper':[v if flag else None for v,flag in zip(up_r,ok_list)],'lower':[v if flag else None for v,flag in zip(lo_r,ok_list)]})
             acoustic=self._current_tube();lengths=acoustic['lengths'];tube_api=acoustic['areas']
             self.snapshot_tube=acoustic
             mag=np.empty(4096); phase=np.empty(4096)

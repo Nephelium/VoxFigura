@@ -32,15 +32,16 @@
 | 20 | `D:\PhoneticToolbox\PhoneticToolbox_v3\frontend\public\m05\mediapipe-0.10.14\{face_landmarker.task,vision_bundle.classic.js,wasm/vision_wasm_internal.{js,wasm}}` 及 `resources\m05\metric-spec.json`、`frontend\src\modules\lip-extraction\{stabilizer.ts,metrics.ts}` | `public/mediapipe-0.10.14/`、`src/components/research/face-landmarks.ts`、`src/components/research/LiveHead3DStage.vue` | Apache-2.0（`@mediapipe/tasks-vision@0.10.14`；Face Mesh V2 模型卡）/ GPL-3.0-or-later（PTB 拓扑与防抖规范）；完整 task 模型包许可范围待核实 | 是（裁剪冗余非 SIMD 与 CJS/ESM 副本，扩展 Worker 输出 3D 姿态矩阵与表情系数，新增与 VTL 3D 声道同坐标系的透视人头外貌微调与联合重建视口） | 实时声道重建页面的摄像头面部特征点追踪与三维透视人头-声道联合重建 |
 | 21 | [MediaPipe v0.10.14 标准面部网格](https://github.com/google-ai-edge/mediapipe/blob/v0.10.14/mediapipe/modules/face_geometry/data/canonical_face_model.obj) | `public/mediapipe-0.10.14/canonical_face_model.obj` | Apache-2.0 | 原样复制，附上游许可 | 用于实时三维人头的 468 点贴面网格与变形迁移 |
 | 22 | `F:\TensorTract3_Train\.venv\Lib\site-packages\pyopenjtalk\dictionary\{sys.dic,COPYING}`（只读提取） | `public/vocal-tract/assets/ja-accent-v1/*`、`public/licenses/naist-jdic.txt`、`packages/g2p-ts/src/japanese-accent.ts`、`scripts/build_ja_accent_dict.py` | Modified BSD License (NAIST-JDIC / Open JTalk) | 是（只读提取表层词、平假名读音、音调核与助词标记，过滤生僻词并压缩为 16 个 `.tsv.gz` 分片，共 2.34 MB） | 前端纯离线日语东京高低音调标注与 F0 轮廓生成，不打包 `pyopenjtalk` 原生运行时 |
+| 23 | [Vincentwei1021/video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft)（`assets/lib/helpers/{motion,shake,rand}.ts`、`demos/_fixtures/{Look,Polish}.tsx`、镜头/转场/节拍算法及 `references/music-beat-sync.md`） | `src/components/studio/{stage-motion,stage-fx,stage-transitions,stage-beat-sync}.ts`、`stage-caption.ts`、`stage-scene.ts` | Apache-2.0（单向兼容本项目 GPL-3.0-or-later） | 是（纯 TypeScript 与 Canvas 2D 原生重写；不引入 React/Remotion 运行时，不复制其 `assets/audio` 与 Mixkit 第三方音频） | 剪辑台关键帧电影缓动、6 种全局运镜、9 种镜头转场、8 套舞台调色与暗角/颗粒/晕染后处理、纯前端频带包络与最小二乘节拍网格检测、卡拉 OK 柔边随读字幕及蒙太奇片尾收尾 |
 
-> 注：未训模型插槽 `browser-light-m27`（浏览器端 ONNX）与自定义 `speaker` 微调权重继续保持预留接口状态（对应后端返回 `501` 契约 JSON），不随本仓库分发；`IPA2Tract-Lite` 与 `Tract2Area-Proxy` 已正式随本地推理引擎接入并提供协同构音能力。
+> 注：全部 7 个核心自研模型（`Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）及 `DPDFNet2`、`SwiftF0` 共 9 个 ONNX 槽位已正式随本地推理引擎接入；早期预留的 `501` 扩展空槽（`browser-light-m27` 与自定义 `speaker` 微调槽及 `packages/model-adapters/src/reserved-slots.ts`）已于 2026-11-26 清理移除。
 
 ## 3. 本项目独立新创部分
 
 1. **路线 B 三工作区产品架构**：知乎发音探索实验室（首屏双声道对比 + 连续滑块 + 自定义像素尺寸发音卡片导出）与科研工作台、剪辑工作室共享同一 `.vcproj` 底座。
 2. **48 kHz 整数采样与统一内核（`packages/core-ts/`）**：Prom-on et al. (2009) 3 阶临界阻尼 qTA 基频层（统一 `b_end`、歌唱重置、零声母预滑）、韵核踩拍辅音抢拍调度器、VoQS 实录锚点与 10 维声门参数、锚点联动重定时 `retime()`、RFC 6902 正逆补丁命令总线与单步撤销、TextGrid 双向读写、生理连续统与非递归方言变调引擎。
 3. **本地代理与助手**。公开和参赛入口均接受用户选择的助手服务，通过命令总线执行工作台编辑。参赛入口单独挂载知乎搜索及创作内容接口。
-4. **工作台外观**。八种表面风格、日夜背景与配色共用一组变量。各风格分别保存面板和控件透明度，头部解剖外观独立配置。
+4. **工作台外观**。八种表面风格、日夜背景与配色共用一组变量。切换风格时可以延续当前设置，或应用按原有风格示意卡取色的配色与材质初值。头部解剖外观独立配置。七组日夜工作台壁纸由 Codex 内置 ImageGen 生成，运行资源位于 `public/workspace-art/`，生成提示词见 [工作台壁纸生成记录](./docs/WORKSPACE_WALLPAPERS.md)。
 
 ### 本地录音处理和声道交互
 - DPDFNet 使用 PhoneticToolbox 的 `packages/phonetic_core/src/phonetic_core/acoustic/neural.py` 和其清单指定的 DPDFNet2 48 kHz HR ONNX。运行时只读本地已安装权重，CPU 分声道推理。模型授权参考 PhoneticToolbox 的 DPDFNet Apache-2.0 文件。

@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import NavArtwork from '@/components/common/NavArtwork.vue';
+import { activeWorkspaceBackground } from '@/data/workspace-images';
 import { useWorkbenchStore } from '@/stores/workbench';
 import { BUILTIN_BACKDROPS, BUILTIN_SKINS, palettes } from '@/styles/skin-registry';
 import { paletteShortName } from '@/styles/themes';
@@ -63,10 +64,10 @@ const activeSkinDesc = computed(
     </div>
 
     <div class="tsp-sec-head">
-      <strong>界面设计风格</strong>
+      <strong>表面风格</strong>
       <span class="muted">{{ activeSkinDesc }}</span>
     </div>
-    <div class="tsp-skin-grid" role="group" aria-label="网页设计风格">
+    <div class="tsp-skin-grid" role="group" aria-label="表面风格">
       <button
         v-for="skin in BUILTIN_SKINS"
         :key="skin.id"
@@ -76,7 +77,7 @@ const activeSkinDesc = computed(
         :aria-pressed="store.surfaceStyle.value === skin.id"
         @click="store.setSurfaceStyle(skin.id)"
       >
-        <NavArtwork item="appearance" :skin="skin.id" class="tsp-skin-emblem" />
+        <NavArtwork item="appearance" :skin="skin.id" class="tsp-skin-emblem" toolbar theme-tint />
         <span class="tsp-skin-name">
           <span>{{ skin.shortName }}</span>
           <IconSvg v-if="store.surfaceStyle.value === skin.id" name="check" :size="11" />
@@ -111,23 +112,23 @@ const activeSkinDesc = computed(
         <span>自选</span>
         <input
           type="color"
-          :value="store.customAccentHex.value"
+          :value="store.accentPickerColor.value"
           @input="store.setCustomAccent(($event.target as HTMLInputElement).value)"
         />
       </label>
     </div>
 
     <div class="tsp-sec-head">
-      <strong>工作区底纹</strong>
+      <strong>工作区背景</strong>
       <span class="muted">随时可在右上角外观面板微调</span>
     </div>
-    <div class="tsp-backdrop-row" role="group" aria-label="工作区底纹">
+    <div class="tsp-backdrop-row" role="group" aria-label="工作区背景">
       <button
         v-for="b in BUILTIN_BACKDROPS"
         :key="b.id"
         type="button"
         class="btn xs"
-        :class="{ active: store.backdropId.value === b.id }"
+        :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
         @click="store.setBackdrop(b.id)"
       >
         {{ b.label }}
@@ -199,8 +200,8 @@ const activeSkinDesc = computed(
   gap: 4px;
   padding: 7px 5px 6px;
   border-radius: var(--r-ctrl, 7px);
-  border: 1px solid var(--panel-border);
-  background: var(--ctrl-bg);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 84%, var(--app));
   color: var(--text);
   cursor: pointer;
   transition:
@@ -210,15 +211,15 @@ const activeSkinDesc = computed(
 }
 
 .tsp-skin-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--panel-border));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
   transform: translateY(-1px);
 }
 
 .tsp-skin-card.active {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--selected) 72%, var(--ctrl-bg));
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
   color: var(--accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .tsp-skin-emblem {
@@ -299,6 +300,21 @@ const activeSkinDesc = computed(
   align-items: center;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+.tsp-backdrop-row .btn.xs {
+  height: auto;
+  min-height: 24px;
+  padding: 3px 7px;
+  border-color: color-mix(in srgb, var(--border) 88%, transparent);
+}
+
+.tsp-backdrop-row .btn.xs.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: none;
 }
 
 @media (max-width: 480px) {

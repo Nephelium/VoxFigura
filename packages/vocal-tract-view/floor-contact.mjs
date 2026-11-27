@@ -9,12 +9,22 @@ const dot=(n,p)=>n[0]*p[0]+n[1]*p[1]+n[2]*p[2];
 const at=(m,i)=>m.vertices.slice(i*3,i*3+3);
 const lerp=(a,b,t)=>a.map((v,k)=>v+(b[k]-v)*t);
 let cachedKey='',cachedCells=[];
+let cachedMidMesh=null,cachedMidTeeth=null,cachedMidCells=[];
 
-export function floorCells(mesh,teeth=null){
-  const key=JSON.stringify([mesh.vertices,teeth?.vertices]);
-  if(key===cachedKey)return cachedCells;
+export function floorCells(mesh,teeth=null,{midline=false}={}){
+  if(midline){
+    if(mesh.vertices===cachedMidMesh&&teeth?.vertices===cachedMidTeeth)return cachedMidCells;
+  }else{
+    const key=JSON.stringify([mesh.vertices,teeth?.vertices]);
+    if(key===cachedKey)return cachedCells;
+  }
   const cells=[];
+  const MID_EPS=0.02;
   function add(a,b,c){
+    if(midline){
+      const zmin=Math.min(a[2],b[2],c[2]),zmax=Math.max(a[2],b[2],c[2]);
+      if(zmax<-MID_EPS||zmin>MID_EPS)return;
+    }
     const dx=b[0]-a[0],dz=b[2]-a[2],ex=c[0]-a[0],ez=c[2]-a[2],det=dx*ez-dz*ex;
     if(Math.abs(det)<1e-10)return;
     const sx=((b[1]-a[1])*ez-(c[1]-a[1])*dz)/det,sz=(dx*(c[1]-a[1])-ex*(b[1]-a[1]))/det;
@@ -37,7 +47,9 @@ export function floorCells(mesh,teeth=null){
   const quad=(a,b,c,d)=>{add(a,b,c);add(b,d,c);};
   // Outside the dental arch continue the rim horizontally, bounded to the real
   // anterior jaw outlet rather than an infinite shelf at x = +20 cm.
-  for(let r=1;r<rows.length;r++)for(const j of [0,rows[r].length-2])quad(rows[r-1][j],rows[r-1][j+1],rows[r][j],rows[r][j+1]);
+  if(!midline){
+    for(let r=1;r<rows.length;r++)for(const j of [0,rows[r].length-2])quad(rows[r-1][j],rows[r-1][j+1],rows[r][j],rows[r][j+1]);
+  }
   for(let j=1;j<rows[0].length;j++)quad(rows[0][j-1],rows[0][j],[-20,rows[0][j-1][1],rows[0][j-1][2]],[-20,rows[0][j][1],rows[0][j][2]]);
   const frontRow=rows.at(-1);
   for(let j=1;j<frontRow.length;j++){
@@ -69,7 +81,12 @@ export function floorCells(mesh,teeth=null){
       return ribBounds.at(-1)[1];
     };
     for(let i=0;i<teeth.triangles.length;i+=3){
-      const points=teeth.triangles.slice(i,i+3).map(j=>at(teeth,j));add(...points);
+      const a0=teeth.triangles[i],b0=teeth.triangles[i+1],c0=teeth.triangles[i+2];
+      if(midline){
+        const z0=teeth.vertices[a0*3+2],z1=teeth.vertices[b0*3+2],z2=teeth.vertices[c0*3+2];
+        if(Math.max(z0,z1,z2)<-MID_EPS||Math.min(z0,z1,z2)>MID_EPS)continue;
+      }
+      const points=[at(teeth,a0),at(teeth,b0),at(teeth,c0)];add(...points);
       for(let j=0;j<3;j++){
         const a=points[j],b=points[(j+1)%3],c=points[(j+2)%3];
         if(Math.abs(b[2]-a[2])<EPS)continue;
@@ -80,7 +97,9 @@ export function floorCells(mesh,teeth=null){
       }
     }
   }
-  cachedKey=key;cachedCells=cells;return cells;
+  if(midline){cachedMidMesh=mesh.vertices;cachedMidTeeth=teeth?.vertices??null;cachedMidCells=cells;}
+  else{cachedKey=JSON.stringify([mesh.vertices,teeth?.vertices]);cachedCells=cells;}
+  return cells;
 }
 
 function overlap(poly,cell){

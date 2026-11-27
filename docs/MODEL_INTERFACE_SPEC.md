@@ -1,9 +1,9 @@
 # VoxFigura 模型接入与接口规范（MODEL_INTERFACE_SPEC）
 
-> 版本 1.1 · 2026-11-24
-> 适用范围：`packages/model-adapters/`、`engine/`、`server/index.mjs` 及 VoxFigura Core 本地推理
+> 版本 1.2 · 2026-11-26
+> 适用范围：`packages/model-adapters/`、`engine/`、公共代理 `server/proxy.mjs` 及三版/便携入口（`server/index.mjs`、`server/hackathon.mjs`、`server/friends.mjs`、`server/portable.mjs`）与 VoxFigura Core 本地推理
 
-## 0. 全局单位、时间网格与物理边界约定
+## 0. 全局单位、时间网格、物理边界与安全契约
 
 | 量纲 / 概念 | 前端 & TS Adapter 层 | Python `engine/` & 原生边界 |
 | --- | --- | --- |
@@ -15,7 +15,18 @@
 
 **JD2 19 维与 17 维声道映射**：JD2 原生声道参数共 19 维，其中 `TRX`（下标 14）与 `TRY`（下标 15）在非 `manual_root` 模式下由引擎自动计算；`TRACT_17_TO_19_IDX = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,16,17,18]`。
 
-合成和重合成请求可加 `audio_gain`。应用使用 `peak` 时，在边界淡入淡出和静音处理完成后，整条波形使用同一倍率达到 0.8 的绝对峰值。静音保持原电平。`original` 保留处理后的引擎电平。省略该字段时沿用原 API 行为。音量模式独立于构型与控制轨。
+**声门帧维数与数值溢出校验（`engine/validation.py`）**：
+- `glottis_frames` 标准契约为 **8 维** `[xb_cm, xt_cm, ca_cm2, lag_rad, ra, ps, fl, shim]`；为保持向后兼容，校验器与下游桥接层（`dense_channel` / `m27_bridge` / `keyframe_lite`）接受历史 **7 维输入**并统一按缺省 `shim = 0.0` 处理。
+- 数值转换会拦截布尔值、`NaN/Inf` 以及超大 JSON 整数引发的 `OverflowError`，一律返回 HTTP `400` 标准 `out_of_range` 契约 JSON，不落入 500。
+
+**音量增益、超时、引擎锁与跨站安全契约**：
+- 合成和重合成请求可加 `audio_gain`（`peak` | `original`）。使用 `peak` 时在边界淡入淡出和静音处理完成后将整条波形按同一倍率归一至 `0.8` 绝对峰值（静音保持原电平）；`original` 保留引擎处理后电平；省略时沿用各路由默认值。
+- **超时分级**：Node 代理默认转发超时 `120 s`，`/api/m27/reconstruct` 放宽至 `185 s`（匹配前端适配器 `180 s` 超时）；Python 引擎 HTTP socket 超时为 `200 s`。
+- **说话人锁超时**：VTL 原生引擎按说话人加锁，默认等待 `VOCALCUT_ENGINE_LOCK_TIMEOUT_S = 30.0 s`；超时抛出 `EngineBusyError` 并返回 HTTP `503` `{ ok: false, error: { code: "engine_busy", field: "speaker", value: speaker, hint }, hint }`。并行分块（`_run_chunk` / `_exec_block`）与 `lease` 均在 `try/finally` 中复位 `section_count`、`perturbation` 与 `flutter`。
+- **回环来源防护与引擎令牌**：`server/proxy.mjs` 默认仅绑定 `127.0.0.1`（非回环需显式 `VOCALCUT_ALLOW_NON_LOOPBACK=1`），代理与引擎均强制校验回环 `Host` 白名单、拒绝 `Sec-Fetch-Site: cross-site`、校验白名单 `Origin`（及非 GET 无 Origin 时的 `Referer`），拒绝 `text/plain` / `application/x-www-form-urlencoded` / `multipart/form-data`（HTTP `415`），JSON 写路由强制 `Content-Type: application/json`。开发态 `scripts/start-engine.mjs` 未显式设置 `VOCALCUT_ENGINE_TOKEN` 时自动生成 32 字节随机令牌写入 `.cache/local-engine.token`（权限 `0o600`，退出自动清理），代理按 `VOCALCUT_ENGINE_TOKEN` → `.cache/local-engine.token` 顺序读取并附带 `X-VoxFigura-Engine-Token` 请求头。
+- **便携缓存与更新检查接口（代理侧）**：
+  - `/api/portable/cache*` 仅在便携运行时（设置 `VOCALCUT_PORTABLE_ROOT`）开放，非便携态统一返回 HTTP `404`；清理严格走白名单（已知版本目录且含 `bundle-manifest.json`、`.u-*`、`*.incomplete-*`、已知版本 `.lock`），其余标为 `foreign` 永不删除，并跳过持锁（`locked: true`）实例；文件夹选择器通过环境变量 `VF_INIT_DIR` 传入 `-LiteralPath`，避免脚本拼接注入。
+  - `GET /api/app/update-check` 仅使用 HTTPS 清单地址（默认 `https://www.phonetictoolbox.com/voxfigura/updates/latest.json`，无明文 HTTP 回落），并校验清单内 `download_url` / `page_url` 属于 HTTPS 白名单域名及 `sha256` 为 64 位十六进制。
 
 ---
 
@@ -35,12 +46,15 @@
   - **响应**：`{ "ok": true, "state": { /* embed.mjs 兼容完整轮廓/网格 state */ }, "area_cm2": number[65], "oral_min_area_cm2": number, "transfer_db": number[], "formants_hz": [number, number, number] }`
 - `POST /vtl/synthesize`（绕开 `trajectory.py` 201 点上限的密集控制序列通道，支持 `synth_mode: "physical" | "neural"`）：
   - **请求**：`speaker`、`step_hz`（或 `frame_step_ms`）、`f0_hz`、`pressure_pa`、`tract_frames`、`glottis_frames`、`predict_articulation`、`articulation_spans`、`synth_mode`、`device`。
-  - **边界校验**：`f0_hz`、`pressure_pa`、`tract_frames`、`glottis_frames`、`lip_width_frames`、`larynx_height_frames`、`shimmer`、`flutter`、`fps` 任何维度越界、出现 `NaN/Inf` 或布尔误传，均直接返回 `400` `{ "ok": false, "error": { "code": "out_of_range" | "validation_error", "allowed": ..., "hint": ... } }`，严禁静默夹紧。
+  - **边界校验**：`f0_hz`、`pressure_pa`、`tract_frames`、`glottis_frames`、`lip_width_frames`、`larynx_height_frames`、`shimmer`、`flutter`、`fps` 任何维度越界、出现 `NaN/Inf`、超大整数溢出或布尔误传，均直接返回 `400` `{ "ok": false, "error": { "code": "out_of_range" | "validation_error", "allowed": ..., "hint": ... } }`，严禁静默夹紧。
   - **响应**：返回 `48000 Hz` `wav_base64`、`duration_s`、`sample_rate_hz: 48000`、`synth_mode`、`source_badge` 及可选 `geometry_frames` / `m27_control_50hz_pa` / `tract_control_50hz`。
+- `POST /vtl/synthesize-stream`：低首字延迟流式分段合成通道，接收与 `/vtl/synthesize` 相同的请求体（支持 `synth_mode: "neural" | "physical"` 与 `predict_articulation`），以 `application/x-ndjson` 分块传输（依次推送 `meta` → `chunk 0..K-1` → `done`）；由 `server/proxy.mjs` 透明流式转发（`X-Accel-Buffering: no`）。
+- `POST /vtl/live-pull`：在按说话人隔离的实时 VTL 2.4 会话上拉取连续 `1..12` 块（每块 960 采样 @ 48 kHz）实时声道音频。接收 `speaker`、`blocks`（1..12）、`reset`（布尔）、`params`（19 维）与声门控制；当 `rel_amp <= 0`（清音帧、无周期声带振动）时，内部 VTL 声门 `g[0]` 置为 `125.0 Hz` 作为中性占位，不影响清音声学输出。
+- `POST /vtl/batch-contours`：批量提取 `1..64` 帧 19 维构型（`speaker`、`poses: number[][19]`）的真实 VTL 2.4 正中矢状面轮廓、`oral_min_area_cm2` 与 `F1/F2/F3`（用于连续统矩阵等批量视图）。
 - `POST /vtl/high-pitch-preview` 提供持续元音高音试听后端接口（前端独立试听面板已撤下，后端路由与单测继续保留）。
   - **请求**为 `vowel`（`a`、`i`、`u`）、`target_f0_hz`（550–800 Hz）和 `duration_ms`（300–3000 的整数）。使用 JD2 定姿元音和 800 Pa 声门下压。引擎从目标基频与原生上限的较低值开始，随后尝试更低的 10 Hz 档位，并核查稳态区间的基频与周期性。
   - **响应**包括 48 kHz 单声道 `wav_base64`、`sample_count`、物理载波的指令与实测基频、输出实测基频，以及 `method`（`vtl` 或 `td-psola`）。移调时另返回等长的原始 `carrier_wav_base64` 供对听。
-  - **移调方法**在时域移动按基音周期提取的波形片段，保持时长，尽量保留原频率轴上的谱包络。高基频下谐波间隔变大，同一谱包络也可能呈现不同的谐波幅度。该接口用于持续元音，编曲和声道轨迹仍使用原有 60–600 Hz 物理参数范围。[Moulines 与 Charpentier（1990）](https://doi.org/10.1016/0167-6393(90)90021-Z)
+  - **移调方法**在时域移动按基音周期提取的波形片段，保持时长，尽量保留原频率轴上的谱包络。高基频下谐波间隔变大，同一谱包络也可能呈现不同的谐波幅度。该接口用于持续元音；编曲和神经声道轨迹支持任意正有限基频（`> 0 Hz`），VTL 2.4 物理引擎保留 `40..600 Hz` 原生硬件声门边界。[Moulines 与 Charpentier（1990）](https://doi.org/10.1016/0167-6393(90)90021-Z)
 
 ---
 
@@ -48,20 +62,23 @@
 
 ### 2.1 来源与零 PyTorch 懒加载隔离
 - 模型权重（纯 ONNX Runtime）：`engine/model_bundle/models/Vox2Tract-Lite/vox2tract_lite.onnx` 与 `models/Vox2Align-Lite/vox2align_lite_v2.onnx`（原始 `.pt` 权重文件仅作离线备份保留，运行时零 PyTorch 导入）。
-- 声学前端：`engine/onnx_frontends.py` 提供纯 NumPy/SciPy 的 `PureLogMel50Hz`（16 kHz，Slaney 80-Mel，`n_fft=1024`，`win=640`，`hop=320`，逐句归一化 + 一阶差分 + 3 维能量 + 3 维发声态线索）+ `SwiftF0` ONNX（40..600 Hz）。超过 `9.6 s` 的音频经 `plan_silence_chunks` 按静音分块推理拼接，再送 `Vox2Align-Lite v2` 完成音素/音节强制对齐与静音门控。
+- 声学前端：`engine/onnx_frontends.py` 提供纯 NumPy/SciPy 的 `PureLogMel50Hz`（16 kHz，Slaney 80-Mel，`n_fft=1024`，`win=640`，`hop=320`，逐句归一化 + 一阶差分 + 3 维能量 + 3 维发声态线索）+ `SwiftF0` ONNX（46.875..2093.75 Hz）。超过 `9.6 s` 的音频经 `plan_silence_chunks` 按静音分块推理拼接，再送 `Vox2Align-Lite v2` 完成音素/音节强制对齐与静音门控。
 - **懒加载与热插拔隔离**：全套 9 个模型由 `engine/model_registry_runtime.py`（`LocalModelManager`）统一按需创建和释放 `onnxruntime.InferenceSession`；首次调用 `/vtl/*`（未触发神经模块）不加载 ONNX 会话。卸载中的模型被调用时返回 `503` `{ "ok": false, "error": { "code": "model_unloaded", "model": "...", "hint": "..." } }`。
 
 ### 2.2 HTTP JSON Schema
 - `POST /m27/reconstruct`：传入 `wav_base64`、`text?`、`lang?`、`alignment_mode?`、`synth_mode`、`device`，返回 50 Hz `m27_50hz_pa`（`PR` 已换算为 `Pa`）、`tract_glottis_anim`、`vtl_48k_wav_base64`、`neural_16k_wav_base64` 与 `alignment`。
+- `POST /m27/extract-anim`：传入 50 Hz `m27_50hz_pa`（1..3000 帧，`F0` 须为正有限值 `> 0 Hz`）与 `fps`（5..50，默认 25），严格校验并在引擎内换算 `dPa` 后返回 `{ ok: true, anim }` 矢状面与声门动画序列。
+- `POST /m27/realtime-speaker`：传入 `speaker_wav_base64`（或 `speaker_ref_wav_base64`），基于 `Vox2Spk-Lite` 预提取并缓存 512 维音色嵌入，同时用 `SwiftF0` 估算参考音色的有效浊音中位基频，返回 `{ ok: true, speaker_key, cached, extract_ms, median_f0_hz }`（无法提取时 `median_f0_hz` 为 `null`）。
+- `POST /m27/realtime-step`：低延迟滑窗实时声道反演与神经音色合成单步接口；接收滑窗 16 kHz PCM 音频、`session_id`、`speaker_key?`、`include_tract_geometry`、`use_timbre_model`、`synthesize_audio` 与可选预热标记 `warmup`（`warmup_window_frames` 12..100），输出 50 Hz 控制帧、可选 2D/3D 声道几何及带 15 ms 交叉淡入重叠加长的 16 kHz 音频块。
 - `POST /m27/align`：传入 `wav_base64` 与原文 `text`，返回 `alignment`（TextGrid 与音素/音节区间）。
-- `POST /m27/transcribe`：传入 `wav_base64`（可解码的录音容器，80 ms–60 s）、`lang?: "auto" | "zh" | "en"`、`model?: "tiny" | "large-v3-turbo" | "large-v3" | "base"`、`device?: "cpu"`。未指定模型时使用已安装缓存。`VOCALCUT_ASR_MODEL_DIR` 指定的模型优先。本地 faster-whisper 返回 `{ ok, text, lang, model, device_effective, duration_s }`。工作台将 `text` 填入参考文本框，供校对后提交到原文对齐或重建。缺少本地运行时或权重时返回 `503 model_unavailable`，录音无语音时返回 `400 no_speech`。
+- `POST /m27/transcribe`（**仅开发态显式启用可用**）：默认关闭；仅当环境变量 `VOCALCUT_ENABLE_LOCAL_ASR=1` 且未设 `VOCALCUT_DISABLE_LOCAL_ASR=1` 时挂载。传入 `wav_base64`（80 ms–60 s）、`lang?: "auto" | "zh" | "en"`、`model?: "tiny" | "large-v3-turbo" | "large-v3" | "base"`、`device?: "cpu"`，返回 `{ ok, text, lang, model, device_effective, duration_s }`。缺少本地运行时或权重时返回 `503 model_unavailable`，无语音时返回 `400 no_speech`。Windows 免安装与安装包强制设置 `VOCALCUT_DISABLE_LOCAL_ASR=1` 且不含任何权重与依赖。
 - `POST /api/ai/deepseek-asr`：Node 代理接收 `audio/wav` 与本页 AI 助手的 DeepSeek BYOK 请求头，调用 [DeepSeek 语音识别接口](https://api-docs.deepseek.com/zh-cn/guides/asr/) 并返回 `{ ok, text }`。在设置中启用后，点击「自动识别文本」发送当前录音的 16 kHz 单声道 PCM WAV。DeepSeek 自动判断语种，单次上限为 120 秒、8 MiB。
 
-### 2.3 安装本地语音识别
+### 2.3 安装本地语音识别（仅开发态门控）
 
-本地识别可以在「下载 Whisper」或「Whisper 模型」中查看下载量、安装并切换模型。选择保存在当前浏览器的偏好设置中。`POST /m27/asr-install` 接收 `{ model }` 并在当前引擎进程启动后台安装。`GET /m27/asr-install?model=...` 返回 `{ state, model, models, installing_model?, hint? }`。状态为 `missing`、`installing`、`ready` 或 `failed`。命令行可执行 `npm run setup:asr` 下载 tiny，或以 `npm run setup:asr -- --model large-v3-turbo` 指定模型。
+> **门控与打包边界**：`engine/server.py` 默认关闭本地 ASR（`LOCAL_ASR_ENABLED = (VOCALCUT_ENABLE_LOCAL_ASR == "1" and VOCALCUT_DISABLE_LOCAL_ASR != "1")`）。Windows 免安装与安装包由 `server/portable.mjs` 显式设置 `VOCALCUT_DISABLE_LOCAL_ASR=1` 关闭相关路由，且不装入任何本地转写权重、下载入口、faster-whisper、CTranslate2 或专用 PyAV 解码依赖（见 `AGENTS.md §4.3`）。
 
-安装器根据公网出口的国家或地区选择首选下载源。中国大陆优先 HF-Mirror，其他地区和无法判定时优先 Hugging Face。首选源失败会尝试备用源。可下载的多语言模型为 tiny（约 78 MB）、large-v3-turbo（约 1.62 GB）和 large-v3（约 3.09 GB）。权重按固定版本下载并校验 SHA-256，存入 `.cache/asr/faster-whisper-<model>/`。运行库存入 `.cache/asr/python/`。已有的 Whisper base 缓存可继续使用。`VOCALCUT_ASR_DOWNLOAD_HOST` 可指定同一固定版本的下载源，`VOCALCUT_ASR_MODEL_DIR` 可指定自备的 CTranslate2 多语言权重。引擎从本地文件加载模型并以 CPU INT8 运行，`GET /health` 的 `speech_to_text` 字段提供运行时状态。
+仅在研发态显式设置 `VOCALCUT_ENABLE_LOCAL_ASR=1` 后，方可使用 `POST /m27/asr-install`（接收 `{ model }` 后台安装）与 `GET /m27/asr-install?model=...`（返回 `{ state, model, models, installing_model?, hint? }`，状态为 `missing` / `installing` / `ready` / `failed`）；命令行可执行 `npm run setup:asr`（或 `-- --model large-v3-turbo`）预安装。安装器按公网出口自动在 HF-Mirror 与 Hugging Face 间择优并校验固定版本 SHA-256，权重存于 `.cache/asr/faster-whisper-<model>/`，运行库存于 `.cache/asr/python/`，支持 `VOCALCUT_ASR_DOWNLOAD_HOST` 与 `VOCALCUT_ASR_MODEL_DIR` 覆盖，运行时以 CPU INT8 执行并在 `GET /health` 的 `speech_to_text` 汇报状态。
 
 ---
 
@@ -88,19 +105,41 @@
   - `cond_111: (B, T, 111)` float32 @ 50 Hz（含 26 维 3 阶 qTA 异步基线 `x_base_26`、掩码目标 `g_masked`、26 维器官锁 `w_mask`、对数 `f0_norm`、5 维相位含显式 `is_sil`、4 维阻塞事件、22 维通用音标构音特征 `PHON_FEAT_DIM = 22`、`has_phon`）。
   - `x_base_26: (B, T, 26)` float32（`M27` 剔除只读 `F0` 列 17）与协同强度 `alpha`（`0..1`）。
 - **`Tract2Area-Proxy`**：输入 `tract17_norm: (..., 17)`，输出 `log1p(area_cm2)` 6 区预测。
-- **链路 B 调用约定**：`/vtl/synthesize`（开启 `predict_articulation`）和 `/models/ipa-default-poses` 使用同一 `PoseBank`。采用当前 IPA 构型的片段通过 `pose_source: "custom"` 和 `articulation_spans[].pose_target_19` 传入编辑器保存的 19 维目标。引擎在音段中心对主要发音器官应用余弦过渡，对塞音优先使用实录闭塞及释放相位，并用 `Tract2Area-Proxy` 检查局部收窄。模型默认值和显式编辑分别沿用默认相位目标及手动约束。`/models/kf2tract` 直接暴露 111 维条件推理和管腔截面积代理结果。
+- **链路 B 调用约定与兼容路由**：`/vtl/synthesize`（开启 `predict_articulation`）和 `POST /models/ipa-default-poses` 使用同一 `PoseBank`。采用当前 IPA 构型的片段通过 `pose_source: "custom"` 和 `articulation_spans[].pose_target_19` 传入编辑器保存的 19 维目标。引擎在音段中心对主要发音器官应用余弦过渡，对塞音优先使用实录闭塞及释放相位，并用 `Tract2Area-Proxy` 检查局部收窄。模型默认值和显式编辑分别沿用默认相位目标及手动约束。`GET /models/kf2tract`（探测权重就绪）与 `POST /models/kf2tract`（直接暴露 111 维条件推理与 `Tract2Area-Proxy` 截面积代理结果）均为 **`IPA2Tract-Lite` 的历史兼容路由名**。
 
 ---
 
-## 5. `Text2Prosody-Lite`（中英自然韵律预测，已就绪）
+## 5. `Text2Prosody-Lite`、语音分析/迁移与参考库路由（已就绪）
+
+### 5.1 `Text2Prosody-Lite`（中英自然韵律预测）
 
 - 权重（ONNX）：`models/Text2Prosody-Lite/text2prosody_lite.onnx`。
-- `POST /models/text-prosody`：接收中英混排文本及可选参数 `lang`、`base_f0`、`speed_scale`、`pitch_scale`、`f0_min_hz`，直接返回 `syllables`、`keyframes`（含显式 `sil`）与 `f0_knots`。
+- `POST /models/text-prosody`：接收中英混排文本及可选参数 `lang`、`base_f0`、`speed_scale`、`pitch_scale`、`f0_min_hz`（可选正值下界保护，默认不额外夹紧上限），返回 `syllables`、`keyframes`（含显式 `sil`）与 `f0_knots`。
+- **模型输出后处理语义**：对模型原始预测仅保留正有限值护栏（不再对高于 600 Hz 或低于 60 Hz 的合法预测做硬截断），并通过响应字段 `f0_floor_hz` 与 `f0_adjusted_count` 显式回报可选下界调整。
+
+### 5.2 声音调制/迁移、降噪、基频前端与参考库路由
+
+- **时变发声态调制与双人声音迁移（`engine/voice_morph_bridge.py`）**：
+  - `GET /models/voice-morph`：返回内置与用户自定义发声态预设元数据。出口预设在 Python 引擎边界统一完成 `dPa → Pa` 换算，返回 `source9_phys_pa`（长度 9，第 0 维 `pr_pa` 范围 `0..1600 Pa`）及具名对象 `source_params: { pr_pa, xb_cm, xt_cm, ca_cm2, lag_rad, ra, ps, fl_pct, shim_pct }`，不再对外暴露未带单位的 `dPa` 数组。
+  - `POST /models/voice-morph`：分发时变发声态分析、曲线调制与预设保存/删除操作。
+  - `POST /models/voice-transfer`：执行双人声道/声门/基频/音色多器官迁移渲染（`speaker`、`tract_all`、`glottis`、`f0_pr`）。
+- **降噪与基频提取（ONNX CPU）**：
+  - `POST /models/dpdfnet?audio_gain=peak|original`（请求体为原始 WAV 字节）：调用 `DPDFNet` 对 48 kHz 音频按声道降噪，返回 `audio/wav`。
+  - `POST /models/swift-f0`（请求体 JSON `{ pcm16le: string }`，20 ms–120 s 的 16 kHz 单声道 PCM）：调用 `SwiftF0` ONNX 提取 50 Hz（`step_ms: 20`，原生范围 `46.875..2093.75 Hz`）基频轨迹，返回 `{ model: "SwiftF0", step_ms: 20, duration, hz }`。
+- **IPA / VoQS 正式参考库、逐帧校正与全库打包导出**：
+  - `GET /models/ipa-references/index`：返回全部已索引 IPA/VoQS 实录与时间原点元数据。
+  - `GET /models/ipa-references/poses`：返回参考库已校构型列表；`GET /models/ipa-references/trill-demos` 返回颤音合成演示列表。
+  - `GET /models/ipa-references/vowel-formants?source=recorded|transfer&speaker=JD2`：返回 28 个元音的实录 Burg 共振峰测量或当前 VTL 解剖模型传递函数测量；`POST /models/ipa-references/vowel-poses` 实时测算保存构型的传递函数共振峰。
+  - `GET /models/ipa-references/<id>/(audio|animation|reconstruction|bundle|bundle-video)?audio_gain=peak|original`：读取指定实录的音频、反演动画、`Tract2Vox-Lite` 重建音或单音资料包（可选附声带视频）。
+  - `GET /models/ipa-references/<id>/(voqs-track|voqs-reconstruction)?speaker=...&height_cm=...&audio_gain=peak|original`：读取 VoQS 50 Hz 声门反演轨或原生 VTL `[ə]` 管腔重合成音。
+  - `GET /models/ipa-references/library-bundle`、`POST /models/ipa-references/library-bundle`、`GET /models/ipa-references/library-bundle/download`：查询、触发异步构建与流式下载全库 ZIP 资料包（支持 `video=0|1`、`audio_gain=peak|original`）。
+  - `GET /models/ipa-recording-edits/limits`、`POST /models/ipa-recording-edits/render`：返回实录逐帧关键帧校正的 27 维边界（`F0 > 0 Hz`、`PR 0..1600 Pa`）并按关键帧局部混合后重渲染整轨。
 
 ---
 
 ## 5.5 本地 ONNX 模型热插拔与外置权重装载接口
 
+- `GET /health`：返回引擎运行状态（`vtl`、`m27`、`speech_to_text` 与本地模型就绪信息）。
 - `GET /models/local`：返回 9 个内置模型槽位的体积、参数量、装载状态（`loaded`、`in_memory`）、外置来源标记（`is_external`、`external_label`）及 ONNX Runtime 运行时信息。
 - `POST /models/local/load`：接收 `{ "name": string, "eager"?: boolean, "device"?: "cpu" | "cuda" }` 或 `{ "all": true }`，启用并按需立即载入 `InferenceSession`。
 - `POST /models/local/unload`：接收 `{ "name": string }` 或 `{ "all": true }`，立即释放内存中的 `InferenceSession` 并停用该槽位。
@@ -108,11 +147,15 @@
 - `POST /models/local/mount-binary`：接收原始 `.onnx` 二进制请求体（查询参数 `name`、`filename`、`eager`），校验契约并持久化至 `.cache/custom-models/` 后热切换。
 - `POST /models/local/reset`：接收 `{ "name": string }` 或 `{ "all": true }`，恢复默认内置 ONNX 模型。
 
+> 注：全部 7 个核心自研模型（`Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）及 `DPDFNet2`、`SwiftF0` 共 9 个 ONNX 槽位已全部正式上线；早期预留的 `501` 扩展空槽（`/models/browser-light-m27`、`/models/speaker` 及 `packages/model-adapters/src/reserved-slots.ts`）已清理移除。`/models/kf2tract` 保留作为 `IPA2Tract-Lite` 的历史兼容路由名（见 §4.1）。
+
 ---
 
-## 6. 预留模型插槽（返回 501 契约 JSON）
+## 6. Batch-2 兼容扩展与国际音标神经合成冻结快照（2026-11-27）
 
-1. **网页极轻蒸馏反演（`BrowserLightM27Slot` · `GET/POST /models/browser-light-m27`）**：
-   - 预留未来浏览器端 `onnxruntime-web`（WebGPU / WASM）本地反演插槽；当前默认回落 `/api/m27/reconstruct`（`Vox2Tract-Lite`）。
-2. **自定义发音人微调权重（`SpeakerModelSlot` · `GET/POST /models/speaker`）**：
-   - 当前零样本音色转换已由 `Vox2Spk-Lite` + `Tract2Vox-Lite` 在 `/m27/reconstruct` 与 `/m27/resynthesize` 就绪；专属说话人微调权重接口保持 501 预留。
+为保护已验收的国际音标与神经语音合成听感形态，以下接口扩展与冻结约束与 [AGENTS.md §6](../AGENTS.md) 保持单一真源同步，未经授权禁止回退或破坏：
+
+- **`Vox2Tract-Lite` 联合单次前向契约**：`engine/model_registry_runtime.py` 同时接受传统 4 输出与 Batch-2 联合 11 输出（在 `tract17 / pr1 / glot8 / h_backbone` 基础上附带 7 路对齐头）；挂载联合权重时 `engine/onnx_inference.py` 单次前向直接完成声道反演与对齐（`model_meta.version` 返回 `joint-v3` 或 `joint-v4`），恢复内置旧权重时自动退回双模型接力。
+- **`IPA2Tract-Lite` 121ch / 32d 与窄标构型库联动**：挂载 121 通道外置权重时，`engine/keyframe_lite.py` 自动加载同目录 `canonical_ipa_poses_narrow.json`（293 键）并启用 32 维特征，严禁与旧 78 键构型或 22 维特征混用。
+- **`Text2Prosody-Lite` 32d 与无标调 `[IPA]` 韵律直通**：支持 `LANG_IPA=3`（32 维特征输入）及可选 `base_f0` 参数；前端将无显式声调记号的 `[IPA]` 片段按 VoQS 作用域切分送入自然韵律预测。
+- **参考音色自动匹配基频与 VoQS 假声叠加顺序**：前端按 `speechRegisterRatio = effectiveSpeakerBaseF0Hz / referenceHz` 在 `evaluateControlPitch` 的 `applyVoqsRegister` 之前执行一次性平移，仅作用于神经语音合成（不对歌唱轨、实录反演参考轨与 VTL 物理合成生效）；`isAutomaticProsodyPin` 同时兼容单句与多句前缀 `s<n>_prosody`。

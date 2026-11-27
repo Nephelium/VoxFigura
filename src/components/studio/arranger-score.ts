@@ -1,68 +1,60 @@
-import { SAMPLE_RATE_HZ, parseNumberedScore, type ScoreIssue, type SongNote, type SongTonic } from '@vocalcut/core';
+import {
+  DEFAULT_SCORE_NOTATION,
+  SAMPLE_RATE_HZ,
+  parseScoreNotation,
+  type ScoreIssue,
+  type ScoreMark,
+  type ScoreNotationId,
+  type SongNote,
+  type SongTonic,
+} from '@vocalcut/core';
 
 export const INSTRUMENT_MIDI_RANGE = [21, 108] as const;
 const MAX_ARRANGER_SECONDS = 900;
-export type ScoreMark = '@rit' | '@tempo' | '@hold';
-type ArrangerNote = SongNote & { instrumental?: boolean; marks?: ScoreMark[] };
+export type { ScoreMark };
 
 export function readArrangerScore(
-  score: string, tonic: SongTonic, bpm: number, vibrato: boolean, rows?: number, instrumental = false,
-): { ok: true; score: { bpm: number; vibrato: boolean; notes: ArrangerNote[] }; labels: string[]; seconds: number }
-  | { ok: false; issue: ScoreIssue } {
-  // Spaces separate written groups. A literal 0 is a timed rest.
-  const blocks = score.split(/(\[|\]|@rit\b|@tempo\b|@hold\b)/u).filter(block => /[^\s|｜]/u.test(block));
-  const notes: ArrangerNote[] = [];
-  const labels: string[] = [];
-  let seconds = 0;
-  let bracketed = false;
-  let marks: ScoreMark[] = [];
-  for (const block of blocks) {
-    if (block === '[' || block === ']') {
-      if (bracketed === (block === '[')) {
-        return { ok: false, issue: { key: 'song_token', message: '器乐方括号未正确配对' } };
-      }
-      bracketed = block === '[';
-      continue;
-    }
-    if (block === '@rit' || block === '@tempo' || block === '@hold') {
-      marks.push(block);
-      continue;
-    }
-    const musicOnly = instrumental || bracketed;
-    const parsed = parseNumberedScore(
-      block.trim().replace(/\s+/gu, '|'), tonic, bpm, vibrato, undefined,
-      { maxSeconds: MAX_ARRANGER_SECONDS, midiRange: musicOnly ? INSTRUMENT_MIDI_RANGE : undefined },
-    );
-    if (!parsed.ok) return parsed;
-    seconds += parsed.seconds;
-    for (const note of parsed.score.notes) {
-      notes.push({
-        ...note,
-        ...(musicOnly ? { instrumental: true } : {}),
-        ...(note.midi !== null && marks.length ? { marks } : {}),
-      });
-      if (note.midi !== null) marks = [];
-    }
-    if (!musicOnly) for (const label of parsed.labels) labels.push(label);
-  }
-  if (bracketed || marks.length) return { ok: false, issue: { key: 'song_token', message: '器乐括号或表情记号缺少对应音符' } };
-  if (!notes.length) return { ok: false, issue: { key: 'song_empty', message: '乐谱为空' } };
-  if (seconds > MAX_ARRANGER_SECONDS) {
-    return { ok: false, issue: { key: 'song_limit', message: `总时长 ${seconds.toFixed(1)}s 超出 ${MAX_ARRANGER_SECONDS}s 上限` } };
-  }
-  if (rows !== undefined && labels.length !== rows) {
-    return { ok: false, issue: {
-      key: 'song_count',
-      values: { notes: labels.length, rows },
-      message: `乐谱音节数 (${labels.length}) 与歌词音节数 (${rows}) 不一致`,
-    } };
-  }
-  return { ok: true, score: { bpm, notes, vibrato }, labels, seconds };
+  score: string,
+  tonic: SongTonic,
+  bpm: number,
+  vibrato: boolean,
+  rows?: number,
+  instrumental = false,
+  notation: ScoreNotationId = DEFAULT_SCORE_NOTATION,
+  singleSyllableCell = false,
+): {
+  ok: true;
+  notation: ScoreNotationId;
+  score: { bpm: number; vibrato: boolean; notes: SongNote[]; notation: ScoreNotationId };
+  labels: string[];
+  syllableCount: number;
+  inlineLyrics?: string[];
+  seconds: number;
+  totalBeats: number;
+} | { ok: false; issue: ScoreIssue } {
+  const parsed = parseScoreNotation(score, tonic, bpm, vibrato, rows, {
+    notation,
+    maxSeconds: MAX_ARRANGER_SECONDS,
+    midiRange: instrumental ? INSTRUMENT_MIDI_RANGE : undefined,
+    instrumental,
+    singleSyllableCell,
+  });
+  if (!parsed.ok) return parsed;
+  return {
+    ok: true,
+    notation: parsed.notation,
+    score: { bpm, notes: parsed.score.notes, vibrato, notation: parsed.notation },
+    labels: parsed.labels,
+    syllableCount: parsed.syllableCount,
+    inlineLyrics: parsed.inlineLyrics,
+    seconds: parsed.seconds,
+    totalBeats: parsed.totalBeats,
+  };
 }
 
 /** Map written beats to sample time while keeping score meter and note values intact. */
 export function createArrangerClock(bpm: number, startSmp: number) {
-  const smpPerBeat = SAMPLE_RATE_HZ * 60 / bpm;
+  const smpPerBeat = (SAMPLE_RATE_HZ * 60) / bpm;
   const beatsSmp = [startSmp];
   let samples = startSmp;
   let beat = 0;
@@ -70,7 +62,7 @@ export function createArrangerClock(bpm: number, startSmp: number) {
   const integral = (end: number) => {
     if (ritStart === undefined) return end;
     const distance = Math.max(0, end - ritStart);
-    return end + .4 * (distance <= 4 ? distance ** 2 / 8 : distance - 2);
+    return end + 0.4 * (distance <= 4 ? (distance ** 2) / 8 : distance - 2);
   };
   return {
     beatsSmp,
@@ -92,36 +84,122 @@ export function createArrangerClock(bpm: number, startSmp: number) {
       samples += (integral(end) - base) * smpPerBeat * scale;
       beat = end;
     },
+    sampleAtBeat(targetBeat: number) {
+      const base = integral(0);
+      return Math.round(startSmp + (integral(targetBeat) - base) * smpPerBeat);
+    },
   };
 }
 
-export function timelineOfScore(score: string, tonic: SongTonic, bpm: number, vibrato: boolean, startSmp: number, rowCount: number) {
-  const parsed = readArrangerScore(score, tonic, bpm, vibrato, rowCount);
+export function timelineOfScore(
+  score: string,
+  tonic: SongTonic,
+  bpm: number,
+  vibrato: boolean,
+  startSmp: number,
+  rowCount?: number,
+  notation: ScoreNotationId = DEFAULT_SCORE_NOTATION,
+  instrumental = false,
+) {
+  const parsed = readArrangerScore(score, tonic, bpm, vibrato, rowCount, instrumental, notation);
   if (!parsed.ok) return parsed;
   const clock = createArrangerClock(bpm, startSmp);
+  const hasParallelStartBeats = parsed.score.notes.some((note, idx) =>
+    idx > 0 && note.startBeat !== undefined && parsed.score.notes[idx - 1].startBeat !== undefined
+    && note.startBeat < (parsed.score.notes[idx - 1].startBeat! + parsed.score.notes[idx - 1].beats - 1e-6));
+
   let rowIdx = -1;
   let hold = false;
-  const notes = [];
-  const rests = [];
+  const notes: Array<{
+    rowIdx: number;
+    midi: number;
+    carry: boolean;
+    dynamic: number;
+    startBeat: number;
+    beats: number;
+    startSmp: number;
+    endSmp: number;
+    hz: number;
+    instrumental?: boolean;
+    inlineLyric?: string;
+  }> = [];
+  const rests: Array<{ startSmp: number; endSmp: number }> = [];
+  let maxEndSmp = startSmp;
+
+  if (hasParallelStartBeats) {
+    // Chord / polyphonic DSL timeline: convert explicit beat positions directly
+    for (const note of parsed.score.notes) {
+      const startBeat = note.startBeat ?? 0;
+      const start = clock.sampleAtBeat(startBeat);
+      const end = Math.max(start + 1, clock.sampleAtBeat(startBeat + note.beats));
+      maxEndSmp = Math.max(maxEndSmp, end);
+      if (note.midi === null) {
+        rests.push({ startSmp: start, endSmp: end });
+        continue;
+      }
+      const isInst = Boolean(instrumental || note.instrumental);
+      if (!isInst && !note.carry) rowIdx++;
+      notes.push({
+        rowIdx: isInst ? -1 : rowIdx,
+        midi: note.midi,
+        carry: note.carry,
+        dynamic: note.dynamic ?? 0,
+        startBeat,
+        beats: note.beats,
+        startSmp: start,
+        endSmp: end,
+        hz: 440 * (2 ** ((note.midi - 69) / 12)),
+        instrumental: isInst || undefined,
+        inlineLyric: note.inlineLyric,
+      });
+    }
+    return {
+      ok: true as const,
+      notation: parsed.notation,
+      notes,
+      rests,
+      inlineLyrics: parsed.inlineLyrics,
+      endSmp: maxEndSmp,
+    };
+  }
+
   for (const [index, note] of parsed.score.notes.entries()) {
     clock.apply(note.marks);
-    if (note.midi !== null && !note.carry) hold = Boolean(note.marks?.includes('@hold'));
+    if (note.midi !== null && !note.carry && !note.instrumental) hold = Boolean(note.marks?.includes('@hold'));
     const startBeat = clock.beat;
     const start = clock.sample;
     clock.advance(note.beats, hold && note.midi !== null && !parsed.score.notes[index + 1]?.carry);
     const end = clock.sample;
-    if (note.midi === null || note.instrumental) {
+    maxEndSmp = Math.max(maxEndSmp, end);
+    if (note.midi === null) {
       rests.push({ startSmp: start, endSmp: end });
       continue;
     }
-    if (!note.carry) rowIdx++;
+    const isInst = Boolean(instrumental || note.instrumental);
+    if (!isInst && !note.carry) rowIdx++;
     notes.push({
-      rowIdx, midi: note.midi, carry: note.carry, dynamic: note.dynamic ?? 0,
-      startBeat, beats: note.beats, startSmp: start, endSmp: end,
-      hz: 440 * 2 ** ((note.midi - 69) / 12),
+      rowIdx: isInst ? -1 : rowIdx,
+      midi: note.midi,
+      carry: note.carry,
+      dynamic: note.dynamic ?? 0,
+      startBeat,
+      beats: note.beats,
+      startSmp: start,
+      endSmp: end,
+      hz: 440 * (2 ** ((note.midi - 69) / 12)),
+      instrumental: isInst || undefined,
+      inlineLyric: note.inlineLyric,
     });
   }
-  return { ok: true as const, notes, rests, endSmp: clock.sample };
+  return {
+    ok: true as const,
+    notation: parsed.notation,
+    notes,
+    rests,
+    inlineLyrics: parsed.inlineLyrics,
+    endSmp: maxEndSmp,
+    gridBeats: parsed.score.notes.some((n) => n.marks?.length) ? clock.beatsSmp : undefined,
+  };
 }
 
 export const ARRANGED_NOTE_RULE = 'arranged-score-note';

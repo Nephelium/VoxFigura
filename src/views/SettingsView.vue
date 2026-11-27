@@ -3,7 +3,6 @@ import ReferencesModal from '@/components/modals/ReferencesModal.vue';
 import {
   fetchLocalModels,
   liveLocalModels,
-  loadAllLocalModels,
   loadLocalModel,
   localModelsSummary,
   mountExternalFolderPath,
@@ -28,17 +27,22 @@ import {
   workspaceBackgrounds,
   workspaceIconUrl,
 } from '@/data/workspace-images';
-import { LOCAL_MODEL_SPECS, LOCAL_MODEL_TOTALS } from '@/data/model-training-report';
+import { LOCAL_MODEL_SPECS, LOCAL_MODEL_TOTALS, OPTIONAL_LOCAL_MODEL_SPECS } from '@/data/model-training-report';
+import { describeEngineStatus } from '@/data/engine-status';
 import { SHORTCUT_GROUPS } from '@/data/guide-content';
+import { parseShortcutTokens } from '@/data/shortcut-format';
 import SpeakerReferenceControls from '@/components/common/SpeakerReferenceControls.vue';
 import { textPoseOptions, textPoseSource } from '@/data/ipa-pose-source';
 import { synthesisGainMode } from '@/data/voice-renderer';
 import NavArtwork from '@/components/common/NavArtwork.vue';
+import SkinPreviewThumb from '@/components/common/SkinPreviewThumb.vue';
 import VoiceRenderSelect from '@/components/common/VoiceRenderSelect.vue';
 import PortableCachePanel from '@/components/settings/PortableCachePanel.vue';
+const isPortableRuntime = typeof __APP_PORTABLE__ !== 'undefined' && Boolean(__APP_PORTABLE__);
 import { computed, onMounted, ref, watch } from 'vue';
-import { listBackdrops, listSkins, palettes } from '@/styles/skin-registry';
-import { BACKDROP_COLOR_PRESETS, paletteDisplayName } from '@/styles/themes';
+import { BACKDROP_BLUR_MAX_PX, BACKDROP_VEIL_MAX_PCT, backdropSurfaceStyle, getSkin, isPhotoBackdrop, listBackdrops, listSkins, palettes, type BackdropId } from '@/styles/skin-registry';
+import { BACKDROP_COLOR_PRESETS, paletteDisplayName, paletteShortName, type ColorMode, type ThemeMode } from '@/styles/themes';
+import { MAX_SAVED_LOOKS_PER_MODE, type SavedLookPreset } from '@/data/saved-looks';
 import { CHINESE_FONTS, LATIN_FONTS, type InterfaceFonts } from '@/styles/interface-fonts';
 import { ANATOMY_PALETTE_OPTIONS, DEFAULT_ANATOMY_APPEARANCE, type AnatomyPaletteId } from '@/styles/anatomy-appearance';
 import {
@@ -53,6 +57,7 @@ import { exploreLabel } from '@vocalcut/edition';
 import {
   SPLITTER_GROUPS,
   getConfiguredSplitterDefault,
+  getSessionSplitterValue,
   isSplitterCustomized,
   type SplitterSpec,
 } from '@/data/splitter-layout';
@@ -83,11 +88,16 @@ function onResetAllOnboarding(): void {
 
 function mapStoreTabToView(tab: SettingsTabId): SettingViewTabId {
   if (tab === 'style-lab') return 'appearance';
-  if (tab === 'layout' || tab === 'engine' || tab === 'shortcuts') return tab;
+  if (tab === 'layout' || tab === 'engine' || tab === 'shortcuts' || tab === 'credits') return tab;
   return 'appearance';
 }
 
 const activeTab = ref<SettingViewTabId>(mapStoreTabToView(store.settingsTab.value));
+const setContentRef = ref<HTMLElement | null>(null);
+
+function resetContentScroll(): void {
+  setContentRef.value?.scrollTo({ top: 0 });
+}
 
 watch(
   () => store.settingsTab.value,
@@ -95,20 +105,24 @@ watch(
     if (next === 'style-lab') {
       activeTab.value = 'appearance';
       store.styleLabOpen.value = true;
+      resetContentScroll();
       return;
     }
-    activeTab.value = mapStoreTabToView(next);
+    const mapped = mapStoreTabToView(next);
+    if (mapped !== activeTab.value) {
+      activeTab.value = mapped;
+      resetContentScroll();
+    }
   },
 );
 
 function selectTab(id: SettingViewTabId): void {
   activeTab.value = id;
-  if (id === 'appearance' || id === 'layout' || id === 'shortcuts' || id === 'engine') {
-    store.settingsTab.value = id;
-  }
+  store.settingsTab.value = id;
+  resetContentScroll();
 }
 
-const modelMessage = ref('随包内置 9 个 ONNX 本地模型');
+const modelMessage = ref(`默认启用 ${LOCAL_MODEL_TOTALS.count} 项核心 ONNX 模型（含 1 项可选方言对齐）`);
 const checkingModels = ref(false);
 const busyModelName = ref<string | null>(null);
 const batchModelBusy = ref(false);
@@ -119,16 +133,21 @@ const singleOnnxInputRef = ref<HTMLInputElement | null>(null);
 const folderOnnxInputRef = ref<HTMLInputElement | null>(null);
 const pendingMountSlotName = ref<string | null>(null);
 
+const CORE_MODEL_NAME_SET = new Set(LOCAL_MODEL_SPECS.map((s) => s.name));
+const MERGED_ALIGNER_TOOLTIP =
+  'Vox2Align-Lite v2 已合并至 Vox2Tract-Lite（Vox2TractAlign v4 联合模型），普通话与英语的声道反演和强制对齐已由单模型直接完成，默认无需装载。\n如需针对其他语言或方言文本进行对齐，可自行训练兼容 ONNX 对齐模型并点击「换模」挂载，启用后将自动接管对齐。';
+
 async function checkLocalModels(): Promise<void> {
   checkingModels.value = true;
   modelMessage.value = '正在核验本地 ONNX 引擎与模型状态…';
   try {
     const result = await fetchLocalModels();
-    const loadedCount = result.loaded_count ?? result.models.filter((m) => m.loaded).length;
-    const inMemCount = result.in_memory_count ?? result.models.filter((m) => m.in_memory).length;
-    const extCount = result.external_count ?? result.models.filter((m) => m.source === 'external').length;
+    const coreModels = result.models.filter((m) => CORE_MODEL_NAME_SET.has(m.name));
+    const loadedCount = coreModels.filter((m) => m.loaded).length;
+    const inMemCount = coreModels.filter((m) => m.in_memory).length;
+    const extCount = result.models.filter((m) => m.source === 'external').length;
     modelMessage.value =
-      `ONNX Runtime 已核验 · 已装载 ${loadedCount}/${result.models.length}` +
+      `ONNX Runtime 已核验 · 核心已装载 ${loadedCount}/${coreModels.length}` +
       (inMemCount > 0 ? `（${inMemCount} 项驻留内存）` : '') +
       (extCount > 0 ? ` · 外置 ${extCount} 项` : '');
   } catch {
@@ -166,12 +185,23 @@ async function onLoadAllModels(): Promise<void> {
   if (batchModelBusy.value || busyModelName.value) return;
   batchModelBusy.value = true;
   try {
-    const res = await loadAllLocalModels('cpu');
-    const errCount = res.errors?.length ?? 0;
+    const targets = mergedModelCards.value
+      .filter((m) => !m.optionalSlot || m.source === 'external')
+      .map((m) => m.name);
+    let errHint = '';
+    let errCount = 0;
+    for (const name of targets) {
+      try {
+        await loadLocalModel(name, 'cpu');
+      } catch (err) {
+        errCount += 1;
+        if (!errHint) errHint = err instanceof Error ? err.message : String(err);
+      }
+    }
     if (errCount > 0) {
-      store.pushToast(`批量装载完成，其中 ${errCount} 项失败：${res.errors?.[0]?.hint ?? ''}`, 'warning', 3800);
+      store.pushToast(`批量装载完成，其中 ${errCount} 项失败：${errHint}`, 'warning', 3800);
     } else {
-      store.pushToast('已将全部 9 项 ONNX 模型装载入内存', 'success', 2400);
+      store.pushToast(`已将全部 ${targets.length} 项核心 ONNX 模型装载入内存`, 'success', 2400);
     }
     await checkLocalModels();
   } catch (err) {
@@ -330,16 +360,23 @@ onMounted(() => {
   }
 });
 
+const MATRIX_SPECS = [
+  LOCAL_MODEL_SPECS[0],
+  ...OPTIONAL_LOCAL_MODEL_SPECS,
+  ...LOCAL_MODEL_SPECS.slice(1),
+];
+
 const mergedModelCards = computed(() => {
   const liveMap = new Map<string, LiveLocalModelInfo>(liveLocalModels.value.map((m) => [m.name, m]));
-  return LOCAL_MODEL_SPECS.map((spec) => {
+  return MATRIX_SPECS.map((spec) => {
     const live = liveMap.get(spec.name);
+    const isMergedOptional = Boolean(spec.optionalSlot);
     return {
       ...spec,
       liveChecked: Boolean(live),
       available: live ? live.available : null,
-      loaded: live ? live.loaded : true,
-      enabled: live ? live.enabled : true,
+      loaded: live ? live.loaded : !isMergedOptional,
+      enabled: live ? live.enabled : !isMergedOptional,
       inMemory: live ? live.in_memory : false,
       source: live?.source ?? 'builtin',
       externalLabel: live?.external_label ?? null,
@@ -348,23 +385,36 @@ const mergedModelCards = computed(() => {
       paramsM: live ? live.params_m : spec.paramsM,
       dtypeLabel: live?.dtype_detail ?? spec.precision,
       loadMs: live?.load_ms ?? null,
-      optionalFallbackHint: live?.optional_fallback_hint ?? '',
+      optionalFallbackHint: isMergedOptional
+        ? '已合并至 Vox2Tract-Lite（默认免装载）；悬停查看详情，支持自训其他语种/方言对齐模型后在此换模。'
+        : (live?.optional_fallback_hint ?? ''),
+      cardTooltip: isMergedOptional ? MERGED_ALIGNER_TOOLTIP : '',
       contractSummary: live?.contract_summary ?? '',
     };
   });
 });
 
-const displayTotalParamsText = computed(() =>
-  localModelsSummary.value.totalParamsM != null
-    ? `${localModelsSummary.value.totalParamsM.toFixed(2)} M`
-    : LOCAL_MODEL_TOTALS.totalParamsText,
+const activeCountedCards = computed(() =>
+  mergedModelCards.value.filter((m) => !m.optionalSlot || m.loaded || m.source === 'external'),
 );
 
-const displayTotalSizeText = computed(() =>
-  localModelsSummary.value.totalSizeMb != null
-    ? `${localModelsSummary.value.totalSizeMb.toFixed(2)} MB`
-    : LOCAL_MODEL_TOTALS.totalSizeText,
-);
+const displayTotalParamsText = computed(() => {
+  if (!activeCountedCards.value.length) return LOCAL_MODEL_TOTALS.totalParamsText;
+  const sum = activeCountedCards.value.reduce((acc, m) => acc + (Number.isFinite(m.paramsM) ? m.paramsM : 0), 0);
+  return `${sum.toFixed(2)} M`;
+});
+
+const displayTotalSizeText = computed(() => {
+  if (!activeCountedCards.value.length) return LOCAL_MODEL_TOTALS.totalSizeText;
+  const sum = activeCountedCards.value.reduce((acc, m) => acc + (Number.isFinite(m.sizeMb) ? m.sizeMb : 0), 0);
+  return `${sum.toFixed(2)} MiB`;
+});
+
+const engineStatusInfo = computed(() => describeEngineStatus(store.engineStatus.value));
+
+async function refreshEngineAndModels(): Promise<void> {
+  await Promise.all([store.probeEngine().catch(() => {}), checkLocalModels()]);
+}
 
 
 const skins = computed(() => {
@@ -372,6 +422,106 @@ const skins = computed(() => {
   return listSkins();
 });
 const backdrops = listBackdrops();
+const ambientBackdrops = backdrops.filter((b) => !isPhotoBackdrop(b.id));
+const photoBackdrops = backdrops.filter((b) => isPhotoBackdrop(b.id));
+const isMinimalSkin = computed(() => store.surfaceStyle.value === 'minimal');
+const savedLookModeTab = ref<ColorMode>(store.resolvedColorMode.value);
+const savedLookNameDraft = ref('');
+watch(
+  () => store.resolvedColorMode.value,
+  (mode) => {
+    savedLookModeTab.value = mode;
+  },
+);
+const currentModeSavedLooks = computed(() => store.savedLooks.value[savedLookModeTab.value]);
+const currentModeDefaultLookId = computed(() => store.savedLooks.value.defaultIds[savedLookModeTab.value]);
+
+function onSaveCurrentLookPreset(): void {
+  const ok = store.saveCurrentLook(savedLookModeTab.value, savedLookNameDraft.value);
+  if (ok) savedLookNameDraft.value = '';
+}
+
+function summarizeSavedLook(look: SavedLookPreset): string {
+  const skinLabel = getSkin(look.appearance.surfaceStyle)?.shortName ?? look.appearance.surfaceStyle;
+  const palLabel = paletteShortName(look.appearance.paletteId);
+  const navLabel = look.layout.navPlacement === 'top' ? '顶栏导航' : '左侧导航';
+  const sizePx = look.appearance.fonts?.fontSizePx ?? 12;
+  return `${skinLabel} · ${palLabel} · ${navLabel} · ${sizePx}px`;
+}
+
+const CURATED_LOOK_PRESETS: ReadonlyArray<{
+  id: string;
+  label: string;
+  desc: string;
+  themeMode: ThemeMode;
+  surfaceStyle: string;
+  paletteId: string;
+  backdropId: BackdropId;
+  glassAlpha: number;
+  cardAlpha: number;
+  glassBlur: number;
+}> = [
+  {
+    id: 'paper-light',
+    label: '宣纸拟态 · 日间',
+    desc: '轻新拟态 + 折光纸幕 + 标准极昼',
+    themeMode: 'light',
+    surfaceStyle: 'neumorphism',
+    paletteId: 'codex',
+    backdropId: 'aurora',
+    glassAlpha: 67,
+    cardAlpha: 64,
+    glassBlur: 7,
+  },
+  {
+    id: 'crystal-glass',
+    label: '清透玻璃 · 日间',
+    desc: '液态磨砂 + 潮汐海岸 + 青瓷石板',
+    themeMode: 'light',
+    surfaceStyle: 'glass',
+    paletteId: 'material',
+    backdropId: 'spectrum',
+    glassAlpha: 30,
+    cardAlpha: 32,
+    glassBlur: 10,
+  },
+  {
+    id: 'pure-instrument',
+    label: '纯黑仪器 · 夜间',
+    desc: '极简仪器 + 极简黑白 + 纯网格底面',
+    themeMode: 'dark',
+    surfaceStyle: 'minimal',
+    paletteId: 'vercel',
+    backdropId: 'plain',
+    glassAlpha: 76,
+    cardAlpha: 62,
+    glassBlur: 0,
+  },
+  {
+    id: 'midnight-glass',
+    label: '深邃夜幕 · 夜间',
+    desc: '液态磨砂 + 折光纸幕 + 深海夜鸦',
+    themeMode: 'dark',
+    surfaceStyle: 'glass',
+    paletteId: 'night-owl',
+    backdropId: 'aurora',
+    glassAlpha: 28,
+    cardAlpha: 32,
+    glassBlur: 10,
+  },
+];
+
+function applyCuratedLookPreset(preset: (typeof CURATED_LOOK_PRESETS)[number]): void {
+  store.setStyleColorMode('current');
+  store.setThemeMode(preset.themeMode);
+  store.setSurfaceStyle(preset.surfaceStyle);
+  store.setPalette(preset.paletteId);
+  store.setBackdrop(preset.backdropId);
+  store.setGlassAlpha(preset.glassAlpha);
+  store.setCardAlpha(preset.cardAlpha);
+  store.setGlassBlur(preset.glassBlur);
+  store.resetBackdropTreatment();
+}
 const backgroundInput = ref<HTMLInputElement | null>(null);
 const iconInput = ref<HTMLInputElement | null>(null);
 const savingBackground = ref(false);
@@ -465,10 +615,23 @@ function isSplitterModified(storageKey: string): boolean {
   return isSplitterCustomized(storageKey);
 }
 
+function getSplitterSessionDiff(item: SplitterSpec): number | null {
+  void store.splitterLayoutVersion.value;
+  const sessionVal = getSessionSplitterValue(item.storageKey);
+  if (sessionVal === null) return null;
+  const configured = getConfiguredSplitterDefault(item.storageKey, item.factoryDefault);
+  return sessionVal !== configured ? sessionVal : null;
+}
+
 function isGroupModified(items: readonly SplitterSpec[]): boolean {
   void store.splitterLayoutVersion.value;
   return items.some((item) => isSplitterCustomized(item.storageKey));
 }
+
+const isAnySplitterModified = computed(() => {
+  void store.splitterLayoutVersion.value;
+  return splitterGroups.value.some((grp) => grp.items.some((item) => isSplitterCustomized(item.storageKey)));
+});
 
 function onSplitterDraftInput(storageKey: string, event: Event): void {
   const el = event.target as HTMLInputElement | null;
@@ -517,12 +680,11 @@ function ensureJd2Speaker(): void {
 
 function onToggleShowSplitters(e: Event): void {
   const checked = (e.target as HTMLInputElement).checked;
-  store.showSplitters.value = checked;
-  document.body.classList.toggle('hide-splitters', !checked);
+  store.setLayoutPrefs({ showSplitters: checked });
 }
 
 function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
-  const next: [string, string, string] = [...store.backdropCustomColors.value];
+  const next: [string, string, string] = [...store.backdropActiveColors.value];
   next[idx] = hex;
   store.setBackdropCustomColors(next);
 }
@@ -550,7 +712,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         :class="{ active: activeTab === tab.id }"
         @click="selectTab(tab.id)"
       >
-        <NavArtwork :item="tab.artKey" />
+        <NavArtwork :item="tab.artKey" toolbar theme-tint />
         <span>{{ tab.name }}</span>
       </button>
 
@@ -563,7 +725,8 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
           @click="openUpdateModal(true)"
         >
           <span style="display: inline-flex; align-items: center; gap: 8px">
-            <IconSvg :name="hasUpdate ? 'sparkles' : 'download'" :size="14" />
+            <IconSvg v-if="hasUpdate" name="sparkles" :size="14" />
+            <NavArtwork v-else item="check-updates" toolbar theme-tint />
             <span>{{ hasUpdate && latestRelease ? `发现新版本 v${latestRelease.version}` : '检查更新' }}</span>
           </span>
           <span class="mono muted" style="font-size: 0.78rem">v{{ APP_VERSION }}</span>
@@ -571,7 +734,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
       </div>
     </aside>
 
-    <section class="set-content">
+    <section ref="setContentRef" class="set-content">
       <h2 class="section-heading">{{ tabs.find((t) => t.id === activeTab)?.name }}</h2>
 
       <!-- 1. APPEARANCE & TYPOGRAPHY -->
@@ -580,12 +743,168 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
           <div class="panel">
             <div class="p-head">
               <span>表面风格与字体排印</span>
-              <button type="button" class="btn xs" @click="store.styleLabOpen.value = true">
-                <IconSvg name="sliders" :size="11" />
-                <span>打开风格实验室</span>
-              </button>
+              <div style="display: flex; align-items: center; gap: 6px">
+                <button type="button" class="btn xs" title="将表面风格、色板、背景与字体恢复为默认设置" @click="store.resetAppearance()">
+                  <IconSvg name="refresh" :size="11" />
+                  <span>恢复默认</span>
+                </button>
+                <button type="button" class="btn xs" @click="store.styleLabOpen.value = true">
+                  <IconSvg name="sliders" :size="11" />
+                  <span>打开风格实验室</span>
+                </button>
+              </div>
             </div>
             <div class="p-body appearance-panel-body">
+              <div class="curated-looks-bar">
+                <span class="curated-looks-lbl">一键搭配</span>
+                <div class="curated-looks-pills">
+                  <button
+                    v-for="preset in CURATED_LOOK_PRESETS"
+                    :key="preset.id"
+                    type="button"
+                    class="btn xs"
+                    :class="{
+                      active:
+                        store.resolvedColorMode.value === preset.themeMode
+                        && store.surfaceStyle.value === preset.surfaceStyle
+                        && store.paletteId.value === preset.paletteId,
+                    }"
+                    :title="preset.desc"
+                    @click="applyCuratedLookPreset(preset)"
+                  >
+                    {{ preset.label }}
+                  </button>
+                </div>
+              </div>
+              <div class="saved-looks-panel">
+                <div class="saved-looks-head">
+                  <div class="saved-looks-title-wrap">
+                    <strong>我的默认搭配</strong>
+                    <span class="muted">日间与夜间各可存 {{ MAX_SAVED_LOOKS_PER_MODE }} 份（含布局、字号、配色与背景），标星项在切换明暗时自动生效</span>
+                  </div>
+                  <div class="seg control-seg sm" role="tablist" aria-label="个人搭配时段">
+                    <button
+                      type="button"
+                      role="tab"
+                      :aria-selected="savedLookModeTab === 'light'"
+                      :class="{ active: savedLookModeTab === 'light' }"
+                      @click="savedLookModeTab = 'light'"
+                    >
+                      日间 ({{ store.savedLooks.value.light.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }})
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      :aria-selected="savedLookModeTab === 'dark'"
+                      :class="{ active: savedLookModeTab === 'dark' }"
+                      @click="savedLookModeTab = 'dark'"
+                    >
+                      夜间 ({{ store.savedLooks.value.dark.length }}/{{ MAX_SAVED_LOOKS_PER_MODE }})
+                    </button>
+                  </div>
+                </div>
+
+                <div class="saved-looks-create">
+                  <input
+                    v-model="savedLookNameDraft"
+                    type="text"
+                    class="inp saved-look-inp"
+                    maxlength="28"
+                    :placeholder="`输入${savedLookModeTab === 'dark' ? '夜间' : '日间'}搭配名称（留空自动命名）`"
+                    @keydown.enter.prevent="onSaveCurrentLookPreset"
+                  />
+                  <button
+                    type="button"
+                    class="btn sm primary"
+                    :disabled="currentModeSavedLooks.length >= MAX_SAVED_LOOKS_PER_MODE"
+                    @click="onSaveCurrentLookPreset"
+                  >
+                    <IconSvg name="plus" :size="12" />
+                    <span>保存当前为{{ savedLookModeTab === 'dark' ? '夜间' : '日间' }}方案</span>
+                  </button>
+                </div>
+
+                <div v-if="currentModeSavedLooks.length" class="saved-looks-list">
+                  <div
+                    v-for="look in currentModeSavedLooks"
+                    :key="look.id"
+                    class="saved-look-row"
+                    :class="{
+                      active: store.activeSavedLookId.value === look.id,
+                      'is-default': currentModeDefaultLookId === look.id,
+                    }"
+                  >
+                    <div class="saved-look-info">
+                      <div class="saved-look-name-row">
+                        <strong>{{ look.name }}</strong>
+                        <span v-if="currentModeDefaultLookId === look.id" class="saved-look-badge">
+                          {{ savedLookModeTab === 'dark' ? '夜间默认' : '日间默认' }}
+                        </span>
+                      </div>
+                      <span class="saved-look-meta muted">{{ summarizeSavedLook(look) }}</span>
+                    </div>
+                    <div class="saved-look-ops">
+                      <button
+                        type="button"
+                        class="btn xs"
+                        :class="{ primary: store.activeSavedLookId.value === look.id }"
+                        @click="store.applySavedLook(savedLookModeTab, look.id, $event)"
+                      >
+                        应用
+                      </button>
+                      <button
+                        type="button"
+                        class="btn xs"
+                        title="用当前最新布局、字号、配色与背景覆盖此方案"
+                        @click="store.updateSavedLookFromCurrent(savedLookModeTab, look.id)"
+                      >
+                        更新
+                      </button>
+                      <button
+                        type="button"
+                        class="btn xs"
+                        :class="{ active: currentModeDefaultLookId === look.id }"
+                        :title="currentModeDefaultLookId === look.id ? '点击取消默认' : '设为该时段切换明暗时的默认搭配'"
+                        @click="store.toggleDefaultSavedLook(savedLookModeTab, look.id)"
+                      >
+                        <IconSvg name="sparkles" :size="11" />
+                        <span>{{ currentModeDefaultLookId === look.id ? '默认中' : '设为默认' }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="btn xs icon-only"
+                        title="删除该搭配"
+                        @click="store.deleteSavedLook(savedLookModeTab, look.id)"
+                      >
+                        <IconSvg name="trash" :size="11" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <p v-else class="saved-look-empty muted">
+                  尚未保存{{ savedLookModeTab === 'dark' ? '夜间' : '日间' }}个人搭配。调好喜欢的配色、背景、字体与导航布局后点击上方按钮即可保存，最多保存 {{ MAX_SAVED_LOOKS_PER_MODE }} 份。
+                </p>
+              </div>
+
+              <div class="style-color-mode">
+                <span>切换风格时</span>
+                <div class="seg control-seg sm" role="group" aria-label="切换风格时的配色">
+                  <button
+                    type="button"
+                    :class="{ active: store.styleColorMode.value === 'current' }"
+                    :aria-pressed="store.styleColorMode.value === 'current'"
+                    title="保留当前色板、背景和材质参数"
+                    @click="store.setStyleColorMode('current')"
+                  >当前配色</button>
+                  <button
+                    type="button"
+                    :class="{ active: store.styleColorMode.value === 'original' }"
+                    :aria-pressed="store.styleColorMode.value === 'original'"
+                    title="点选风格时恢复其配色、默认背景和材质参数"
+                    @click="store.setStyleColorMode('original')"
+                  >原始配色</button>
+                </div>
+              </div>
               <div class="style-cards">
                 <button
                   v-for="skin in skins"
@@ -599,19 +918,12 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                   :aria-pressed="store.surfaceStyle.value === skin.id"
                   @click="store.setSurfaceStyle(skin.id)"
                 >
-                  <span class="skin-preview" :data-preview="skin.id" aria-hidden="true">
-                    <span class="preview-toolbar"><i></i><i></i><i></i><b></b></span>
-                    <span class="preview-sidebar"><i></i><i></i><i></i></span>
-                    <span class="preview-workspace">
-                      <span class="preview-chart">
-                        <svg viewBox="0 0 52 22" preserveAspectRatio="none" fill="none">
-                          <path class="preview-chart-grid" d="M0 7h52M0 15h52M13 0v22M26 0v22M39 0v22" />
-                          <path class="preview-chart-trace" d="M0 13 5 13 9 16 14 5 19 18 24 3 29 14 33 11 38 15 44 7 48 11 52 11" />
-                        </svg>
-                      </span>
-                      <span class="preview-controls"><i></i><i></i><b></b></span>
-                    </span>
-                  </span>
+                  <SkinPreviewThumb
+                    :skin-id="skin.id"
+                    :color-mode="store.styleColorMode.value"
+                    :theme-mode="store.resolvedColorMode.value"
+                    class="skin-preview"
+                  />
                   <div class="skin-card-meta">
                     <div class="skin-card-title-row">
                       <strong>{{ skin.shortName }}</strong>
@@ -725,24 +1037,51 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         </div>
         <div class="appearance-column">
           <div class="panel">
-            <div class="p-head"><span>背景与材质</span></div>
+            <div class="p-head">
+              <span>工作区背景与材质</span>
+              <span v-if="isMinimalSkin" class="muted" style="font-size: 0.833333rem">极简仪器采用纯网格底面</span>
+            </div>
             <div class="p-body appearance-panel-body">
               <div class="material-settings">
                 <div class="material-field">
                   <div class="material-caption">
-                    <div class="setting-k">背景样式</div>
-                    <div class="setting-desc">工作区背景底纹</div>
+                    <div class="setting-k">工作区背景</div>
+                    <div class="setting-desc">优先推荐低干扰静谧底纹，写真壁纸会自动叠加主题柔雾融合层</div>
                   </div>
-                  <div class="material-picker" role="group" aria-label="背景样式">
+                  <div class="material-group-label">静谧底纹（推荐）</div>
+                  <div class="material-picker" role="group" aria-label="静谧底纹">
                     <button
-                      v-for="b in backdrops"
+                      v-for="b in ambientBackdrops"
                       :key="b.id"
                       type="button"
                       :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
                       :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
                       @click="store.setBackdrop(b.id)"
                     >
-                      <span class="material-surface" :data-material="b.id" aria-hidden="true"></span>{{ b.label }}
+                      <span
+                        class="material-surface"
+                        :data-material="b.id"
+                        :style="backdropSurfaceStyle(b.id, store.resolvedColorMode.value, true)"
+                        aria-hidden="true"
+                      ></span>{{ b.label }}
+                    </button>
+                  </div>
+                  <div class="material-group-label">柔雾壁纸与自定义图片</div>
+                  <div class="material-picker" role="group" aria-label="柔雾壁纸与自定义图片">
+                    <button
+                      v-for="b in photoBackdrops"
+                      :key="b.id"
+                      type="button"
+                      :class="{ active: !activeWorkspaceBackground && store.backdropId.value === b.id }"
+                      :aria-pressed="!activeWorkspaceBackground && store.backdropId.value === b.id"
+                      @click="store.setBackdrop(b.id)"
+                    >
+                      <span
+                        class="material-surface photo-thumb-surface"
+                        :data-material="b.id"
+                        :style="backdropSurfaceStyle(b.id, store.resolvedColorMode.value, true)"
+                        aria-hidden="true"
+                      ></span>{{ b.label }}
                     </button>
                     <button
                       v-for="image in workspaceBackgrounds"
@@ -794,7 +1133,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                         v-for="idx in ([0, 1, 2] as const)"
                         :key="idx"
                         type="color"
-                        :value="store.backdropCustomColors.value[idx]"
+                        :value="store.backdropActiveColors.value[idx]"
                         :aria-label="'光色 ' + (idx + 1)"
                         :title="'光色 ' + (idx + 1)"
                         @input="updateBackdropColor(idx, ($event.target as HTMLInputElement).value)"
@@ -817,11 +1156,24 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                 </div>
               </div>
 
+              <div class="background-treatment-heading">
+                <span>背景处理</span>
+                <button
+                  type="button"
+                  class="btn xs"
+                  :class="{ active: store.backdropTreatmentAutomatic.value }"
+                  :aria-pressed="store.backdropTreatmentAutomatic.value"
+                  title="恢复当前壁纸的模糊和饱和度默认值"
+                  @click="store.resetBackdropTreatment()"
+                >自动</button>
+              </div>
               <div class="knob-grid">
-                <CompactSlider label="背景色彩饱和度" :model-value="store.bgSat.value" :min="20" :max="200" :step="5" :decimals="0" unit="%" :default-value="128" @update:model-value="store.setBgSat" />
+                <CompactSlider label="背景遮罩" :model-value="store.backdropVeilPct.value" :min="0" :max="BACKDROP_VEIL_MAX_PCT" :step="2" :decimals="0" unit="%" @update:model-value="store.setBackdropVeil" />
+                <CompactSlider label="背景模糊" :model-value="store.backdropTreatment.value.blurPx" :min="0" :max="BACKDROP_BLUR_MAX_PX" :step="1" :decimals="0" unit="px" @update:model-value="store.setBackdropBlur" />
+                <CompactSlider label="背景色彩饱和度" :model-value="store.backdropTreatment.value.saturationPct" :min="20" :max="220" :step="1" :decimals="0" unit="%" @update:model-value="store.setBgSat" />
                 <CompactSlider label="叠色浓度" :model-value="store.bgCov.value" :min="0.4" :max="1.9" :step="0.05" :decimals="2" unit="×" :default-value="1.18" @update:model-value="store.setBgCov" />
                 <CompactSlider label="卡片与控件不透明度" :model-value="store.cardAlpha.value" :min="15" :max="100" :step="1" :decimals="0" unit="%" :default-value="64" @update:model-value="store.setCardAlpha" />
-                <CompactSlider label="面板底色不透明度" :model-value="store.glassAlpha.value" :min="32" :max="96" :step="2" :decimals="0" unit="%" :default-value="66" @update:model-value="store.setGlassAlpha" />
+                <CompactSlider label="面板底色不透明度" :model-value="store.glassAlpha.value" :min="16" :max="96" :step="2" :decimals="0" unit="%" :default-value="66" @update:model-value="store.setGlassAlpha" />
                 <CompactSlider label="毛玻璃模糊半径" :model-value="store.glassBlur.value" :min="0" :max="22" :step="1" :decimals="0" unit="px" :default-value="7" @update:model-value="store.setGlassBlur" />
               </div>
             </div>
@@ -829,7 +1181,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 
           <div class="panel">
             <div class="p-head">
-              <span>30 套 WCAG 校验主题色板</span>
+              <span>主题色板（30 套）</span>
               <span class="mono muted" style="font-size: 0.875rem">{{ paletteDisplayName(store.paletteId.value) }}</span>
             </div>
             <div class="p-body" style="padding: 12px">
@@ -841,9 +1193,9 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                 </div>
                 <label class="inline-ctrl">
                   <span>自定义主色</span>
-                  <input type="color" :value="store.customAccentHex.value" @input="store.setCustomAccent(($event.target as HTMLInputElement).value)" />
+                  <input type="color" :value="store.accentPickerColor.value" @input="store.setCustomAccent(($event.target as HTMLInputElement).value)" />
                 </label>
-                <label class="inline-ctrl">
+                <div class="inline-ctrl">
                   <span>波形着色</span>
                   <CustomSelect
                     size="sm"
@@ -852,7 +1204,20 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                     :options="waveformModeOptions"
                     @update:model-value="(v) => store.setWaveformAppearance(v as 'theme' | 'blue' | 'custom')"
                   />
-                </label>
+                  <label
+                    v-if="store.waveformColorMode.value === 'custom'"
+                    class="inline-ctrl wave-custom-picker"
+                    title="选择自定义波形颜色"
+                  >
+                    <input
+                      type="color"
+                      aria-label="自定义波形颜色"
+                      :value="store.waveformCustomHex.value"
+                      @input="store.setWaveformAppearance('custom', ($event.target as HTMLInputElement).value)"
+                    />
+                    <span class="mono muted">{{ store.waveformCustomHex.value }}</span>
+                  </label>
+                </div>
                 <label class="inline-ctrl">
                   <span>全局缩放</span>
                   <input
@@ -1058,7 +1423,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
         <div class="panel">
           <div class="p-head">
             <span>各工作台分栏默认尺寸与复位</span>
-            <button type="button" class="btn primary xs" @click="store.resetAllSplitters()">
+            <button type="button" class="btn primary xs" :disabled="!isAnySplitterModified" @click="store.resetAllSplitters()">
               <IconSvg name="refresh" :size="11" />
               <span>全部恢复出厂默认</span>
             </button>
@@ -1089,6 +1454,9 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                       <span>{{ item.label }}</span>
                       <span class="splitter-item-meta mono">
                         出厂 {{ item.factoryDefault }}{{ item.unit }} · {{ item.min }}–{{ item.max }}
+                        <span v-if="getSplitterSessionDiff(item) !== null" class="splitter-session-tag">
+                          · 本次临时 {{ getSplitterSessionDiff(item) }}{{ item.unit }}
+                        </span>
                       </span>
                     </div>
                     <div class="splitter-item-ctrl">
@@ -1209,7 +1577,12 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
             <h3 class="p-head">{{ group.title }}</h3>
             <div v-for="row in group.rows" :key="row[0]" class="shortcut-line">
               <span>{{ row[0] }}</span>
-              <span><kbd v-for="key in row[1].split(' + ')" :key="key">{{ key }}</kbd></span>
+              <span class="shortcut-keys">
+                <template v-for="(tok, tIdx) in parseShortcutTokens(row[1])" :key="tIdx">
+                  <kbd v-if="tok.kind === 'key'">{{ tok.text }}</kbd>
+                  <span v-else class="shortcut-sep" aria-hidden="true">{{ tok.text }}</span>
+                </template>
+              </span>
             </div>
           </article>
         </div>
@@ -1217,11 +1590,11 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 
       <!-- 4. ACOUSTIC ENGINE & LOCAL MODELS (T-38) -->
       <div v-else-if="activeTab === 'engine'" class="set-full-pane">
-        <PortableCachePanel />
+        <PortableCachePanel v-if="isPortableRuntime" />
         <div class="panel">
           <div class="p-head">
             <span>声学求解内核、默认合成声源与参考声纹</span>
-            <button type="button" class="btn xs" @click="store.probeEngine()">
+            <button type="button" class="btn xs" :disabled="checkingModels" @click="refreshEngineAndModels">
               <IconSvg name="refresh" :size="11" />
               <span>刷新引擎连接</span>
             </button>
@@ -1254,7 +1627,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               <div class="setting-row">
                 <div>
                   <div class="setting-k">音标转声道</div>
-                  <div class="setting-desc">指定语音合成编译入轨时使用的 IPA 构型来源</div>
+                  <div class="setting-desc">推荐使用「自动切换」：输入文本时使用模型默认构型，输入 [IPA] 时使用当前 IPA 构型，混排语句按段自动切换</div>
                 </div>
                 <CustomSelect v-model="textPoseSource" :options="textPoseOptions" size="sm" style="width: 224px"
                   aria-label="音标转声道构型来源" />
@@ -1293,19 +1666,10 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                   <div class="setting-desc">65 截面管段声学求解 · 48,000 Hz 整数采样</div>
                 </div>
                 <span
-                  class="mono"
-                  :style="{
-                    color: store.engineStatus.value === 'prewarm-fallback' ? 'var(--warning)' : 'var(--success)',
-                    fontWeight: 600,
-                  }"
+                  class="mono engine-status-readout"
+                  :data-tone="engineStatusInfo.tone"
                 >
-                  {{
-                    store.engineStatus.value === 'python-vtl'
-                      ? '本地 Python VTL 2.4 已连接'
-                      : store.engineStatus.value === 'wasm-vtl'
-                        ? '浏览器 WASM 已就绪'
-                        : '离线 / 预渲染参考模式'
-                  }}
+                  {{ engineStatusInfo.label }}
                 </span>
               </div>
             </div>
@@ -1320,10 +1684,10 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
           </div>
         </div>
 
-        <!-- Complete 9 Local ONNX Models Hot-Plug & External Mount Matrix -->
+        <!-- Core 8 Local ONNX Models + 1 Optional Dialect Aligner Slot (3x3 Grid) -->
         <div class="panel">
           <div class="p-head model-matrix-head">
-            <span>本地轻量化模型矩阵（9 项 ONNX 热插拔）</span>
+            <span>本地轻量化模型矩阵（{{ LOCAL_MODEL_TOTALS.count }} 项核心 + 1 项可选方言对齐）</span>
             <div class="model-matrix-toolbar">
               <span class="mono muted" style="font-size: 0.85rem">{{ modelMessage }}</span>
               <button
@@ -1383,7 +1747,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                   v-model="externalFolderInput"
                   type="text"
                   class="model-folder-input mono"
-                  placeholder="输入外部 ONNX 模型目录路径（例如 D:\models\custom-onnx），自动按契约匹配 9 个槽位"
+                  placeholder="输入外部 ONNX 模型目录路径（例如 D:\models\custom-onnx），自动按契约匹配槽位"
                   :disabled="mountingFolder"
                   @keydown.enter="onMountExternalFolderByPath"
                 />
@@ -1425,28 +1789,24 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               <div
                 v-for="m in mergedModelCards"
                 :key="m.name"
-                class="editorial-card model-spec-card"
+                class="editorial-card model-spec-card selectable"
+                :title="m.cardTooltip || undefined"
                 :class="{
                   'is-loaded': m.loaded && m.available !== false,
                   'is-unloaded': !m.loaded,
                   'is-external': m.source === 'external',
                   'is-busy': busyModelName === m.name,
                 }"
-                role="button"
-                tabindex="0"
-                :aria-pressed="m.loaded"
-                :title="m.loaded ? `点击卸载 ${m.name}` : `点击装载 ${m.name}`"
-                @click="toggleModelHotPlug(m)"
-                @keydown.enter.prevent="toggleModelHotPlug(m)"
-                @keydown.space.prevent="toggleModelHotPlug(m)"
               >
                 <div class="model-spec-head">
                   <div class="model-spec-title-wrap">
                     <strong class="mono model-spec-name">{{ m.name }}</strong>
                     <span v-if="m.source === 'external'" class="model-ext-tag mono" :title="m.externalPath || m.externalLabel || ''">外置</span>
+                    <span v-else-if="m.optionalSlot" class="model-ext-tag mono" :title="m.cardTooltip">已合并</span>
                   </div>
                   <span
                     class="model-status-pill mono"
+                    :title="m.cardTooltip || undefined"
                     :class="
                       busyModelName === m.name
                         ? 'neutral'
@@ -1464,14 +1824,14 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                           ? '缺少权重'
                           : m.loaded
                             ? (m.inMemory ? '已装载 · 内存中' : '已装载')
-                            : '未装载'
+                            : (m.optionalSlot ? '已合并 · 未装载' : '未装载')
                     }}
                   </span>
                 </div>
                 <div class="mono model-spec-nums">
                   <span>{{ m.paramsM.toFixed(2) }} M</span>
                   <span>·</span>
-                  <span>{{ m.sizeMb.toFixed(2) }} MB</span>
+                  <span>{{ m.sizeMb.toFixed(2) }} MiB</span>
                   <span>·</span>
                   <span>{{ m.dtypeLabel }}</span>
                   <span v-if="m.loadMs != null && m.inMemory" class="muted" style="font-weight: 400">· {{ m.loadMs }} ms</span>
@@ -1482,7 +1842,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
                 <div v-if="m.source === 'external' && m.externalLabel" class="mono model-ext-file" :title="m.externalPath || m.externalLabel">
                   外部权重：{{ m.externalLabel }}
                 </div>
-                <div class="model-card-actions" @click.stop>
+                <div class="model-card-actions">
                   <button
                     type="button"
                     class="btn xs"
@@ -1517,8 +1877,8 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
             <div class="model-total-bar">
               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
                 <IconSvg name="cpu" :size="15" />
-                <strong>本地 ONNX 模型包汇总（共 {{ LOCAL_MODEL_TOTALS.count }} 个模型）</strong>
-                <span class="muted">全链路纯 ONNX Runtime 离线推理 · 零 PyTorch 运行时依赖 · 点击卡片即可热插拔</span>
+                <strong>本地 ONNX 模型包汇总（默认启用 {{ activeCountedCards.length }} 个模型）</strong>
+                <span class="muted">全链路纯 ONNX Runtime 离线推理 · 零 PyTorch 运行时依赖 · 独立对齐槽位已并入 Vox2Tract-Lite，悬停其卡片可查看方言扩展说明</span>
               </div>
               <span class="mono model-total-Readout">
                 {{ displayTotalParamsText }} 参数 · {{ displayTotalSizeText }}
@@ -1539,7 +1899,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               <div class="setting-row">
                 <div>
                   <div class="setting-k">VocalTractLab 2.4 &amp; VoxFigura Core</div>
-                  <div class="setting-desc">三维声道构音物理模型、65 截面面积函数与本地轻量化声道—声码器模型群</div>
+                  <div class="setting-desc">三维声道构音物理模型、65 截面面积函数与 8 项核心本地纯 ONNX 声道—声码器模型群</div>
                 </div>
                 <span class="mono">GPL-3.0</span>
               </div>
@@ -1552,10 +1912,17 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
               </div>
               <div class="setting-row">
                 <div>
-                  <div class="setting-k">PTBIPAPlus / Doulos SIL / Inter / JetBrains Mono / CMUdict</div>
-                  <div class="setting-desc">随包专业国际音标字体、现代界面与等宽数字字体及英语发音词典</div>
+                  <div class="setting-k">PTBIPAPlus / Doulos SIL / Noto SC / Inter / Lora / CMUdict</div>
+                  <div class="setting-desc">随包专业国际音标字体、中英文界面与等宽数字字体及英语发音词典</div>
                 </div>
                 <span class="mono">OFL / BSD</span>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-k">SwiftF0 / DPDFNet2 / MediaPipe / SenseVoice / Three.js / ECharts</div>
+                  <div class="setting-desc">端侧基频估计、48 kHz 语音降噪、面部追踪、按需离线转写与三维/图表渲染组件</div>
+                </div>
+                <span class="mono">MIT / Apache-2.0</span>
               </div>
             </div>
 
@@ -1643,6 +2010,18 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   min-width: 100px;
 }
 
+.font-size-bar .seg button {
+  height: auto;
+  min-height: 24px;
+  padding: 3px 8px;
+}
+
+.font-size-bar .seg button.active {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
 .font-bottom-row {
   display: flex;
   align-items: center;
@@ -1686,6 +2065,16 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--panel-border));
 }
 
+.style-card.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.style-card.active .skin-card-title-row strong {
+  color: var(--accent);
+}
+
 .skin-card-meta {
   display: flex;
   flex-direction: column;
@@ -1708,190 +2097,12 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 }
 
 .skin-preview {
-  --preview-frame: #d3dfe8;
-  --preview-panel: #eaf1f7;
-  --preview-toolbar: #e5eff7;
-  --preview-border: #8ca5b8;
-  --preview-ink: #516d84;
-  --preview-accent: #236499;
-  --preview-secondary: #a3bfd6;
-  --preview-radius: 4px;
-  --preview-depth: inset 0 1px 1px #fff, 0 1px 2px #122d5033;
-  overflow: hidden;
   width: 88px;
   height: 52px;
-  border: 1px solid var(--preview-border);
-  border-radius: calc(var(--preview-radius) + 2px);
-  background: var(--preview-frame);
-  box-shadow: var(--preview-depth);
-  display: grid;
   grid-template-columns: 14px minmax(0, 1fr);
   grid-template-rows: 9px minmax(0, 1fr);
   gap: 3px;
   padding: 4px;
-  box-sizing: border-box;
-  flex: none;
-}
-.preview-toolbar,
-.preview-sidebar,
-.preview-chart {
-  border: 1px solid var(--preview-border);
-  border-radius: var(--preview-radius);
-  background: var(--preview-panel);
-}
-.preview-toolbar {
-  grid-column: span 2;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 4px;
-  background: var(--preview-toolbar);
-}
-.preview-toolbar i {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--preview-ink);
-}
-.preview-toolbar b,
-.preview-controls b {
-  margin-left: auto;
-  width: 12px;
-  height: 4px;
-  border-radius: var(--preview-radius);
-  background: var(--preview-accent);
-}
-.preview-sidebar {
-  display: grid;
-  align-content: space-evenly;
-  justify-items: center;
-}
-.preview-sidebar i {
-  width: 7px;
-  height: 3px;
-  border-radius: var(--preview-radius);
-  background: var(--preview-secondary);
-}
-.preview-sidebar i:first-child {
-  background: var(--preview-accent);
-}
-.preview-workspace {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) 6px;
-  gap: 3px;
-}
-.preview-chart {
-  overflow: hidden;
-  padding: 2px 3px;
-}
-.preview-chart svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-.preview-chart-grid {
-  stroke: var(--preview-ink);
-  stroke-width: 0.6;
-  opacity: 0.28;
-}
-.preview-chart-trace {
-  stroke: var(--preview-accent);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.preview-controls {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-.preview-controls i {
-  width: 12px;
-  height: 4px;
-  border-radius: var(--preview-radius);
-  background: var(--preview-secondary);
-}
-
-[data-preview="clay"] {
-  --preview-frame: #dccaea;
-  --preview-panel: #fae2d5;
-  --preview-toolbar: #eadcf4;
-  --preview-border: #b696c8;
-  --preview-ink: #6a4a85;
-  --preview-accent: #70499b;
-  --preview-secondary: #bc8fae;
-  --preview-radius: 8px;
-  --preview-depth: inset 1px 1px 2px #fff9, inset -2px -2px 4px #78539470, 0 2px 2px #2b183e40;
-}
-[data-preview="glass"] {
-  --preview-frame: linear-gradient(135deg, #e5f9f5, #91c5c9 48%, #407c8d);
-  --preview-panel: #e4faf3c9;
-  --preview-toolbar: #ecfffacc;
-  --preview-border: #4d939a;
-  --preview-ink: #1c5e6b;
-  --preview-accent: #006665;
-  --preview-secondary: #6da5ad;
-  --preview-depth: inset 0 1px 2px #fff, 0 2px 3px #153d4b44;
-}
-[data-preview="minimal"] {
-  --preview-frame: #dae2e9;
-  --preview-panel: #f9fcff;
-  --preview-toolbar: #eef2f6;
-  --preview-border: #8397aa;
-  --preview-ink: #32495f;
-  --preview-accent: #16334d;
-  --preview-secondary: #9babb9;
-  --preview-radius: 1px;
-  --preview-depth: none;
-  border-top: 2px solid var(--preview-accent);
-}
-[data-preview="material"] {
-  --preview-frame: #aaa9d7;
-  --preview-panel: #f2efff;
-  --preview-toolbar: #d8d6fb;
-  --preview-border: #807cb2;
-  --preview-ink: #433e84;
-  --preview-accent: #116969;
-  --preview-secondary: #9a88cc;
-  --preview-radius: 5px;
-  --preview-depth: 0 2px 3px #251c5f66;
-}
-[data-preview="swiss"] {
-  --preview-frame: #f7e8d2;
-  --preview-panel: #fff4e2;
-  --preview-toolbar: #fff4e2;
-  --preview-border: #5a4e44;
-  --preview-ink: #30241f;
-  --preview-accent: #ad1928;
-  --preview-secondary: #786d65;
-  --preview-radius: 0px;
-  --preview-depth: none;
-  border-radius: 0;
-}
-[data-preview="bauhaus"] {
-  --preview-frame: #f0bc3f;
-  --preview-panel: #fff1c2;
-  --preview-toolbar: #ffd76c;
-  --preview-border: #302617;
-  --preview-ink: #4d371a;
-  --preview-accent: #1341aa;
-  --preview-secondary: #c63127;
-  --preview-radius: 0px;
-  --preview-depth: 2px 2px #241c12;
-  border-radius: 0;
-}
-[data-preview="brutal"] {
-  --preview-frame: #85b4ff;
-  --preview-panel: #fcfdff;
-  --preview-toolbar: #e0ecff;
-  --preview-border: #141820;
-  --preview-ink: #253555;
-  --preview-accent: #164eaf;
-  --preview-secondary: #77a5f8;
-  --preview-radius: 2px;
-  --preview-depth: 2px 2px #141820;
-  border-width: 2px;
-  border-radius: 2px;
 }
 
 .settings-title {
@@ -1921,6 +2132,163 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   min-width: 0;
 }
 .appearance-panel-body { padding: 12px; }
+.style-color-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.curated-looks-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--app) 54%, transparent);
+}
+.curated-looks-lbl {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.curated-looks-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.curated-looks-pills .btn.xs {
+  height: auto;
+  min-height: 24px;
+  padding: 3px 8px;
+}
+.curated-looks-pills .btn.xs.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: none;
+}
+.saved-looks-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--r-panel);
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  background: color-mix(in srgb, var(--app) 54%, transparent);
+}
+.saved-looks-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.saved-looks-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.saved-looks-title-wrap strong {
+  font-size: 0.958333rem;
+}
+.saved-looks-title-wrap .muted {
+  font-size: 0.81rem;
+  line-height: 1.4;
+}
+.saved-looks-create {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.saved-look-inp {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.saved-looks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.saved-look-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  padding: 7px 10px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  background: var(--panel);
+}
+.saved-look-row.is-default {
+  border-color: color-mix(in srgb, var(--accent) 56%, var(--border));
+}
+.saved-look-row.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.saved-look-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 160px;
+}
+.saved-look-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.saved-look-name-row strong {
+  font-size: 0.916667rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-look-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--accent);
+}
+.saved-look-meta {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-look-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  flex: none;
+}
+.saved-look-ops .btn.xs {
+  height: auto;
+  min-height: 23px;
+  padding: 2px 7px;
+}
+.saved-look-ops .btn.xs.icon-only {
+  width: 24px;
+  padding: 0;
+}
+.saved-look-empty {
+  margin: 0;
+  font-size: 0.833333rem;
+  line-height: 1.5;
+}
 .appearance-pane .style-cards {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -1970,6 +2338,13 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   white-space: nowrap;
 }
 
+.background-treatment-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .material-settings {
   display: grid;
   gap: 10px;
@@ -1983,6 +2358,12 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 .material-caption {
   min-width: 0;
 }
+.material-group-label {
+  font-size: 0.833333rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-top: 2px;
+}
 .material-picker {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 94px), 1fr));
@@ -1993,7 +2374,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   display: grid;
   gap: 4px;
   min-width: 0;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
   border-radius: var(--r-ctrl);
   padding: 4px 4px 5px;
   background: var(--panel);
@@ -2002,8 +2383,21 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   font-size: 0.916667rem;
   cursor: pointer;
 }
+.material-picker .photo-thumb-surface {
+  position: relative;
+  overflow: hidden;
+}
+.material-picker .photo-thumb-surface::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--app) 36%, transparent);
+  pointer-events: none;
+}
 .material-picker button.active {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--accent);
   color: var(--accent);
   font-weight: 600;
 }
@@ -2013,7 +2407,9 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 .application-icon-preview { width: 32px; height: 32px; object-fit: contain; border-radius: 6px; }
 .material-picker .background-thumb,
 .material-picker .material-surface {
-  height: 52px;
+  height: auto;
+  min-height: 52px;
+  aspect-ratio: 16 / 9;
   border-radius: max(2px, calc(var(--r-ctrl) - 2px));
 }
 .material-picker .background-upload {
@@ -2075,6 +2471,22 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   font-size: 0.791667rem;
   color: var(--muted);
 }
+.splitter-session-tag {
+  color: var(--accent);
+}
+.wave-custom-picker {
+  gap: 5px;
+}
+.engine-status-readout {
+  font-weight: 600;
+  color: var(--warning);
+}
+.engine-status-readout[data-tone="ok"] {
+  color: var(--success);
+}
+.engine-status-readout[data-tone="checking"] {
+  color: var(--accent);
+}
 .splitter-item-ctrl {
   display: flex;
   align-items: center;
@@ -2112,20 +2524,44 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
 }
 .shortcut-line {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 6px 12px;
   min-height: 36px;
   margin: 0 14px;
+  padding: 6px 0;
   border-bottom: 1px solid var(--panel-border);
   font-size: 0.958333rem;
+}
+.shortcut-line > span:first-child {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 .shortcut-line:last-child {
   border: 0;
 }
+.shortcut-keys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 3px;
+  flex: 0 1 auto;
+  max-width: 100%;
+  margin-left: auto;
+}
+.shortcut-sep {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0 2px;
+  user-select: none;
+}
 .shortcut-line kbd {
   display: inline-block;
   padding: 2px 6px;
-  margin-left: 3px;
   color: var(--text);
   background: var(--rail);
   border: 1px solid var(--border);
@@ -2133,6 +2569,8 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   border-radius: 4px;
   font-family: var(--font-mono);
   font-size: 0.875rem;
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
 
 /* Speaker Reference & Local 9-Model Matrix */
@@ -2167,7 +2605,7 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   min-width: 200px;
   height: 30px;
   padding: 0 10px;
-  border-radius: var(--r-btn, 6px);
+  border-radius: var(--r-ctrl);
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
@@ -2187,8 +2625,6 @@ function updateBackdropColor(idx: 0 | 1 | 2, hex: string): void {
   gap: 5px;
   padding: 10px 12px;
   box-shadow: none;
-  cursor: pointer;
-  user-select: none;
   transition: border-color 140ms ease, opacity 140ms ease, background-color 140ms ease, transform 120ms ease;
 }
 .model-spec-card:hover {

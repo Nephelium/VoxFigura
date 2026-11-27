@@ -43,3 +43,28 @@ export async function saveIpaPersonalRecording(setId: string, referenceId: strin
 export async function removeIpaPersonalRecording(setId: string, referenceId: string): Promise<void> {
   await withRecordingStore('readwrite', store => store.delete([setId, referenceId]));
 }
+
+export async function clearIpaPersonalRecordingsForSet(setId: string): Promise<void> {
+  const keys = await withRecordingStore<IDBValidKey[]>('readonly', store => store.index('by-set').getAllKeys(setId));
+  if (!keys.length) return;
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const open = indexedDB.open('vocalcut-ipa-recordings', 1);
+    open.onupgradeneeded = () => {
+      const store = open.result.createObjectStore(storeName, { keyPath: ['setId', 'referenceId'] });
+      store.createIndex('by-set', 'setId');
+    };
+    open.onsuccess = () => resolve(open.result);
+    open.onerror = () => reject(open.error);
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const obj = tx.objectStore(storeName);
+      for (const k of keys) obj.delete(k);
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}

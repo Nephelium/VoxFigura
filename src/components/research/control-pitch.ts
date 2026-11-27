@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { evalF0, F0_LIMIT_HZ, hzToSt, msToSamples, stToHz, type PhonationAnchor, type Syllable, type QtaTargetSpan, type VcProject } from '@vocalcut/core';
+import { evalF0, hzToSt, isValidF0Hz, msToSamples, stToHz, type PhonationAnchor, type Syllable, type QtaTargetSpan, type VcProject } from '@vocalcut/core';
 import { ARRANGED_NOTE_RULE, ARRANGED_PORTAMENTO_RULE } from '@/components/studio/arranger-score';
 import { arrangementPitchOptions, isArrangerPin } from '@/components/studio/arranger-pitch';
 
@@ -39,44 +39,18 @@ export function absolutePianoNotes(syllables: readonly Syllable[], referenceHz: 
   }))).sort((a, b) => a.startSmp - b.startSmp);
 }
 
-export function setPianoNote(
-  syllable: Syllable, startSmp: number, endSmp: number, hz: number, referenceHz: number,
-  id: string,
-): Syllable {
-  const inSyllable = startSmp >= syllable.start_smp && endSmp <= syllable.end_smp;
-  const matchesScore = syllable.targets.some((note) => isArrangedNote(note) && startSmp === note.start_smp && endSmp === note.end_smp);
-  if ((!inSyllable && !matchesScore) || endSmp <= startSmp
-    || !Number.isFinite(hz) || hz < F0_LIMIT_HZ.min || hz > F0_LIMIT_HZ.max) return syllable;
-  const targets = syllable.targets.flatMap((span) => {
-    if (!isPianoNote(span) || span.end_smp <= startSmp || span.start_smp >= endSmp) return [span];
-    return [
-      ...(span.start_smp < startSmp ? [{ ...span, id: `${id}-before`, end_smp: startSmp }] : []),
-      ...(span.end_smp > endSmp ? [{ ...span, id: `${id}-after`, start_smp: endSmp }] : []),
-    ];
-  });
-  targets.push({
-    id,
-    span_id: id,
-    start_smp: startSmp,
-    end_smp: endSmp,
-    voiced: true,
-    candidates: { user: { source: 'user', b_end_st: hzToSt(hz, referenceHz), m_st_per_s: 0, lambda_per_s: 48, rule: PIANO_ROLL_RULE } },
-  });
-  return { ...syllable, targets };
-}
-
 export function evaluateControlPitch(
   project: VcProject, syllables: Syllable[], totalSmp: number, referenceHz: number,
   includePins = true, includePianoNotes = true,
   anchors: readonly PhonationAnchor[] = project.phonation_anchor_order.map((id) => project.phonation_anchors[id]).filter(Boolean),
-  options?: { unmarkedPitchMode?: UnmarkedIpaPitchMode },
+  options?: { unmarkedPitchMode?: UnmarkedIpaPitchMode; speechRegisterRatio?: number },
 ) {
   const spans: QtaTargetSpan[] = [];
   for (const syl of syllables) {
     const qtaTargets = syl.targets?.filter((target) => !isPianoNote(target)) ?? [];
     if (qtaTargets.length) {
       for (const t of qtaTargets) {
-        spans.push({ ...t, voiced: true });
+        spans.push({ ...t, voiced: t.voiced !== false });
       }
     } else {
       spans.push({
@@ -114,6 +88,17 @@ export function evaluateControlPitch(
   if (!arranged && pitchMode === 'natural') {
     applyNaturalUnmarkedIntonation(baseline.value, syllables, referenceHz, includePins ? project.f0_pins : undefined);
   }
+  const registerRatio = options?.speechRegisterRatio;
+  if (!arranged && typeof registerRatio === 'number' && Number.isFinite(registerRatio) && registerRatio > 0 && Math.abs(registerRatio - 1) > 1e-3) {
+    for (let i = 0; i < baseline.value.f0_hz.length; i++) {
+      const hz = baseline.value.f0_hz[i];
+      if (hz > 0) {
+        const shifted = Math.max(55, Math.min(580, hz * registerRatio));
+        baseline.value.f0_hz[i] = shifted;
+        baseline.value.f0_st[i] = hzToSt(shifted, referenceHz);
+      }
+    }
+  }
   if (!arranged) applyVoqsRegister(baseline.value, anchors, totalSmp, referenceHz, includePins ? project.f0_pins : undefined);
   if (!includePianoNotes) return baseline;
   const notes = absolutePianoNotes(syllables, referenceHz);
@@ -122,7 +107,7 @@ export function evaluateControlPitch(
   for (const [index, time] of baseline.value.times_smp.entries()) {
     while (notes[cursor] && notes[cursor].endSmp <= time) cursor++;
     const note = notes[cursor];
-    if (note && note.startSmp <= time) {
+    if (note && note.startSmp <= time && isValidF0Hz(note.hz)) {
       baseline.value.f0_hz[index] = note.hz;
       baseline.value.f0_st[index] = hzToSt(note.hz, referenceHz);
     }
@@ -163,8 +148,6 @@ function applyNaturalUnmarkedIntonation(
     }
   }
   const fadeSmp = msToSamples(25);
-  const minSt = hzToSt(F0_LIMIT_HZ.min + 0.5, referenceHz);
-  const maxSt = hzToSt(F0_LIMIT_HZ.max - 0.5, referenceHz);
   let phraseIndex = 0;
   for (let i = 0; i < pitch.times_smp.length; i++) {
     const time = pitch.times_smp[i];
@@ -191,15 +174,18 @@ function applyNaturalUnmarkedIntonation(
     // Gentle citation-form arch + soft final declination (~1.1 st total excursion).
     const rawOffsetSt = (0.45 * Math.sin(Math.PI * Math.pow(u, 0.78)) - 0.85 * (0.5 - 0.5 * Math.cos(Math.PI * u))) * pinWeight;
     const curSt = pitch.f0_st[i];
-    const nextSt = Math.max(minSt, Math.min(maxSt, curSt + rawOffsetSt));
+    const nextSt = curSt + rawOffsetSt;
     pitch.f0_st[i] = nextSt;
     pitch.f0_hz[i] = stToHz(nextSt, referenceHz);
   }
 }
 
 function isAutomaticProsodyPin(pin: { id: string }): boolean {
-  return pin.id === 'prosody' || pin.id.startsWith('prosody-');
+  return pin.id === 'prosody' || pin.id.startsWith('prosody-') || /^s\d+_prosody(?:-|$)/.test(pin.id);
 }
+
+const FALSETTO_REGISTER_HZ = 600;
+const CREAKY_REGISTER_HZ = 60;
 
 function applyVoqsRegister(
   pitch: { times_smp: number[]; f0_hz: number[]; f0_st: number[] },
@@ -219,19 +205,39 @@ function applyVoqsRegister(
     while (sorted[index + 1]?.t_smp <= time) index++;
     const anchor = sorted[index];
     if (!shiftsRegister(anchor)) continue;
-    // Respect explicit user-drawn F0 pins, while still raising F0 for falsetto over automatic Text2Prosody pins.
-    if (userPins?.some((pin) => pin.start_smp <= time && time <= pin.end_smp)) continue;
+    // Smoothly taper around explicit user-drawn F0 pins, while still shifting register over automatic Text2Prosody pins.
+    let pinWeight = 1;
+    if (userPins?.length) {
+      for (const pin of userPins) {
+        if (pin.start_smp <= time && time <= pin.end_smp) {
+          pinWeight = 0;
+          break;
+        }
+        const dist = time < pin.start_smp ? pin.start_smp - time : time - pin.end_smp;
+        if (dist < fadeSmp) {
+          const u = dist / fadeSmp;
+          pinWeight = Math.min(pinWeight, 0.5 * (1 - Math.cos(Math.PI * u)));
+        }
+      }
+    }
+    if (pinWeight <= 0) continue;
     const hz = pitch.f0_hz[frame];
     if (hz <= 0) continue;
-    const end = sorted[index + 1]?.t_smp ?? endSmp;
-    const fadeIn = index === 0 && anchor.t_smp === 0 ? 1 : (time - anchor.t_smp) / fadeSmp;
-    const fadeOut = index === sorted.length - 1 ? 1 : (end - time) / fadeSmp;
-    const edge = Math.min(1, fadeIn, fadeOut);
+    const prevAnchor = index > 0 ? sorted[index - 1] : undefined;
+    const nextAnchor = sorted[index + 1];
+    const sameRegister = (other: PhonationAnchor | undefined) =>
+      Boolean(other && shiftsRegister(other) && other.regime === anchor.regime);
+    const end = nextAnchor?.t_smp ?? endSmp;
+    const fadeIn = (index === 0 && anchor.t_smp === 0) || sameRegister(prevAnchor) ? 1 : (time - anchor.t_smp) / fadeSmp;
+    const fadeOut = index === sorted.length - 1 || sameRegister(nextAnchor) ? 1 : (end - time) / fadeSmp;
+    const edge = Math.min(1, fadeIn, fadeOut) * pinWeight;
     if (edge <= 0) continue;
-    // Interpolate in log Hz toward the register boundary, preserving the contour and its legal range.
-    const boundary = anchor.regime === 'falsetto' ? F0_LIMIT_HZ.max : F0_LIMIT_HZ.min;
-    const factor = anchor.regime === 'falsetto' ? 0.36 : 0.34;
-    const shifted = hz * (boundary / hz) ** (factor * anchor.blend * edge);
+    // Shift speech pitch softly toward a typical falsetto/creaky register without inverting already extreme F0.
+    const isFalsetto = anchor.regime === 'falsetto';
+    if ((isFalsetto && hz >= FALSETTO_REGISTER_HZ) || (!isFalsetto && hz <= CREAKY_REGISTER_HZ)) continue;
+    const targetHz = isFalsetto ? FALSETTO_REGISTER_HZ : CREAKY_REGISTER_HZ;
+    const factor = isFalsetto ? 0.36 : 0.34;
+    const shifted = hz * (targetHz / hz) ** (factor * anchor.blend * edge);
     pitch.f0_hz[frame] = shifted;
     pitch.f0_st[frame] = hzToSt(shifted, referenceHz);
   }

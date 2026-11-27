@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import IconSvg from '@/components/common/IconSvg.vue';
 
-defineProps<{
-  acquiring: boolean;
-  recording: boolean;
-  elapsed: string;
-  bars: readonly number[];
-  quiet: boolean;
-  announceQuiet?: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    acquiring: boolean;
+    recording: boolean;
+    elapsed: string;
+    bars: readonly number[];
+    quiet: boolean;
+    announceQuiet?: boolean;
+    size?: 'sm' | 'xs';
+    idleLabel?: string;
+    activeLabel?: string;
+    disabled?: boolean;
+  }>(),
+  {
+    announceQuiet: false,
+    size: 'sm',
+    idleLabel: '麦克风录音',
+    activeLabel: '结束录音',
+    disabled: false,
+  },
+);
 
 const emit = defineEmits<{ toggle: [] }>();
 </script>
@@ -19,14 +32,14 @@ const emit = defineEmits<{ toggle: [] }>();
       <slot />
       <button
         type="button"
-        class="btn sm"
-        :class="{ 'mic-recording': recording }"
-        :disabled="acquiring"
+        class="btn"
+        :class="[size, { 'mic-recording': recording }]"
+        :disabled="acquiring || disabled"
         @click="emit('toggle')"
       >
         <i v-if="recording" class="record-dot" aria-hidden="true" />
-        <IconSvg v-else name="mic" :size="12" />
-        <span>{{ recording ? '结束录音' : '麦克风录音' }}</span>
+        <IconSvg v-else name="mic" :size="size === 'xs' ? 11 : 12" />
+        <span>{{ recording ? activeLabel : idleLabel }}</span>
         <span v-if="recording" class="mono record-time" aria-hidden="true">{{ elapsed }}</span>
       </button>
     </div>

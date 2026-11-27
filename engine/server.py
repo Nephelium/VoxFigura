@@ -27,7 +27,7 @@ ENGINE_DIR = Path(__file__).resolve().parent
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
-from dense_channel import DenseEngineManager  # noqa: E402
+from dense_channel import DenseEngineManager, EngineBusyError  # noqa: E402
 from keyframe_lite import AnnotationControlError, apply_annotation_trajectory  # noqa: E402
 from m27_bridge import M27Bridge, TT3_ROOT  # noqa: E402
 from model_registry_runtime import (  # noqa: E402
@@ -45,10 +45,11 @@ M27_BRIDGE = M27Bridge(DENSE_MANAGER)
 PROSODY_BRIDGE = ProsodyBridge()
 REALTIME_M27 = RealtimeM27Service(DENSE_MANAGER, M27_BRIDGE)
 VOICE_MORPH_BRIDGE = VoiceMorphBridge(M27_BRIDGE)
+# Local SenseVoice-Small ONNX ASR is enabled by default (weights are downloaded on demand).
 LOCAL_ASR_ENABLED = os.environ.get("VOCALCUT_DISABLE_LOCAL_ASR") != "1"
 if LOCAL_ASR_ENABLED:
-    from asr_install import AsrInstallJob
-    from asr_models import LEGACY_MODEL, MODELS, default_local_model, is_installed
+    from asr_install import AsrInstallJob, remove_model
+    from asr_models import MODELS, default_local_model, is_installed
     from speech_to_text import OfflineTranscriber, TranscriptionError
 
     OFFLINE_TRANSCRIBER = OfflineTranscriber()
@@ -62,8 +63,6 @@ def asr_install_status(name: str | None = None) -> dict[str, Any]:
     choices = [] if custom else [
         {"id": key, "size_bytes": spec.size_bytes, "installed": is_installed(key)} for key, spec in MODELS.items()
     ]
-    if not custom and is_installed(LEGACY_MODEL):
-        choices.append({"id": LEGACY_MODEL, "size_bytes": 0, "installed": True})
     status: dict[str, Any] = {"model": model, "models": choices}
     if job.get("state") == "installing":
         status["installing_model"] = job["model"]
@@ -72,43 +71,74 @@ def asr_install_status(name: str | None = None) -> dict[str, Any]:
     offline = OFFLINE_TRANSCRIBER.status(model)
     available = custom or any(choice["id"] == model and choice["installed"] for choice in choices)
     if offline["ready"] and available:
-        return {**status, "state": "ready"}
+        return {**status, "state": "ready", "progress": 100}
     if job.get("model") == model and job.get("state") == "failed":
         return {**status, **job}
     return {**status, "state": "missing", "hint": offline.get("hint")}
 
-RESERVED_MODEL_CONTRACTS: Dict[str, Dict[str, Any]] = {
-    "/models/browser-light-m27": {
-        "ok": False,
-        "status": "reserved_slot",
-        "slot": "BrowserLightM27Slot",
-        "model_id": "BrowserLightInverter",
-        "fallback": "fallback_vox2tract",
-        "contract": {
-            "inputs": ["wav_16k (B, T*320)"],
-            "frontend": "PureLogMel50Hz (80 log-mel + 80 delta + 3 energy = 163 dims)",
-            "outputs": ["m21_norm_50hz (B, T, 21) -> [m20, PR]"],
-            "reference": "model_bundle/src/tt3/browser_m27_models.py",
-        },
-        "hint": "浏览器内 ONNX 接口暂未接入。项目内 Vox2Tract-Lite 与 Vox2Align-Lite 通过 /m27/reconstruct 执行。",
-    },
-    "/models/speaker": {
-        "ok": False,
-        "status": "reserved_slot",
-        "slot": "SpeakerModelSlot",
-        "model_id": "CustomSpeakerWeights / FrozenSpeakerEncoder",
-        "fallback": "tract2vox_zero_shot_vc",
-        "contract": {
-            "inputs": ["m27_50hz_pa", "speaker_ref_wav_base64"],
-            "outputs": ["neural_16k_wav_base64"],
-            "endpoint_ready": "/m27/resynthesize",
-        },
-        "hint": "Tract2Vox-Lite 默认使用井井的自然讲解声纹。POST /m27/resynthesize 可传 speaker_ref_wav_base64 指定参考音色。另行微调的权重保留独立接口。",
-    },
-}
 
 MAX_BODY_BYTES = 64 * 1024 * 1024
 _LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$")
+_LOOPBACK_HOST_RE = re.compile(r"^(127\.0\.0\.1|localhost|\[::1\])(?::(\d+))?$", re.IGNORECASE)
+_ALLOWED_ORIGIN_PORTS = frozenset({5173, 5174, 5175, 4173, 4174, 4175, 3001, 3002, 3003, 26751, 26752})
+_SIMPLE_FORM_MEDIA_TYPES = frozenset({"text/plain", "application/x-www-form-urlencoded", "multipart/form-data"})
+_BUSY_OR_UNAVAILABLE_CODES = frozenset({"model_unavailable", "model_unloaded", "engine_busy"})
+
+
+def _status_for_result(res: Any, *, default_ok: bool = True) -> int:
+    if isinstance(res, dict):
+        if res.get("ok", default_ok):
+            return 200
+        err_code = (res.get("error") or {}).get("code")
+        if err_code in _BUSY_OR_UNAVAILABLE_CODES:
+            return 503
+    return 400
+
+
+def validate_engine_request_headers(
+    method: str,
+    headers: Any,
+    *,
+    expected_token: Optional[str] = None,
+    server_port: Optional[int] = None,
+) -> Tuple[bool, int, str]:
+    """Validate Host, Sec-Fetch-Site, Origin, local token, and non-simple Content-Type."""
+    host = (headers.get("Host") or "").strip()
+    if host:
+        host_match = _LOOPBACK_HOST_RE.fullmatch(host)
+        if not host_match:
+            return False, 403, "Forbidden Host"
+        if server_port and host_match.group(2) and int(host_match.group(2)) != int(server_port):
+            return False, 403, "Forbidden Host Port"
+
+    sec_fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if sec_fetch_site == "cross-site":
+        return False, 403, "Cross-site requests are forbidden"
+
+    origin = headers.get("Origin")
+    if origin is not None:
+        origin_s = origin.strip()
+        if not _LOOPBACK_ORIGIN_RE.fullmatch(origin_s):
+            return False, 403, "Forbidden Origin"
+        parsed_origin = urlparse(origin_s)
+        allowed_ports = set(_ALLOWED_ORIGIN_PORTS)
+        if server_port:
+            allowed_ports.add(int(server_port))
+        if parsed_origin.scheme != "http" or parsed_origin.port not in allowed_ports:
+            return False, 403, "Forbidden Origin Port"
+
+    if expected_token:
+        supplied = headers.get("X-VoxFigura-Engine-Token") or ""
+        if not compare_digest(expected_token.encode("utf-8"), supplied.encode("utf-8")):
+            return False, 403, "Forbidden Engine Token"
+
+    upper_method = str(method or "GET").upper()
+    if upper_method not in ("GET", "HEAD", "OPTIONS"):
+        raw_ct = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if raw_ct in _SIMPLE_FORM_MEDIA_TYPES:
+            return False, 415, "Unsupported Media Type"
+
+    return True, 200, ""
 
 
 def scan_local_models() -> Dict[str, Any]:
@@ -124,17 +154,23 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
     def parse_request(self) -> bool:
         if not super().parse_request():
             return False
-        token = os.environ.get("VOCALCUT_ENGINE_TOKEN")
-        supplied = self.headers.get("X-VoxFigura-Engine-Token", "")
-        if token and not compare_digest(token.encode(), supplied.encode()):
-            self.send_error(403)
+        token = (os.environ.get("VOCALCUT_ENGINE_TOKEN") or "").strip() or None
+        server_port = getattr(self.server, "server_port", None)
+        ok, status, reason = validate_engine_request_headers(
+            self.command,
+            self.headers,
+            expected_token=token,
+            server_port=server_port,
+        )
+        if not ok:
+            self.send_error(status, reason)
             return False
         return True
 
     protocol_version = "HTTP/1.1"
 
     def setup(self) -> None:
-        self.timeout = 120.0
+        self.timeout = 200.0
         super().setup()
 
     def handle(self) -> None:
@@ -243,8 +279,8 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
 
         if path == "/m27/asr-install" and LOCAL_ASR_ENABLED:
             name = parse_qs(parsed.query).get("model", [None])[0]
-            if name is not None and name not in (*MODELS, LEGACY_MODEL):
-                self._send_json(400, {"hint": "请选择可用的本地 Whisper 模型"})
+            if name is not None and name not in MODELS:
+                self._send_json(400, {"hint": "请选择可用的本地语音转写模型"})
                 return
             self._send_json(200, asr_install_status(name))
             return
@@ -340,6 +376,8 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                             self._send_bytes(200, wav, "audio/wav", cors=False)
                             return
                     self._send_json(404, {"ok": False, "hint": "此 VoQS 实录暂无 50 Hz 声门轨"})
+                except EngineBusyError as exc:
+                    self._send_json(503, exc.result)
                 except (ValueError, TypeError, KeyError) as error:
                     self._send_json(400, {"ok": False, "hint": str(error)})
                 except (OSError, RuntimeError) as error:
@@ -400,10 +438,6 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"weights_ready": ready, "model": "IPA2Tract-Lite"})
             return
 
-        if path in RESERVED_MODEL_CONTRACTS:
-            self._send_json(501, RESERVED_MODEL_CONTRACTS[path])
-            return
-
         self._send_json(404, {"ok": False, "error": {"code": "not_found", "hint": f"Unknown GET path: {path}"}})
 
     def do_POST(self) -> None:
@@ -448,10 +482,6 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                 self._send_json(503, {"hint": "本机 DPDFNet 模型或 PhoneticToolbox 组件不可用"})
             except Exception as exc:
                 self._send_json(400, {"hint": "DPDFNet 未能处理音频：" + str(exc)})
-            return
-
-        if path in RESERVED_MODEL_CONTRACTS:
-            self._send_json(501, RESERVED_MODEL_CONTRACTS[path])
             return
 
         try:
@@ -543,20 +573,30 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/m27/asr-install" and LOCAL_ASR_ENABLED:
-                name = payload.get("model")
-                if self.headers.get_content_type() != "application/json" or not isinstance(name, str) or name not in (*MODELS, LEGACY_MODEL):
-                    self._send_json(400, {"hint": "请选择要下载的 Whisper 模型"})
+                name = payload.get("model") or default_local_model()
+                action = payload.get("action", "install")
+                if self.headers.get_content_type() != "application/json" or not isinstance(name, str) or name not in MODELS:
+                    self._send_json(400, {"hint": "请选择要操作的 SenseVoice-Small 本地语音转写模型"})
+                    return
+                if action == "remove":
+                    job = ASR_INSTALL.status()
+                    if job.get("state") == "installing":
+                        self._send_json(409, {"hint": "模型正在下载中，请稍候再移除"})
+                        return
+                    OFFLINE_TRANSCRIBER.unload()
+                    remove_model(name)
+                    self._send_json(200, asr_install_status(name))
                     return
                 offline = asr_install_status(name)
                 if offline["state"] == "ready":
                     self._send_json(200, offline)
                     return
-                if os.environ.get("VOCALCUT_ASR_MODEL_DIR") or (name == LEGACY_MODEL and not is_installed(name)):
-                    self._send_json(400, {"hint": "请检查本地模型和运行库配置"})
+                if os.environ.get("VOCALCUT_ASR_MODEL_DIR"):
+                    self._send_json(400, {"hint": "当前使用外部自定义模型目录，请检查 VOCALCUT_ASR_MODEL_DIR 配置"})
                     return
                 job = ASR_INSTALL.start(name)
                 if job["model"] != name:
-                    self._send_json(409, {"hint": "另一款 Whisper 模型正在下载，请等待完成"})
+                    self._send_json(409, {"hint": "本地语音转写模型正在下载，请等待完成"})
                     return
                 self._send_json(202, asr_install_status(name))
                 return
@@ -587,6 +627,21 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                 from vowel_response import measure_saved_poses
                 try:
                     self._send_json(200, measure_saved_poses(payload.get("speaker"), payload.get("poses"), dense_manager=DENSE_MANAGER))
+                except (ValueError, TypeError) as error:
+                    self._send_json(400, {"ok": False, "hint": str(error)})
+                return
+            if path == "/models/ipa-references/vowel-track":
+                from vowel_response import measure_vowel_track
+                try:
+                    self._send_json(
+                        200,
+                        measure_vowel_track(
+                            payload.get("speaker"),
+                            payload.get("rows"),
+                            symbol=payload.get("symbol", ""),
+                            dense_manager=DENSE_MANAGER,
+                        ),
+                    )
                 except (ValueError, TypeError) as error:
                     self._send_json(400, {"ok": False, "hint": str(error)})
                 return
@@ -670,12 +725,17 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
 
             if path == "/vtl/pose":
                 res = DENSE_MANAGER.pose_snapshot(payload)
-                self._send_json(200 if res.get("ok", True) else 400, res)
+                self._send_json(_status_for_result(res), res)
+                return
+
+            if path == "/vtl/pose-batch":
+                res = DENSE_MANAGER.pose_snapshots_batch(payload)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/vtl/live-pull":
                 res = DENSE_MANAGER.live_pull(payload)
-                self._send_json(200 if res.get("ok", True) else 400, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/vtl/synthesize-stream":
@@ -700,6 +760,9 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                         else DENSE_MANAGER.synthesize_dense_stream(payload, predicted_rows)
                     )
                     first = next(gen, None)
+                except EngineBusyError as exc:
+                    self._send_json(503, exc.result)
+                    return
                 except AnnotationControlError as error:
                     self._send_json(400, error.result)
                     return
@@ -714,8 +777,7 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                     return
 
                 if first is None or not first.get("ok"):
-                    err_code = (first.get("error") or {}).get("code") if isinstance(first, dict) else None
-                    status = 503 if err_code in ("model_unavailable", "model_unloaded") else 400
+                    status = _status_for_result(first, default_ok=False)
                     self._send_json(status, first or {"ok": False, "error": {"code": "validation_error", "hint": "流式合成未产生输出"}})
                     return
 
@@ -783,33 +845,27 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                         ]
                 if res.get("ok"):
                     res.update(articulation)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok", True) else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/vtl/batch-contours":
                 res = DENSE_MANAGER.batch_contours(payload)
-                self._send_json(200 if res.get("ok", True) else 400, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/m27/extract-anim":
                 res = M27_BRIDGE.extract_anim_from_pa(payload)
-                self._send_json(200 if res.get("ok", True) else 400, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/m27/reconstruct":
                 res = M27_BRIDGE.reconstruct(payload)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok", True) else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/m27/align":
                 res = M27_BRIDGE.align(payload)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok") else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res, default_ok=False), res)
                 return
 
             if path == "/m27/transcribe" and LOCAL_ASR_ENABLED:
@@ -821,23 +877,17 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
 
             if path == "/m27/resynthesize":
                 res = M27_BRIDGE.resynthesize(payload)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok", True) else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res), res)
                 return
 
             if path == "/m27/realtime-speaker":
                 res = REALTIME_M27.prepare_speaker(payload)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok") else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res, default_ok=False), res)
                 return
 
             if path == "/m27/realtime-step":
                 res = REALTIME_M27.step(payload)
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok") else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res, default_ok=False), res)
                 return
 
             if path == "/m27/hold-preview":
@@ -846,12 +896,12 @@ class VocalEngineHandler(BaseHTTPRequestHandler):
                 except (FileNotFoundError, ImportError):
                     self._send_json(503, {"ok": False, "error": {"code": "model_unavailable", "hint": "Tract2Vox-Lite 或示例音色不可用"}})
                     return
-                err_code = (res.get("error") or {}).get("code") if isinstance(res, dict) else None
-                status = 200 if res.get("ok") else 503 if err_code in ("model_unavailable", "model_unloaded") else 400
-                self._send_json(status, res)
+                self._send_json(_status_for_result(res, default_ok=False), res)
                 return
 
             self._send_json(404, {"ok": False, "error": {"code": "not_found", "hint": f"Unknown POST path: {path}"}})
+        except EngineBusyError as exc:
+            self._send_json(503, exc.result)
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             self._send_json(500, {"ok": False, "error": {"code": "validation_error", "hint": f"引擎内部错误: {exc}"}})

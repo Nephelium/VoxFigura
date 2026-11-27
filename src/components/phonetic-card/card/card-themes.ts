@@ -107,14 +107,33 @@ function readRootSiteTokens(): {
   };
 }
 
-function withAlpha(hexOrColor: string, alpha: number): string {
-  const clean = hexOrColor.trim();
-  if (/^#[0-9a-fA-F]{6}$/.test(clean)) {
+export function parseColorRgb(colorStr: string): [number, number, number] | null {
+  const clean = colorStr.trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(clean)) {
+    const r = parseInt(clean[1] + clean[1], 16);
+    const g = parseInt(clean[2] + clean[2], 16);
+    const b = parseInt(clean[3] + clean[3], 16);
+    return [r, g, b];
+  }
+  if (/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(clean)) {
     const r = parseInt(clean.slice(1, 3), 16);
     const g = parseInt(clean.slice(3, 5), 16);
     const b = parseInt(clean.slice(5, 7), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    return [r, g, b];
   }
+  const rgbMatch = clean.match(/^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)/i);
+  if (rgbMatch) {
+    const r = Math.max(0, Math.min(255, Math.round(Number(rgbMatch[1]))));
+    const g = Math.max(0, Math.min(255, Math.round(Number(rgbMatch[2]))));
+    const b = Math.max(0, Math.min(255, Math.round(Number(rgbMatch[3]))));
+    return [r, g, b];
+  }
+  return null;
+}
+
+function withAlpha(hexOrColor: string, alpha: number): string {
+  const rgb = parseColorRgb(hexOrColor);
+  if (rgb) return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
   return `rgba(128, 128, 136, ${alpha})`;
 }
 

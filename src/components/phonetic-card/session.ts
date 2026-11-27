@@ -32,15 +32,26 @@ export const exploreUsesSourcePose = ref(false);
 
 // Independent modal open flag so Card Studio can be opened from ANY workspace tab
 export const cardStudioOpen = ref<boolean>(false);
+export const cardDemoNoticeOpen = ref<boolean>(false);
 export const cardStudioContextSource = ref<string>('explore');
+let suppressNextDemoNotice = false;
 
-export function openCardStudio(sourceHint?: string): void {
+export function openCardStudio(sourceHint?: string, opts?: { suppressDemoNotice?: boolean }): void {
   if (sourceHint) cardStudioContextSource.value = sourceHint;
+  suppressNextDemoNotice = Boolean(opts?.suppressDemoNotice);
   recordRecentTool('card');
   cardStudioOpen.value = true;
 }
 
+export function consumeSuppressDemoNotice(): boolean {
+  const flag = suppressNextDemoNotice;
+  suppressNextDemoNotice = false;
+  return flag;
+}
+
 export function closeCardStudio(): void {
+  suppressNextDemoNotice = false;
+  cardDemoNoticeOpen.value = false;
   cardStudioOpen.value = false;
 }
 

@@ -15,6 +15,7 @@ export interface ReconstructionHistoryEntry {
   speaker: File | null;
   originalSpeaker: File | null;
   speakerProfile?: 'jingjing-lecture';
+  speakerChoiceId?: string;
   reference: IpaReference | null;
   textGrid: TextGridDocument | null;
   textGridName: string;

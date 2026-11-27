@@ -1,0 +1,563 @@
+import http from 'node:http';
+import { execFile, spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+// @ts-expect-error The Node proxy server modules ship as untyped ESM.
+import { CACHE_ROOT_MARKER, DEDICATED_SUBDIR_NAME, buildPickFolderScript, isLockFileHeld, resolveSafeCacheRoot } from '../server/portable-cache.mjs';
+// @ts-expect-error The Node proxy server modules ship as untyped ESM.
+import { DEFAULT_UPDATE_MANIFEST_URLS, createProxyServer, getEngineTimeoutMs, isAllowedUpdateUrl, sanitizeUpdateManifest } from '../server/proxy.mjs';
+// @ts-expect-error The Node proxy server modules ship as untyped ESM.
+import { handleContestRequest } from '../server/contest-routes.mjs';
+
+const tempDirs: string[] = [];
+const activeServers: http.Server[] = [];
+
+async function makeTempDir(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+async function startTestServer(
+  extension?: (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => unknown,
+  opts?: { expectedOrigin?: string },
+): Promise<{ server: http.Server; port: number; baseUrl: string }> {
+  const server = createProxyServer(extension, opts);
+  activeServers.push(server);
+  await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to bind ephemeral port');
+  return { server, port: addr.port, baseUrl: `http://127.0.0.1:${addr.port}` };
+}
+
+function rawRequest(
+  port: number,
+  {
+    method = 'GET',
+    path = '/api/health',
+    headers = {},
+    body,
+  }: { method?: string; path?: string; headers?: Record<string, string>; body?: string | Buffer },
+): Promise<{ status: number; json: any; text: string }> {
+  return new Promise((resolveReq, rejectReq) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let parsed: any = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            // non-json response
+          }
+          resolveReq({ status: res.statusCode ?? 0, json: parsed, text });
+        });
+      },
+    );
+    req.on('error', rejectReq);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const originalEnv = { ...process.env };
+
+afterEach(async () => {
+  for (const key of [
+    'VOCALCUT_PORTABLE_ROOT',
+    'VOCALCUT_PORTABLE_ACTIVE',
+    'VOCALCUT_LAUNCHER_CONFIG',
+    'LOCALAPPDATA',
+    'VOXFIGURA_UPDATE_URL',
+  ]) {
+    if (originalEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = originalEnv[key];
+  }
+  while (activeServers.length) {
+    const srv = activeServers.pop()!;
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+  while (tempDirs.length) {
+    const dir = tempDirs.pop()!;
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+describe('D-01: portable cache allowlist, custom root isolation, lock guard & non-portable 404', () => {
+  it('returns 404 for /api/portable/cache* when not running in portable mode', async () => {
+    delete process.env.VOCALCUT_PORTABLE_ROOT;
+    delete process.env.VOCALCUT_PORTABLE_ACTIVE;
+    const { port } = await startTestServer();
+
+    const getRes = await rawRequest(port, { method: 'GET', path: '/api/portable/cache' });
+    expect(getRes.status).toBe(404);
+
+    const cleanRes = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/clean',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'expired' }),
+    });
+    expect(cleanRes.status).toBe(404);
+  });
+
+  it('never deletes foreign directories or files during expired or entry cleanup', async () => {
+    const sandbox = await makeTempDir('vf-cache-d01-');
+    const localAppData = join(sandbox, 'LocalAppData');
+    const cacheRoot = join(sandbox, 'CacheRoot');
+    const cfgPath = join(localAppData, 'VoxFigura', 'launcher-config.json');
+    await mkdir(cacheRoot, { recursive: true });
+    await writeFile(join(cacheRoot, CACHE_ROOT_MARKER), '{"app":"VoxFigura"}\n', 'utf8');
+
+    // Active runtime bundle
+    const activeDir = join(cacheRoot, 'public-aaaaaaaa1111');
+    await mkdir(activeDir, { recursive: true });
+    await writeFile(join(activeDir, 'bundle-manifest.json'), '{}', 'utf8');
+    await writeFile(join(cacheRoot, 'public-aaaaaaaa1111.lock'), '', 'utf8');
+
+    // Stale removable bundle (allowlist name + bundle-manifest.json)
+    const staleDir = join(cacheRoot, 'public-bbbbbbbb2222');
+    await mkdir(staleDir, { recursive: true });
+    await writeFile(join(staleDir, 'bundle-manifest.json'), '{}', 'utf8');
+    await writeFile(join(staleDir, 'payload.txt'), 'old-cache-data', 'utf8');
+
+    // Foreign directory mimicking version name WITHOUT bundle-manifest.json
+    const fakeVersionDir = join(cacheRoot, 'public-cccccccc3333');
+    await mkdir(fakeVersionDir, { recursive: true });
+    await writeFile(join(fakeVersionDir, 'important.txt'), 'do-not-delete', 'utf8');
+
+    // Unrelated user directory & file
+    const userDir = join(cacheRoot, 'MyImportantDocs');
+    await mkdir(userDir, { recursive: true });
+    await writeFile(join(userDir, 'report.txt'), 'precious-thesis', 'utf8');
+    const userFile = join(cacheRoot, 'thesis-draft.docx');
+    await writeFile(userFile, 'precious-file', 'utf8');
+
+    // Removable incomplete dir, temp unpack dir, and orphan lock file
+    const incompleteDir = join(cacheRoot, 'friends-dddddddd4444.incomplete-99-a1');
+    await mkdir(incompleteDir, { recursive: true });
+    await writeFile(join(incompleteDir, 'part.bin'), '1234', 'utf8');
+    const tempUnpackDir = join(cacheRoot, '.u-888-beef');
+    await mkdir(tempUnpackDir, { recursive: true });
+    await writeFile(join(tempUnpackDir, 'tmp.bin'), '5678', 'utf8');
+    const orphanLock = join(cacheRoot, 'public-eeeeeeee5555.lock');
+    await writeFile(orphanLock, '', 'utf8');
+
+    process.env.LOCALAPPDATA = localAppData;
+    process.env.VOCALCUT_PORTABLE_ROOT = cacheRoot;
+    process.env.VOCALCUT_PORTABLE_ACTIVE = 'public-aaaaaaaa1111';
+    process.env.VOCALCUT_LAUNCHER_CONFIG = cfgPath;
+
+    const { port } = await startTestServer();
+
+    const statusRes = await rawRequest(port, { method: 'GET', path: '/api/portable/cache' });
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.json.ok).toBe(true);
+
+    const byName = new Map<string, any>(statusRes.json.entries.map((e: any) => [e.name, e]));
+    expect(byName.get('public-aaaaaaaa1111')?.kind).toBe('active');
+    expect(byName.get('public-aaaaaaaa1111')?.removable).toBe(false);
+    expect(byName.get('public-bbbbbbbb2222')?.kind).toBe('stale_version');
+    expect(byName.get('public-bbbbbbbb2222')?.removable).toBe(true);
+    expect(byName.get('public-cccccccc3333')?.kind).toBe('foreign');
+    expect(byName.get('public-cccccccc3333')?.removable).toBe(false);
+    expect(byName.get('MyImportantDocs')?.kind).toBe('foreign');
+    expect(byName.get('MyImportantDocs')?.removable).toBe(false);
+    expect(byName.get('thesis-draft.docx')?.kind).toBe('foreign');
+    expect(byName.get('thesis-draft.docx')?.removable).toBe(false);
+    expect(byName.has(CACHE_ROOT_MARKER)).toBe(false);
+    expect(statusRes.json.foreignCount).toBe(3);
+
+    // Direct entry delete of a foreign file must be rejected
+    const badEntryClean = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/clean',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'entry', targetPath: userFile }),
+    });
+    expect(badEntryClean.status).toBe(400);
+    expect(await exists(userFile)).toBe(true);
+
+    // Expired cleanup must remove only allowlisted entries and keep all foreign + active items
+    const cleanRes = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/clean',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'expired' }),
+    });
+    expect(cleanRes.status).toBe(200);
+    expect(cleanRes.json.removedCount).toBe(4);
+
+    expect(await exists(staleDir)).toBe(false);
+    expect(await exists(incompleteDir)).toBe(false);
+    expect(await exists(tempUnpackDir)).toBe(false);
+    expect(await exists(orphanLock)).toBe(false);
+
+    expect(await exists(activeDir)).toBe(true);
+    expect(await exists(join(cacheRoot, CACHE_ROOT_MARKER))).toBe(true);
+    expect(await exists(join(fakeVersionDir, 'important.txt'))).toBe(true);
+    expect(await exists(join(userDir, 'report.txt'))).toBe(true);
+    expect(await exists(userFile)).toBe(true);
+  });
+
+  it('confines a non-empty user-selected folder to a dedicated VoxFigura-Cache subdir with marker', async () => {
+    const sandbox = await makeTempDir('vf-root-d01-');
+    const localAppData = join(sandbox, 'LocalAppData');
+    const existingDataDir = join(sandbox, 'UserData');
+    await mkdir(existingDataDir, { recursive: true });
+    await writeFile(join(existingDataDir, 'personal.txt'), 'keep me', 'utf8');
+
+    process.env.LOCALAPPDATA = localAppData;
+    process.env.VOCALCUT_PORTABLE_ROOT = join(localAppData, 'VoxFigura', 'Portable');
+    process.env.VOCALCUT_PORTABLE_ACTIVE = 'public-aaaaaaaa1111';
+    process.env.VOCALCUT_LAUNCHER_CONFIG = join(localAppData, 'VoxFigura', 'launcher-config.json');
+
+    const check = await resolveSafeCacheRoot(existingDataDir);
+    expect(check.valid).toBe(true);
+    expect(check.adjustedToSubdir).toBe(true);
+    expect(check.normalized).toBe(join(existingDataDir, DEDICATED_SUBDIR_NAME));
+
+    const { port } = await startTestServer();
+    const locRes = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/portable/cache/location',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cacheRoot: existingDataDir }),
+    });
+    expect(locRes.status).toBe(200);
+    expect(locRes.json.adjustedToSubdir).toBe(true);
+    expect(locRes.json.configuredCacheRoot).toBe(join(existingDataDir, DEDICATED_SUBDIR_NAME));
+    expect(await exists(join(existingDataDir, DEDICATED_SUBDIR_NAME, CACHE_ROOT_MARKER))).toBe(true);
+    expect(await readFile(join(existingDataDir, 'personal.txt'), 'utf8')).toBe('keep me');
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'skips stale version directory whose .lock file is exclusively held by another running instance',
+    async () => {
+      const sandbox = await makeTempDir('vf-lock-d01-');
+      const localAppData = join(sandbox, 'LocalAppData');
+      const cacheRoot = join(sandbox, 'CacheRoot');
+      await mkdir(cacheRoot, { recursive: true });
+      await writeFile(join(cacheRoot, CACHE_ROOT_MARKER), '{"app":"VoxFigura"}\n', 'utf8');
+
+      const otherDir = join(cacheRoot, 'friends-99999999aaaa');
+      await mkdir(otherDir, { recursive: true });
+      await writeFile(join(otherDir, 'bundle-manifest.json'), '{}', 'utf8');
+      const otherLock = join(cacheRoot, 'friends-99999999aaaa.lock');
+      await writeFile(otherLock, '', 'utf8');
+
+      const psExe = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const holder = spawn(
+        psExe,
+        [
+          '-NoProfile',
+          '-Command',
+          '$fs = [System.IO.File]::Open($env:VF_LOCK_FILE, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); [Console]::Out.WriteLine("LOCKED"); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null; $fs.Close()',
+        ],
+        {
+          windowsHide: true,
+          env: { ...process.env, VF_LOCK_FILE: otherLock },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      );
+
+      try {
+        await new Promise<void>((resolveReady, rejectReady) => {
+          const timer = setTimeout(() => rejectReady(new Error('Lock holder timed out')), 15_000);
+          holder.stdout.on('data', (chunk) => {
+            if (chunk.toString('utf8').includes('LOCKED')) {
+              clearTimeout(timer);
+              resolveReady();
+            }
+          });
+          holder.once('exit', (code) => {
+            clearTimeout(timer);
+            rejectReady(new Error(`Lock holder exited early: ${code}`));
+          });
+        });
+
+        expect(await isLockFileHeld(otherLock)).toBe(true);
+
+        process.env.LOCALAPPDATA = localAppData;
+        process.env.VOCALCUT_PORTABLE_ROOT = cacheRoot;
+        process.env.VOCALCUT_PORTABLE_ACTIVE = 'public-aaaaaaaa1111';
+        process.env.VOCALCUT_LAUNCHER_CONFIG = join(localAppData, 'VoxFigura', 'launcher-config.json');
+
+        const { port } = await startTestServer();
+        const statusRes = await rawRequest(port, { method: 'GET', path: '/api/portable/cache' });
+        const otherEntry = statusRes.json.entries.find((e: any) => e.name === 'friends-99999999aaaa');
+        expect(otherEntry?.locked).toBe(true);
+        expect(otherEntry?.removable).toBe(false);
+
+        const cleanRes = await rawRequest(port, {
+          method: 'POST',
+          path: '/api/portable/cache/clean',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'expired' }),
+        });
+        expect(cleanRes.status).toBe(200);
+        expect(await exists(otherDir)).toBe(true);
+      } finally {
+        holder.stdin.end('\n');
+        await new Promise<void>((r) => {
+          const t = setTimeout(() => {
+            holder.kill();
+            r();
+          }, 3000);
+          holder.once('exit', () => {
+            clearTimeout(t);
+            r();
+          });
+        });
+      }
+    },
+  );
+});
+
+describe('D-03: PowerShell pick-dir prevents U+2019 curly quote command injection', () => {
+  it('passes initial directory strictly via VF_INIT_DIR env var and -LiteralPath', () => {
+    const script = buildPickFolderScript();
+    expect(script).toContain('$env:VF_INIT_DIR');
+    expect(script).toContain('-LiteralPath $initDir');
+    expect(script).not.toContain("'C:");
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'does not execute embedded PowerShell commands when path contains U+2019 curly quotes',
+    async () => {
+      const payload = 'C:\\x\u2019+$(Write-Host 424242)+\u2019';
+      const psExe = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      // Mirror buildPickFolderScript's exact env-var + -LiteralPath handling without popping a GUI dialog
+      const probeScript = [
+        '$initDir = $env:VF_INIT_DIR',
+        '$selected = ""',
+        'if ($initDir -and (Test-Path -LiteralPath $initDir)) { $selected = $initDir }',
+        '[Console]::Out.Write("SAFE_DONE:" + $selected)',
+      ].join('; ');
+
+      const stdout = await new Promise<string>((resolveOut, rejectOut) => {
+        execFile(
+          psExe,
+          ['-NoProfile', '-Command', probeScript],
+          { windowsHide: true, timeout: 15_000, env: { ...process.env, VF_INIT_DIR: payload } },
+          (err, out) => {
+            if (err) rejectOut(err);
+            else resolveOut(String(out || ''));
+          },
+        );
+      });
+
+      expect(stdout).toBe('SAFE_DONE:');
+      expect(stdout).not.toContain('424242');
+    },
+  );
+});
+
+describe('D-02: development proxy enforces Host, Origin, Sec-Fetch-Site and Content-Type', () => {
+  it('blocks DNS rebinding Host, cross-site Sec-Fetch-Site, foreign Origin, and text/plain simple POSTs', async () => {
+    const { port } = await startTestServer();
+
+    // Legitimate same-host GET
+    const okHealth = await rawRequest(port, {
+      method: 'GET',
+      path: '/api/health',
+      headers: { Host: `127.0.0.1:${port}`, Origin: 'http://127.0.0.1:5173', 'Sec-Fetch-Site': 'same-origin' },
+    });
+    expect(okHealth.status).toBe(200);
+
+    // DNS rebinding Host header -> 403
+    const badHost = await rawRequest(port, {
+      method: 'GET',
+      path: '/api/health',
+      headers: { Host: `evil.example:${port}` },
+    });
+    expect(badHost.status).toBe(403);
+    expect(badHost.json.error.code).toBe('forbidden_host');
+
+    // Cross-site Sec-Fetch-Site -> 403
+    const crossSite = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/ai/chat',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        'Sec-Fetch-Site': 'cross-site',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(crossSite.status).toBe(403);
+    expect(crossSite.json.error.code).toBe('forbidden_cross_site');
+
+    // Foreign Origin -> 403
+    const badOrigin = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/ai/chat',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: 'https://evil.example',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(badOrigin.json.error.code).toBe('forbidden_origin');
+
+    // Null Origin (sandboxed iframe) -> 403
+    const nullOrigin = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/ai/chat',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: 'null',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(nullOrigin.status).toBe(403);
+
+    // Simple request with text/plain on JSON write route -> 415
+    const textPlain = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/ai/chat',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: 'http://127.0.0.1:5173',
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+      body: '{"model":"gpt-4o"}',
+    });
+    expect(textPlain.status).toBe(415);
+    expect(textPlain.json.error.code).toBe('unsupported_media_type');
+
+    // Missing Content-Type on JSON write route -> 415
+    const missingCt = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/vtl/pose',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: 'http://localhost:5173',
+      },
+      body: '{}',
+    });
+    expect(missingCt.status).toBe(415);
+
+    // Binary WAV upload route (/api/ai/deepseek-asr) is NOT blocked with 415 when using audio/wav
+    const binaryAsr = await rawRequest(port, {
+      method: 'POST',
+      path: '/api/ai/deepseek-asr',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: 'http://127.0.0.1:5173',
+        'Content-Type': 'audio/wav',
+      },
+      body: Buffer.alloc(64),
+    });
+    // Missing DeepSeek key -> reaches route handler (400), NOT 415 or 403
+    expect(binaryAsr.status).toBe(400);
+  });
+});
+
+describe('D-04, D-09 & D-13: HTTPS-only update manifest, route timeouts, and contest count parsing', () => {
+  it('removes plaintext bare-IP HTTP fallback from update manifest URLs and sanitizes links (D-04)', () => {
+    expect(DEFAULT_UPDATE_MANIFEST_URLS.length).toBeGreaterThan(0);
+    for (const url of DEFAULT_UPDATE_MANIFEST_URLS) {
+      expect(url.startsWith('https://')).toBe(true);
+      expect(url).not.toMatch(/\b\d+\.\d+\.\d+\.\d+\b/);
+    }
+
+    expect(isAllowedUpdateUrl('https://www.phonetictoolbox.com/voxfigura/v0.2.exe')).toBe(true);
+    expect(isAllowedUpdateUrl('https://github.com/org/voxfigura/releases/latest')).toBe(true);
+    expect(isAllowedUpdateUrl('http://8.134.196.183/voxfigura/updates/latest.json')).toBe(false);
+    expect(isAllowedUpdateUrl('http://www.phonetictoolbox.com/voxfigura/v0.2.exe')).toBe(false);
+    expect(isAllowedUpdateUrl('https://evil.example/voxfigura.exe')).toBe(false);
+
+    const sanitized = sanitizeUpdateManifest({
+      schema: 'voxfigura/update-manifest',
+      channels: {
+        public: {
+          version: '0.2.0',
+          download_url: 'http://8.134.196.183/fake.exe',
+          page_url: 'https://www.phonetictoolbox.com/voxfigura/',
+          sha256: 'not-a-valid-sha',
+          notes: ['ok', 123],
+        },
+        friends: {
+          version: '0.2.0',
+          download_url: 'https://github.com/voxfigura/releases/download/v0.2.0/app.exe',
+          page_url: 'https://evil.example/phishing',
+          sha256: 'a'.repeat(64),
+        },
+      },
+    });
+    expect(sanitized?.channels.public.download_url).toBe('');
+    expect(sanitized?.channels.public.page_url).toBe('https://www.phonetictoolbox.com/voxfigura/');
+    expect(sanitized?.channels.public.sha256).toBeUndefined();
+    expect(sanitized?.channels.public.notes).toEqual(['ok']);
+    expect(sanitized?.channels.friends.download_url).toBe(
+      'https://github.com/voxfigura/releases/download/v0.2.0/app.exe',
+    );
+    expect(sanitized?.channels.friends.page_url).toBe('');
+    expect(sanitized?.channels.friends.sha256).toBe('a'.repeat(64));
+  });
+
+  it('grants at least 180s timeout for /api/m27/reconstruct (D-09)', () => {
+    expect(getEngineTimeoutMs('/api/m27/reconstruct')).toBeGreaterThanOrEqual(180_000);
+    expect(getEngineTimeoutMs('/api/vtl/pose')).toBe(120_000);
+  });
+
+  it('sanitizes NaN and fractional count on /api/zhihu/recommendations (D-13)', async () => {
+    const { port } = await startTestServer(handleContestRequest);
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    globalThis.fetch = (async (input: any) => {
+      requestedUrls.push(String(input));
+      return new Response(JSON.stringify({ code: 0, data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const resNan = await rawRequest(port, {
+        method: 'GET',
+        path: '/api/zhihu/recommendations?q=phonetics&count=abc',
+        headers: { Host: `127.0.0.1:${port}`, 'X-Zhihu-BYOK-Secret': 'unit-test-placeholder' },
+      });
+      expect(resNan.status).toBe(200);
+
+      const resFrac = await rawRequest(port, {
+        method: 'GET',
+        path: '/api/zhihu/recommendations?q=phonetics&count=3.9',
+        headers: { Host: `127.0.0.1:${port}`, 'X-Zhihu-BYOK-Secret': 'unit-test-placeholder' },
+      });
+      expect(resFrac.status).toBe(200);
+
+      expect(requestedUrls[0]).toContain('Count=10');
+      expect(requestedUrls[0]).not.toContain('NaN');
+      expect(requestedUrls[1]).toContain('Count=3');
+      expect(requestedUrls[1]).not.toContain('3.9');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

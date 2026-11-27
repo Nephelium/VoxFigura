@@ -6,12 +6,21 @@
  * Geometric glottis 2025 limits. Frontend & TS use `pr_pa` in Pa (0..1600 Pa);
  * Python engine/native boundary converts `dPa = pr_pa * 10`.
  *
- * Interpolation between ANY two anchors runs directly linearly in 10-D space
- * without passing through intermediate discrete regimes on the vertical lane.
+ * Two intentionally distinct evaluation semantics are provided:
+ *  1. `heldPhonationAt` / `heldPhonationAtChecked` (piecewise step-hold):
+ *     Used by the workbench playhead and annotation timeline. Each anchor holds
+ *     over the half-open interval `[anchor_i.t_smp, anchor_{i+1}.t_smp)`, and
+ *     samples before the first anchor default to `modal`.
+ *  2. `evaluatePhonationAnchorsAt` / `evaluatePhonationTrackDense` (10-D direct
+ *     linear interpolation): Used for dense continuous phonation trajectories.
+ *     Adjacent anchors interpolate directly linearly in 10-D M27 glottal space
+ *     without passing through intermediate discrete regimes; samples before the
+ *     first anchor take the first anchor and after the last take the last.
  */
 
 import {
   assertInRange,
+  assertValidF0Hz,
   fail,
   ok,
   type GlottisM27Params,
@@ -39,7 +48,7 @@ export const PHONATION_REGIME_LABELS: Record<PhonationRegime, string> = {
 };
 
 export const M27_GLOTTIS_BOUNDS = {
-  f0_hz: { min: 40, max: 600, unit: 'Hz' },
+  f0_hz: { min: 0, exclusiveMin: true, unit: 'Hz' },
   pr_pa: { min: 0, max: 1600, unit: 'Pa' },
   xb_cm: { min: -0.05, max: 0.30, unit: 'cm' },
   xt_cm: { min: -0.05, max: 0.30, unit: 'cm' },
@@ -50,10 +59,6 @@ export const M27_GLOTTIS_BOUNDS = {
   fl: { min: 0, max: 100, unit: '%' },
   shim: { min: 0, max: 100, unit: '%' },
 } as const;
-
-export const M27_GLOTTIS_DIM_NAMES = [
-  'F0', 'PR', 'XB', 'XT', 'CA', 'LAG', 'RA', 'PS', 'FL', 'SHIM',
-] as const;
 
 /**
  * Canonical 10-dim M27 glottal anchors for the 6 discrete phonation regimes.
@@ -110,6 +115,8 @@ export const PHONATION_M27_ANCHORS: Readonly<Record<PhonationRegime, Readonly<Gl
     shim: 15,
   },
   creaky: {
+    // 58 Hz is the canonical VoQS/M27 creaky centroid (within M27_GLOTTIS_BOUNDS.f0_hz.min = 40 Hz).
+    // Non-VoQS synthesis paths override the F0 channel from the qTA contour validated as finite positive Hz (> 0 Hz).
     f0_hz: 58,
     pr_pa: 520,
     xb_cm: -0.008,
@@ -151,8 +158,9 @@ export function getPhonationAnchorParams(
 }
 
 export function validateGlottisM27(params: GlottisM27Params): Result<GlottisM27Params> {
-  const checks: Array<[keyof GlottisM27Params, { min: number; max: number; unit: string }]> = [
-    ['f0_hz', M27_GLOTTIS_BOUNDS.f0_hz],
+  const f0Res = assertValidF0Hz('glottis.f0_hz', params.f0_hz);
+  if (!f0Res.ok) return f0Res;
+  const checks: Array<[Exclude<keyof GlottisM27Params, 'f0_hz'>, { min: number; max: number; unit: string }]> = [
     ['pr_pa', M27_GLOTTIS_BOUNDS.pr_pa],
     ['xb_cm', M27_GLOTTIS_BOUNDS.xb_cm],
     ['xt_cm', M27_GLOTTIS_BOUNDS.xt_cm],
@@ -211,12 +219,27 @@ export function interpolateGlottis10D(
   });
 }
 
-/**
- * Sample a sequence of discrete phonation anchors at arbitrary integer sample `t_smp`.
- * Anchors are sorted by `t_smp`; adjacent anchors interpolate directly in 10-D m27 space.
- */
-export function evaluatePhonationAnchorsAt(
-  anchors: readonly PhonationAnchor[],
+function resolveAnchorParamsChecked(anc: PhonationAnchor): Result<GlottisM27Params> {
+  const blendChk = assertInRange(`anchors.${anc.id}.blend`, anc.blend, 0, 1, 'ratio');
+  if (!blendChk.ok) return blendChk;
+  if (anc.glottis) return ok({ ...anc.glottis });
+  const base = PHONATION_M27_ANCHORS[anc.regime];
+  if (anc.blend === 1 || anc.regime === 'modal') return ok({ ...base });
+  return interpolateGlottis10D(PHONATION_M27_ANCHORS.modal, base, anc.blend);
+}
+
+function ensureSortedAnchors(anchors: readonly PhonationAnchor[]): readonly PhonationAnchor[] {
+  for (let i = 1; i < anchors.length; i++) {
+    if (anchors[i].t_smp < anchors[i - 1].t_smp) {
+      return [...anchors].sort((x, y) => x.t_smp - y.t_smp);
+    }
+  }
+  return anchors;
+}
+
+function evaluateSortedPhonationAnchorsAt(
+  sorted: readonly PhonationAnchor[],
+  resolved: readonly GlottisM27Params[] | null,
   t_smp: number,
 ): Result<GlottisM27Params> {
   if (!Number.isFinite(t_smp) || t_smp < 0) {
@@ -228,36 +251,53 @@ export function evaluatePhonationAnchorsAt(
       hint: '采样时刻必须为非负整数',
     });
   }
-  if (anchors.length === 0) {
+  if (sorted.length === 0) {
     return ok({ ...PHONATION_M27_ANCHORS.modal });
   }
-  const sorted = [...anchors].sort((x, y) => x.t_smp - y.t_smp);
-  const resolveParams = (anc: PhonationAnchor): GlottisM27Params => {
-    const base = PHONATION_M27_ANCHORS[anc.regime];
-    if (anc.glottis) return anc.glottis;
-    if (anc.blend >= 1 || anc.regime === 'modal') return { ...base };
-    const r = interpolateGlottis10D(PHONATION_M27_ANCHORS.modal, base, Math.max(0, Math.min(1, anc.blend)));
-    return r.ok ? r.value : { ...base };
-  };
+  const getAt = (idx: number): Result<GlottisM27Params> =>
+    resolved ? ok({ ...resolved[idx] }) : resolveAnchorParamsChecked(sorted[idx]);
 
   if (t_smp <= sorted[0].t_smp) {
-    return ok(resolveParams(sorted[0]));
+    return getAt(0);
   }
-  const last = sorted[sorted.length - 1];
-  if (t_smp >= last.t_smp) {
-    return ok(resolveParams(last));
+  const lastIdx = sorted.length - 1;
+  if (t_smp >= sorted[lastIdx].t_smp) {
+    return getAt(lastIdx);
   }
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const left = sorted[i];
-    const right = sorted[i + 1];
-    if (t_smp >= left.t_smp && t_smp <= right.t_smp) {
-      const span = right.t_smp - left.t_smp;
-      if (span <= 0) return ok(resolveParams(right));
-      const u = (t_smp - left.t_smp) / span;
-      return interpolateGlottis10D(resolveParams(left), resolveParams(right), u);
-    }
+  let lo = 0;
+  let hi = lastIdx;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid].t_smp <= t_smp) lo = mid;
+    else hi = mid;
   }
-  return ok(resolveParams(last));
+  const left = sorted[lo];
+  const right = sorted[hi];
+  const span = right.t_smp - left.t_smp;
+  if (span <= 0) return getAt(hi);
+  const leftRes = getAt(lo);
+  if (!leftRes.ok) return leftRes;
+  const rightRes = getAt(hi);
+  if (!rightRes.ok) return rightRes;
+  const u = (t_smp - left.t_smp) / span;
+  return interpolateGlottis10D(leftRes.value, rightRes.value, u);
+}
+
+/**
+ * Sample a sequence of discrete phonation anchors at arbitrary integer sample `t_smp`.
+ * Anchors are sorted by `t_smp` (without re-sorting already ordered inputs); adjacent
+ * anchors interpolate directly in 10-D M27 space. Rejects out-of-range `blend` without clamping.
+ */
+export function evaluatePhonationAnchorsAt(
+  anchors: readonly PhonationAnchor[],
+  t_smp: number,
+): Result<GlottisM27Params> {
+  const sorted = ensureSortedAnchors(anchors);
+  for (const anc of sorted) {
+    const blendChk = assertInRange(`anchors.${anc.id}.blend`, anc.blend, 0, 1, 'ratio');
+    if (!blendChk.ok) return blendChk;
+  }
+  return evaluateSortedPhonationAnchorsAt(sorted, null, t_smp);
 }
 
 export function evaluatePhonationTrackDense(
@@ -283,9 +323,16 @@ export function evaluatePhonationTrackDense(
       hint: 'stepSamples 必须为正整数',
     });
   }
+  const sorted = ensureSortedAnchors(anchors);
+  const resolved: GlottisM27Params[] = [];
+  for (const anc of sorted) {
+    const r = resolveAnchorParamsChecked(anc);
+    if (!r.ok) return r;
+    resolved.push(r.value);
+  }
   const frames: Array<{ t_smp: number; glottis: GlottisM27Params }> = [];
   for (let t = 0; t < totalSamples; t += stepSamples) {
-    const res = evaluatePhonationAnchorsAt(anchors, t);
+    const res = evaluateSortedPhonationAnchorsAt(sorted, resolved, t);
     if (!res.ok) return res;
     frames.push({ t_smp: t, glottis: res.value });
   }
@@ -310,17 +357,29 @@ export function activePhonationAnchorAt(
   return anchors[lo - 1];
 }
 
+/**
+ * Checked variant of `heldPhonationAt` returning standard `Result` and rejecting
+ * out-of-range `blend` (`out_of_range`) instead of silently falling back.
+ */
+export function heldPhonationAtChecked(
+  anchors: readonly PhonationAnchor[],
+  tSmp: number,
+): Result<GlottisM27Params> {
+  const anchor = activePhonationAnchorAt(anchors, tSmp);
+  if (!anchor) return ok(getPhonationAnchorParams('modal'));
+  return resolveAnchorParamsChecked(anchor);
+}
+
 export function heldPhonationAt(
   anchors: readonly PhonationAnchor[],
   tSmp: number,
 ): GlottisM27Params {
-  const anchor = activePhonationAnchorAt(anchors, tSmp);
-  if (!anchor) return getPhonationAnchorParams('modal');
-  if (anchor.glottis) return { ...anchor.glottis };
-  const base = getPhonationAnchorParams(anchor.regime);
-  if (anchor.blend >= 1 || anchor.regime === 'modal') return base;
-  const blended = interpolateGlottis10D(getPhonationAnchorParams('modal'), base, anchor.blend);
-  return blended.ok ? blended.value : base;
+  const res = heldPhonationAtChecked(anchors, tSmp);
+  if (!res.ok) {
+    const err = new RangeError(res.error.hint);
+    (err as RangeError & { code?: string; detail?: unknown }).code = res.error.code;
+    (err as RangeError & { code?: string; detail?: unknown }).detail = res.error;
+    throw err;
+  }
+  return res.value;
 }
-
-export const VOQS_NOTE = 'VoQS anchor glottis controls are evaluated strictly in 50 Hz M27 units.';

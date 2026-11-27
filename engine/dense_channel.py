@@ -49,13 +49,37 @@ from validation import (  # noqa: E402
     validation_error,
 )
 
-F0_MIN_HZ = 60.0
+F0_MIN_HZ = 40.0
 VOQS_NATIVE_F0_MIN_HZ = 40.0
 F0_MAX_HZ = 600.0
 PRESSURE_MIN_PA = 0.0
 PRESSURE_MAX_PA = 1600.0
 DEFAULT_SECTIONS = 65
 _SPEAKERS = ("JD2", "W02", "M01", "JD2-2D", "W02-2D")
+DEFAULT_ENGINE_LOCK_TIMEOUT_S = max(
+    0.05,
+    float(os.environ.get("VOCALCUT_ENGINE_LOCK_TIMEOUT_S", "30.0") or "30.0"),
+)
+
+
+class EngineBusyError(RuntimeError):
+    """Raised when a per-speaker VTL engine lock cannot be acquired within timeout."""
+
+    def __init__(self, speaker: str, timeout_s: float) -> None:
+        self.speaker = speaker
+        self.timeout_s = timeout_s
+        hint = f"说话人 {speaker} 的声道引擎正忙（等待超过 {timeout_s:g} 秒），请稍后重试"
+        self.result: Dict[str, Any] = {
+            "ok": False,
+            "error": {
+                "code": "engine_busy",
+                "field": "speaker",
+                "value": speaker,
+                "hint": hint,
+            },
+            "hint": hint,
+        }
+        super().__init__(hint)
 
 
 PLAYBACK_TARGET_PEAK = 0.8
@@ -124,17 +148,20 @@ class _BoundedObjLRU:
 
 _VTL_TUBE_CACHE = _BoundedObjLRU(max_entries=24000)
 _VTL_PHRASE_CACHE = _BoundedObjLRU(max_entries=256, max_bytes=160 * 1024 * 1024)
+_VTL_POSE_SNAPSHOT_CACHE = _BoundedObjLRU(max_entries=512)
 
 
 def clear_vtl_caches() -> None:
     _VTL_TUBE_CACHE.clear()
     _VTL_PHRASE_CACHE.clear()
+    _VTL_POSE_SNAPSHOT_CACHE.clear()
 
 
 def get_vtl_cache_stats() -> Dict[str, Dict[str, int]]:
     return {
         "tubes": _VTL_TUBE_CACHE.stats(),
         "phrases": _VTL_PHRASE_CACHE.stats(),
+        "pose_snapshots": _VTL_POSE_SNAPSHOT_CACHE.stats(),
     }
 
 
@@ -490,8 +517,14 @@ def resample_tract_frames_to_50hz(tract_arr: np.ndarray, step_hz: int, sample_co
 class DenseEngineManager:
     """Thread-safe per-speaker VTL 2.4 Engine singleton pool with scoped geometry leases."""
 
-    def __init__(self, resource_dir: Path = VTL_NATIVE_DIR) -> None:
+    def __init__(
+        self,
+        resource_dir: Path = VTL_NATIVE_DIR,
+        *,
+        lock_timeout_s: Optional[float] = None,
+    ) -> None:
         self.resource_dir = Path(resource_dir)
+        self.lock_timeout_s = float(DEFAULT_ENGINE_LOCK_TIMEOUT_S if lock_timeout_s is None else lock_timeout_s)
         self._engines: Dict[str, Engine] = {}
         self._locks: Dict[str, threading.RLock] = {}
         self._worker_pools: Dict[str, List[Tuple[Engine, threading.RLock]]] = {}
@@ -499,6 +532,22 @@ class DenseEngineManager:
         self._resonance_caches: Dict[str, OrderedDict[Tuple[str, int, bool, Tuple[float, ...]], Tuple[float, float, float]]] = {}
         self._pool_lock = threading.Lock()
         atexit.register(self.close_all)
+
+    @contextmanager
+    def _acquire_lock(
+        self,
+        lock: threading.RLock,
+        speaker: str,
+        timeout: Optional[float] = None,
+    ) -> Iterator[None]:
+        eff_timeout = self.lock_timeout_s if timeout is None else float(timeout)
+        acquired = lock.acquire(timeout=eff_timeout)
+        if not acquired:
+            raise EngineBusyError(speaker, eff_timeout)
+        try:
+            yield
+        finally:
+            lock.release()
 
     def get_engine(self, speaker: str = "JD2") -> Tuple[Engine, threading.RLock]:
         if speaker not in _SPEAKERS:
@@ -520,11 +569,14 @@ class DenseEngineManager:
         *,
         manual_root: bool = False,
         section_count: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> Iterator[Engine]:
-        """Acquire speaker engine lock with guaranteed state reset on exit."""
+        """Acquire speaker engine lock with timeout and guaranteed state reset on exit."""
         eng, lock = self.get_engine(speaker)
-        with lock:
+        with self._acquire_lock(lock, speaker, timeout=timeout):
             is_3d = not speaker.endswith("-2D")
+            prev_pert = dict(eng.perturbation) if isinstance(eng.perturbation, dict) else None
+            prev_flutter = float(eng.flutter)
             if is_3d:
                 target_sc = DEFAULT_SECTIONS if section_count is None else section_count
                 if target_sc != eng.section_count:
@@ -537,6 +589,8 @@ class DenseEngineManager:
                     eng.set_manual_root(False)
                     if is_3d and eng.section_count != DEFAULT_SECTIONS:
                         eng.set_section_count(DEFAULT_SECTIONS)
+                    eng.configure_perturbation(prev_pert, restart=True)
+                    eng.flutter = prev_flutter
                 except Exception:
                     pass
 
@@ -601,7 +655,7 @@ class DenseEngineManager:
         ) -> List[Tuple[Tuple[Any, ...], Dict[str, Any]]]:
             eng, lock = worker
             out_pairs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
-            with lock:
+            with self._acquire_lock(lock, speaker):
                 if is_3d and target_sc is not None and eng.section_count != target_sc:
                     eng.set_section_count(target_sc)
                 prev_mr: Optional[bool] = None
@@ -720,8 +774,13 @@ class DenseEngineManager:
         assert tract_arr is not None
 
         f0_raw = payload.get("f0_hz", 160.0)
-        err = validate_scalar_range("f0_hz", f0_raw, F0_MIN_HZ, F0_MAX_HZ, "Hz")
+        err = validate_scalar_range("f0_hz", f0_raw, float(eng.gmin[0]), float(eng.gmax[0]), "Hz")
         if err:
+            if err["error"].get("code") == "out_of_range":
+                err["error"]["hint"] = (
+                    f"f0_hz ({err['error']['value']} Hz) 超出 VTL 2.4 物理声门原生范围 "
+                    f"[{float(eng.gmin[0]):g}, {float(eng.gmax[0]):g}] Hz；请切换 Tract2Vox-Lite 神经合成或调整音高"
+                )
             return err
         pr_raw = payload.get("pressure_pa", 800.0)
         err = validate_scalar_range("pressure_pa", pr_raw, PRESSURE_MIN_PA, PRESSURE_MAX_PA, "Pa")
@@ -773,120 +832,125 @@ class DenseEngineManager:
                 "extras": np.ascontiguousarray(src["extras"], dtype=np.float64).copy(),
             }
 
-        with sess["lock"]:
-            if sess["manual_root"] != manual_root_req:
-                eng.set_manual_root(manual_root_req)
-                sess["manual_root"] = manual_root_req
+        try:
+            with self._acquire_lock(sess["lock"], speaker):
+                if sess["manual_root"] != manual_root_req:
+                    eng.set_manual_root(manual_root_req)
+                    sess["manual_root"] = manual_root_req
 
-            flutter_val = float(glot_vec[6]) if glot_vec is not None else float(eng.default_flutter)
-            shimmer_val = float(glot_vec[7]) if glot_vec is not None else 0.0
-            if abs(shimmer_val - sess["shimmer"]) > 1e-4 or abs(flutter_val - sess["flutter"]) > 1e-4:
-                eng.configure_perturbation(
-                    {"jitter": 0.0, "shimmer": shimmer_val, "flutter": flutter_val, "seed": 20261120}
-                )
-                sess["shimmer"] = shimmer_val
-                sess["flutter"] = flutter_val
-
-            g = eng.gneutral.copy()
-            g[0] = f0_val
-            g[1] = pr_val * 10.0  # Pa -> dPa strictly at native VTL boundary
-            g[eng.gnames.index("flutter")] = flutter_val
-            if glot_vec is not None:
-                g[eng.gnames.index("x_bottom")] = float(glot_vec[0])
-                g[eng.gnames.index("x_top")] = float(glot_vec[1])
-                g[eng.gnames.index("chink_area")] = float(glot_vec[2])
-                g[eng.gnames.index("lag")] = float(glot_vec[3])
-                g[eng.gnames.index("rel_amp")] = float(glot_vec[4])
-                g[eng.gnames.index("pulse_shape")] = float(glot_vec[5])
-                if float(glot_vec[4]) <= 0.0:
-                    g[0] = 125.0
-            g = np.ascontiguousarray(np.clip(g, eng.gmin, eng.gmax), dtype=np.float64)
-
-            pose_key = _make_pose_cache_key(
-                speaker,
-                eng.section_count if not speaker.endswith("-2D") else None,
-                manual_root_req,
-                tract_arr[0],
-                lip_width,
-                larynx_height,
-                ts_raw,
-                ls_raw,
-            )
-            cached_tube = _VTL_TUBE_CACHE.get(pose_key)
-            if cached_tube is None:
-                p_valid = eng.validated(tract_arr[0])
-                raw_t = eng.prepare_tube(p_valid, lip_width, larynx_height, ts_raw, ls_raw)
-                cached_tube = _freeze_tube_dict(raw_t)
-                _VTL_TUBE_CACHE.put(pose_key, cached_tube)
-
-            target_tube = cached_tube
-            trill_place = resolve_trill_place(payload.get("trill")) if speaker in ("JD2", "JD2-2D") else None
-            if trill_place is not None:
-                t_key = (trill_place, pose_key)
-                if sess["trill_key"] != t_key:
-                    pose_obj = {
-                        "params": tract_arr[0].tolist(),
-                        "lip_width": lip_width,
-                        "larynx_height": larynx_height,
-                        "tongue_shape": ts_raw,
-                        "lip_shape": ls_raw,
-                    }
-                    sess["trill_cycle"] = prepare_live_trill(eng, pose_obj, trill_place)
-                    sess["trill_key"] = t_key
-            else:
-                sess["trill_key"] = None
-                sess["trill_cycle"] = None
-
-            target_pg = eng.pitch_level_gain(target_tube, f0_val)
-            if reset_req or sess["current_tube"] is None:
-                sess["current_tube"] = _mutable_tube(target_tube)
-                eng.reset_tube(sess["current_tube"], g)
-                sess["offset"] = 0
-                sess["pitch_gain"] = target_pg
-                sess["peak_ema"] = 0.0
-
-            n_block = 960
-            parts: List[np.ndarray] = []
-            for _ in range(blocks_raw):
-                cur_tube = sess["current_tube"]
-                if sess["trill_cycle"] is None:
-                    interp_tube = {
-                        "lengths": np.ascontiguousarray(cur_tube["lengths"] + 0.4 * (target_tube["lengths"] - cur_tube["lengths"]), dtype=np.float64),
-                        "areas": np.ascontiguousarray(cur_tube["areas"] + 0.4 * (target_tube["areas"] - cur_tube["areas"]), dtype=np.float64),
-                        "articulators": np.ascontiguousarray(target_tube["articulators"], dtype=np.int32),
-                        "extras": np.ascontiguousarray(cur_tube["extras"] + 0.4 * (target_tube["extras"] - cur_tube["extras"]), dtype=np.float64),
-                    }
-                    sess["current_tube"] = interp_tube
-                    raw_blk = eng.block_tube(interp_tube, g, n_block)
-                else:
-                    next_t, raw_blk = live_tube_block(
-                        eng, cur_tube, target_tube, g, n_block, sess["offset"], sess["trill_cycle"]
+                flutter_val = float(glot_vec[6]) if glot_vec is not None else float(eng.default_flutter)
+                shimmer_val = float(glot_vec[7]) if glot_vec is not None else 0.0
+                if abs(shimmer_val - sess["shimmer"]) > 1e-4 or abs(flutter_val - sess["flutter"]) > 1e-4:
+                    eng.configure_perturbation(
+                        {"jitter": 0.0, "shimmer": shimmer_val, "flutter": flutter_val, "seed": 20261120}
                     )
-                    sess["current_tube"] = _mutable_tube(next_t)
+                    sess["shimmer"] = shimmer_val
+                    sess["flutter"] = flutter_val
 
-                raw_blk = raw_blk * np.linspace(sess["pitch_gain"], target_pg, n_block)
-                sess["pitch_gain"] = target_pg
-                env = attack_envelope(sess["offset"], n_block, eng.sr)
-                blk = audition_samples(raw_blk, 0.82, 0.0, env)
-                if pr_val <= 0.0:
-                    blk = np.zeros(n_block, dtype=np.float64)
-                elif audio_gain == "peak":
-                    blk_peak = float(np.max(np.abs(blk)))
-                    sess["peak_ema"] = max(blk_peak, sess["peak_ema"] * 0.992) if sess["peak_ema"] > 0 else blk_peak
-                    if sess["peak_ema"] > 1e-4:
-                        scale = min(2.2, PLAYBACK_TARGET_PEAK / max(0.12, sess["peak_ema"]))
-                        blk = _soft_limit_audio(blk * scale)
-                parts.append(blk.astype("<f4"))
-                sess["offset"] += n_block
+                g = eng.gneutral.copy()
+                g[0] = f0_val
+                g[1] = pr_val * 10.0  # Pa -> dPa strictly at native VTL boundary
+                g[eng.gnames.index("flutter")] = flutter_val
+                if glot_vec is not None:
+                    g[eng.gnames.index("x_bottom")] = float(glot_vec[0])
+                    g[eng.gnames.index("x_top")] = float(glot_vec[1])
+                    g[eng.gnames.index("chink_area")] = float(glot_vec[2])
+                    g[eng.gnames.index("lag")] = float(glot_vec[3])
+                    g[eng.gnames.index("rel_amp")] = float(glot_vec[4])
+                    g[eng.gnames.index("pulse_shape")] = float(glot_vec[5])
+                    # Unvoiced frames (rel_amp <= 0) have no periodic glottal oscillation;
+                    # 125 Hz is a neutral internal VTL placeholder documented in MODEL_INTERFACE_SPEC.md.
+                    if float(glot_vec[4]) <= 0.0:
+                        g[0] = 125.0
+                g = np.ascontiguousarray(np.clip(g, eng.gmin, eng.gmax), dtype=np.float64)
 
-            audio_f32 = np.concatenate(parts) if parts else np.empty(0, dtype="<f4")
-            return {
-                "ok": True,
-                "speaker": speaker,
-                "sample_rate_hz": int(eng.sr),
-                "samples": int(len(audio_f32)),
-                "pcm_f32_b64": base64.b64encode(audio_f32.tobytes()).decode("ascii"),
-            }
+                pose_key = _make_pose_cache_key(
+                    speaker,
+                    eng.section_count if not speaker.endswith("-2D") else None,
+                    manual_root_req,
+                    tract_arr[0],
+                    lip_width,
+                    larynx_height,
+                    ts_raw,
+                    ls_raw,
+                )
+                cached_tube = _VTL_TUBE_CACHE.get(pose_key)
+                if cached_tube is None:
+                    p_valid = eng.validated(tract_arr[0])
+                    raw_t = eng.prepare_tube(p_valid, lip_width, larynx_height, ts_raw, ls_raw)
+                    cached_tube = _freeze_tube_dict(raw_t)
+                    _VTL_TUBE_CACHE.put(pose_key, cached_tube)
+
+                target_tube = cached_tube
+                trill_place = resolve_trill_place(payload.get("trill")) if speaker in ("JD2", "JD2-2D") else None
+                if trill_place is not None:
+                    t_key = (trill_place, pose_key)
+                    if sess["trill_key"] != t_key:
+                        pose_obj = {
+                            "params": tract_arr[0].tolist(),
+                            "lip_width": lip_width,
+                            "larynx_height": larynx_height,
+                            "tongue_shape": ts_raw,
+                            "lip_shape": ls_raw,
+                        }
+                        sess["trill_cycle"] = prepare_live_trill(eng, pose_obj, trill_place)
+                        sess["trill_key"] = t_key
+                else:
+                    sess["trill_key"] = None
+                    sess["trill_cycle"] = None
+
+                target_pg = eng.pitch_level_gain(target_tube, f0_val)
+                if reset_req or sess["current_tube"] is None:
+                    sess["current_tube"] = _mutable_tube(target_tube)
+                    eng.reset_tube(sess["current_tube"], g)
+                    sess["offset"] = 0
+                    sess["pitch_gain"] = target_pg
+                    sess["peak_ema"] = 0.0
+
+                n_block = 960
+                parts: List[np.ndarray] = []
+                for _ in range(blocks_raw):
+                    cur_tube = sess["current_tube"]
+                    if sess["trill_cycle"] is None:
+                        interp_tube = {
+                            "lengths": np.ascontiguousarray(cur_tube["lengths"] + 0.4 * (target_tube["lengths"] - cur_tube["lengths"]), dtype=np.float64),
+                            "areas": np.ascontiguousarray(cur_tube["areas"] + 0.4 * (target_tube["areas"] - cur_tube["areas"]), dtype=np.float64),
+                            "articulators": np.ascontiguousarray(target_tube["articulators"], dtype=np.int32),
+                            "extras": np.ascontiguousarray(cur_tube["extras"] + 0.4 * (target_tube["extras"] - cur_tube["extras"]), dtype=np.float64),
+                        }
+                        sess["current_tube"] = interp_tube
+                        raw_blk = eng.block_tube(interp_tube, g, n_block)
+                    else:
+                        next_t, raw_blk = live_tube_block(
+                            eng, cur_tube, target_tube, g, n_block, sess["offset"], sess["trill_cycle"]
+                        )
+                        sess["current_tube"] = _mutable_tube(next_t)
+
+                    raw_blk = raw_blk * np.linspace(sess["pitch_gain"], target_pg, n_block)
+                    sess["pitch_gain"] = target_pg
+                    env = attack_envelope(sess["offset"], n_block, eng.sr)
+                    blk = audition_samples(raw_blk, 0.82, 0.0, env)
+                    if pr_val <= 0.0:
+                        blk = np.zeros(n_block, dtype=np.float64)
+                    elif audio_gain == "peak":
+                        blk_peak = float(np.max(np.abs(blk)))
+                        sess["peak_ema"] = max(blk_peak, sess["peak_ema"] * 0.992) if sess["peak_ema"] > 0 else blk_peak
+                        if sess["peak_ema"] > 1e-4:
+                            scale = min(2.2, PLAYBACK_TARGET_PEAK / max(0.12, sess["peak_ema"]))
+                            blk = _soft_limit_audio(blk * scale)
+                    parts.append(blk.astype("<f4"))
+                    sess["offset"] += n_block
+
+                audio_f32 = np.concatenate(parts) if parts else np.empty(0, dtype="<f4")
+                return {
+                    "ok": True,
+                    "speaker": speaker,
+                    "sample_rate_hz": int(eng.sr),
+                    "samples": int(len(audio_f32)),
+                    "pcm_f32_b64": base64.b64encode(audio_f32.tobytes()).decode("ascii"),
+                }
+        except EngineBusyError as exc:
+            return exc.result
 
     def status(self) -> Dict[str, Any]:
         with self._pool_lock:
@@ -944,32 +1008,233 @@ class DenseEngineManager:
             return validation_error("tongue_root_drag", "舌根拖动需要立体解剖模型与有效坐标")
 
         vector = tract_arr[0]
-        with self.lease(speaker, manual_root=use_manual_root, section_count=target_sc) as eng:
-            gesture_result = None
-            if gesture:
+        tongue_shape = payload.get("tongue_shape")
+        lip_shape = payload.get("lip_shape")
+        cache_key = None
+        if not gesture:
+            cache_key = _make_pose_cache_key(
+                speaker,
+                target_sc if not speaker.endswith("-2D") else None,
+                use_manual_root,
+                vector,
+                lip_width,
+                larynx_height,
+                tongue_shape,
+                lip_shape,
+            )
+            cached_snap = _VTL_POSE_SNAPSHOT_CACHE.get(cache_key)
+            if cached_snap is not None:
+                return cached_snap
+        try:
+            with self.lease(speaker, manual_root=use_manual_root, section_count=target_sc) as eng:
+                gesture_result = None
+                if gesture:
+                    try:
+                        vector, gesture_result = resolve_root_drag(
+                            eng, gesture, lip_width, larynx_height, tongue_shape, lip_shape,
+                        )
+                    except ValueError as error:
+                        return validation_error("tongue_root_drag", str(error))
                 try:
-                    vector, gesture_result = resolve_root_drag(
-                        eng, gesture, lip_width, larynx_height, payload.get("tongue_shape"), payload.get("lip_shape"),
+                    snap = eng.snapshot(
+                        vector,
+                        lip_width=lip_width,
+                        larynx_height=larynx_height,
+                        tongue_shape=tongue_shape,
+                        lip_shape=lip_shape,
                     )
                 except ValueError as error:
-                    return validation_error("tongue_root_drag", str(error))
+                    return validation_error("pose", str(error))
+                if gesture_result:
+                    snap["tongue_root_drag"] = gesture_result
+                snap["speaker"] = speaker
+                snap["ok"] = True
+                if cache_key is not None:
+                    _VTL_POSE_SNAPSHOT_CACHE.put(cache_key, snap)
+                return snap
+        except EngineBusyError as exc:
+            return exc.result
+
+    def pose_snapshots_batch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute up to 64 full VTL pose snapshots in parallel across isolated C++ workers with LRU caching."""
+        speaker = str(payload.get("speaker", "JD2"))
+        poses = payload.get("poses")
+        if not isinstance(poses, list) or len(poses) == 0:
+            return validation_error("poses", "poses 必须为非空 19 维构型数组")
+        if len(poses) > 64:
+            return out_of_range_error("poses.length", len(poses), 1, 64, "poses", "单次批量声道快照最多支持 64 帧")
+
+        try:
+            eng_probe, _ = self.get_engine(speaker)
+        except ValueError as exc:
+            return validation_error("speaker", str(exc))
+
+        poses_arr, err = validate_tract19_frames(poses, eng_probe.names, eng_probe.minimum, eng_probe.maximum, field="poses")
+        if err:
+            return err
+        assert poses_arr is not None
+
+        err = validate_scalar_range("lip_width", payload.get("lip_width", 1.0), 0.55, 1.6, "ratio")
+        if err:
+            return err
+        err = validate_scalar_range("larynx_height", payload.get("larynx_height", 0.0), -1.0, 1.0, "cm")
+        if err:
+            return err
+        lip_width = float(payload.get("lip_width", 1.0))
+        larynx_height = float(payload.get("larynx_height", 0.0))
+
+        raw_sc = payload.get("section_count")
+        is_3d = not speaker.endswith("-2D")
+        target_sc: Optional[int] = None
+        if raw_sc is not None and is_3d:
+            if type(raw_sc) is not int or raw_sc not in eng_probe.section_options:
+                return out_of_range_error("section_count", raw_sc, min(eng_probe.section_options), max(eng_probe.section_options), "sections")
+            target_sc = raw_sc
+
+        manual_root_req = payload.get("manual_root", False)
+        if type(manual_root_req) is not bool:
+            return validation_error("manual_root", "manual_root 必须为布尔值")
+
+        tongue_shape = payload.get("tongue_shape")
+        lip_shape = payload.get("lip_shape")
+        err = validate_shape_frames([tongue_shape], 1, field="tongue_shape")
+        if err:
+            return err
+        err = validate_shape_frames([lip_shape], 1, field="lip_shape")
+        if err:
+            return err
+
+        eff_sc = target_sc if is_3d else None
+        keys: List[Tuple[Any, ...]] = []
+        snaps_by_key: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        misses: List[Tuple[Tuple[Any, ...], np.ndarray]] = []
+        seen_misses: set[Tuple[Any, ...]] = set()
+        cache_hits = 0
+
+        for vec in poses_arr:
+            key = _make_pose_cache_key(
+                speaker, eff_sc, manual_root_req, vec, lip_width, larynx_height, tongue_shape, lip_shape
+            )
+            keys.append(key)
+            if key in snaps_by_key:
+                cache_hits += 1
+                continue
+            cached = _VTL_POSE_SNAPSHOT_CACHE.get(key)
+            if cached is not None:
+                snaps_by_key[key] = cached
+                cache_hits += 1
+            elif key not in seen_misses:
+                seen_misses.add(key)
+                misses.append((key, vec))
+
+        workers_used = 1
+        if misses:
+            desired_workers = min(VTL_PARALLEL_WORKERS, max(1, len(misses)))
+            workers = self._get_worker_pool(speaker, desired_workers)
+            workers_used = len(workers)
+            worker_sc = DEFAULT_SECTIONS if (is_3d and target_sc is None) else target_sc
+
+            def _compute_part(
+                worker: Tuple[Engine, threading.RLock],
+                part: Sequence[Tuple[Tuple[Any, ...], np.ndarray]],
+            ) -> List[Tuple[Tuple[Any, ...], Dict[str, Any]]]:
+                eng, lock = worker
+                out_pairs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+                with self._acquire_lock(lock, speaker):
+                    if is_3d and worker_sc is not None and eng.section_count != worker_sc:
+                        eng.set_section_count(worker_sc)
+                    eng.set_manual_root(bool(manual_root_req))
+                    try:
+                        for key, vec in part:
+                            snap = eng.snapshot(
+                                vec,
+                                lip_width=lip_width,
+                                larynx_height=larynx_height,
+                                tongue_shape=tongue_shape,
+                                lip_shape=lip_shape,
+                            )
+                            snap["speaker"] = speaker
+                            snap["ok"] = True
+                            _VTL_POSE_SNAPSHOT_CACHE.put(key, snap)
+                            out_pairs.append((key, snap))
+                    finally:
+                        try:
+                            eng.set_manual_root(False)
+                            if is_3d and eng.section_count != DEFAULT_SECTIONS:
+                                eng.set_section_count(DEFAULT_SECTIONS)
+                        except Exception:
+                            pass
+                return out_pairs
+
             try:
-                snap = eng.snapshot(
-                    vector,
-                    lip_width=lip_width,
-                    larynx_height=larynx_height,
-                    tongue_shape=payload.get("tongue_shape"),
-                    lip_shape=payload.get("lip_shape"),
-                )
+                if len(workers) == 1:
+                    for key, snap in _compute_part(workers[0], misses):
+                        snaps_by_key[key] = snap
+                else:
+                    buckets: List[List[Tuple[Tuple[Any, ...], np.ndarray]]] = [[] for _ in workers]
+                    for idx_m, item in enumerate(misses):
+                        buckets[idx_m % len(workers)].append(item)
+                    with ThreadPoolExecutor(max_workers=len(workers) - 1) as pool:
+                        futs = [
+                            pool.submit(_compute_part, workers[wi], buckets[wi])
+                            for wi in range(1, len(workers))
+                            if buckets[wi]
+                        ]
+                        if buckets[0]:
+                            for key, snap in _compute_part(workers[0], buckets[0]):
+                                snaps_by_key[key] = snap
+                        for fut in futs:
+                            for key, snap in fut.result():
+                                snaps_by_key[key] = snap
+            except EngineBusyError as exc:
+                return exc.result
             except ValueError as error:
-                return validation_error("pose", str(error))
-            if gesture_result:
-                snap["tongue_root_drag"] = gesture_result
-            snap["speaker"] = speaker
-            snap["ok"] = True
-            return snap
+                return validation_error("poses", str(error))
+
+        ordered = [snaps_by_key[k] for k in keys]
+        first = ordered[0]
+        shared_freq = first.get("frequency")
+        shared_mesh_triangles: Dict[str, Any] = {}
+        if isinstance(first.get("meshes"), list):
+            for mesh in first["meshes"]:
+                if isinstance(mesh, dict) and isinstance(mesh.get("name"), str) and isinstance(mesh.get("triangles"), list):
+                    shared_mesh_triangles[mesh["name"]] = mesh["triangles"]
+
+        compact_items: List[Dict[str, Any]] = []
+        for snap in ordered:
+            compact = {k: v for k, v in snap.items() if k not in ("frequency", "meshes", "ok")}
+            if snap.get("frequency") != shared_freq:
+                compact["frequency"] = snap.get("frequency")
+            raw_meshes = snap.get("meshes")
+            if isinstance(raw_meshes, list):
+                c_meshes = []
+                for mesh in raw_meshes:
+                    name = mesh.get("name")
+                    if name in shared_mesh_triangles and mesh.get("triangles") == shared_mesh_triangles[name]:
+                        c_meshes.append({k: v for k, v in mesh.items() if k != "triangles"})
+                    else:
+                        c_meshes.append(mesh)
+                compact["meshes"] = c_meshes
+            compact_items.append(compact)
+
+        return {
+            "ok": True,
+            "speaker": speaker,
+            "frequency": shared_freq,
+            "mesh_triangles": shared_mesh_triangles,
+            "items": compact_items,
+            "cache_hits": cache_hits,
+            "computed": len(misses),
+            "workers": workers_used,
+        }
 
     def synthesize_dense(self, payload: Dict[str, Any], *, voqs_reference: bool = False) -> Dict[str, Any]:
+        try:
+            return self._synthesize_dense_impl(payload, voqs_reference=voqs_reference)
+        except EngineBusyError as exc:
+            return exc.result
+
+    def _synthesize_dense_impl(self, payload: Dict[str, Any], *, voqs_reference: bool = False) -> Dict[str, Any]:
         speaker = str(payload.get("speaker", "JD2"))
         f0_hz = payload.get("f0_hz")
         pressure_pa = payload.get("pressure_pa")
@@ -1006,11 +1271,15 @@ class DenseEngineManager:
         except ValueError as exc:
             return validation_error("speaker", str(exc))
 
-        # The VoQS recording route can use the native source below the public
-        # 60 Hz control floor. This switch is internal, never a payload option.
-        f0_min_hz = max(VOQS_NATIVE_F0_MIN_HZ, float(eng_probe.gmin[0])) if voqs_reference else F0_MIN_HZ
-        f0_arr, err = validate_scalar_series("f0_hz", f0_hz, n_frames, f0_min_hz, F0_MAX_HZ, "Hz")
+        f0_min_hz = max(F0_MIN_HZ, float(eng_probe.gmin[0]))
+        f0_max_hz = min(F0_MAX_HZ, float(eng_probe.gmax[0]))
+        f0_arr, err = validate_scalar_series("f0_hz", f0_hz, n_frames, f0_min_hz, f0_max_hz, "Hz")
         if err:
+            if err["error"].get("code") == "out_of_range":
+                err["error"]["hint"] = (
+                    f"{err['error']['field']} ({err['error']['value']} Hz) 超出 VTL 2.4 物理声门原生范围 "
+                    f"[{f0_min_hz:g}, {f0_max_hz:g}] Hz；请切换 Tract2Vox-Lite 神经合成或调整音高"
+                )
             return err
         pr_arr, err = validate_scalar_series("pressure_pa", pressure_pa, n_frames, PRESSURE_MIN_PA, PRESSURE_MAX_PA, "Pa")
         if err:
@@ -1463,21 +1732,33 @@ class DenseEngineManager:
                 is_3d = not speaker.endswith("-2D")
                 parts_local: List[np.ndarray] = []
                 cur_shim = shimmer
-                with lock:
-                    if is_3d and target_sc is not None and eng.section_count != target_sc:
-                        eng.set_section_count(target_sc)
-                    eng.configure_perturbation({"jitter": 0.0, "shimmer": cur_shim, "flutter": flutter, "seed": seed}, restart=True)
-                    first_tube = tubes_by_key[frame_keys[sf_l]]
-                    init_g = g_mat_l[0].copy()
-                    init_g[1] = 0.0
-                    eng.reset_tube(first_tube, np.ascontiguousarray(init_g))
-                    for rel_i, abs_i in enumerate(range(sf_l, ef_l)):
-                        if per_frame_shimmer and glot_arr is not None and glot_arr.shape[1] >= 8:
-                            f_shim = float(glot_arr[abs_i, 7])
-                            if f_shim != cur_shim:
-                                eng.configure_perturbation({"jitter": 0.0, "shimmer": f_shim, "flutter": flutter, "seed": seed})
-                                cur_shim = f_shim
-                        parts_local.append(eng.block_tube(tubes_by_key[frame_keys[abs_i]], np.ascontiguousarray(g_mat_l[rel_i]), step_samples))
+                with self._acquire_lock(lock, speaker):
+                    prev_sc = int(eng.section_count) if is_3d else None
+                    prev_pert = dict(eng.perturbation) if isinstance(eng.perturbation, dict) else None
+                    prev_flutter = float(eng.flutter)
+                    try:
+                        if is_3d and target_sc is not None and eng.section_count != target_sc:
+                            eng.set_section_count(target_sc)
+                        eng.configure_perturbation({"jitter": 0.0, "shimmer": cur_shim, "flutter": flutter, "seed": seed}, restart=True)
+                        first_tube = tubes_by_key[frame_keys[sf_l]]
+                        init_g = g_mat_l[0].copy()
+                        init_g[1] = 0.0
+                        eng.reset_tube(first_tube, np.ascontiguousarray(init_g))
+                        for rel_i, abs_i in enumerate(range(sf_l, ef_l)):
+                            if per_frame_shimmer and glot_arr is not None and glot_arr.shape[1] >= 8:
+                                f_shim = float(glot_arr[abs_i, 7])
+                                if f_shim != cur_shim:
+                                    eng.configure_perturbation({"jitter": 0.0, "shimmer": f_shim, "flutter": flutter, "seed": seed})
+                                    cur_shim = f_shim
+                            parts_local.append(eng.block_tube(tubes_by_key[frame_keys[abs_i]], np.ascontiguousarray(g_mat_l[rel_i]), step_samples))
+                    finally:
+                        try:
+                            if is_3d and prev_sc is not None and eng.section_count != prev_sc:
+                                eng.set_section_count(prev_sc)
+                            eng.configure_perturbation(prev_pert, restart=True)
+                            eng.flutter = prev_flutter
+                        except Exception:
+                            pass
                 pcm_arr = np.ascontiguousarray(np.concatenate(parts_local), dtype=np.float64)
                 _VTL_PHRASE_CACHE.put(ckey_l, pcm_arr, int(pcm_arr.nbytes))
                 return ci_local, pcm_arr
@@ -1564,6 +1845,16 @@ class DenseEngineManager:
         payload: Dict[str, Any],
         predicted_rows: Optional[np.ndarray] = None,
     ) -> Iterator[Dict[str, Any]]:
+        try:
+            yield from self._synthesize_dense_stream_impl(payload, predicted_rows)
+        except EngineBusyError as exc:
+            yield exc.result
+
+    def _synthesize_dense_stream_impl(
+        self,
+        payload: Dict[str, Any],
+        predicted_rows: Optional[np.ndarray] = None,
+    ) -> Iterator[Dict[str, Any]]:
         """Yield streaming NDJSON events (meta -> chunk 0..K-1 -> done) for low-TTFA physical VTL playback.
 
         Chunk 0 is tube-prepared across all parallel workers and synthesized immediately while remaining chunks
@@ -1606,8 +1897,15 @@ class DenseEngineManager:
             yield validation_error("speaker", str(exc))
             return
 
-        f0_arr, err = validate_scalar_series("f0_hz", f0_hz, n_frames, F0_MIN_HZ, F0_MAX_HZ, "Hz")
+        f0_min_hz = max(F0_MIN_HZ, float(eng_probe.gmin[0]))
+        f0_max_hz = min(F0_MAX_HZ, float(eng_probe.gmax[0]))
+        f0_arr, err = validate_scalar_series("f0_hz", f0_hz, n_frames, f0_min_hz, f0_max_hz, "Hz")
         if err:
+            if err["error"].get("code") == "out_of_range":
+                err["error"]["hint"] = (
+                    f"{err['error']['field']} ({err['error']['value']} Hz) 超出 VTL 2.4 物理声门原生范围 "
+                    f"[{f0_min_hz:g}, {f0_max_hz:g}] Hz；请切换 Tract2Vox-Lite 神经合成或调整音高"
+                )
             yield err
             return
         pr_arr, err = validate_scalar_series("pressure_pa", pressure_pa, n_frames, PRESSURE_MIN_PA, PRESSURE_MAX_PA, "Pa")
@@ -1938,21 +2236,33 @@ class DenseEngineManager:
             is_3d = not speaker.endswith("-2D")
             parts_local: List[np.ndarray] = []
             cur_shim = shimmer
-            with lock:
-                if is_3d and target_sc is not None and eng.section_count != target_sc:
-                    eng.set_section_count(target_sc)
-                eng.configure_perturbation({"jitter": 0.0, "shimmer": cur_shim, "flutter": flutter, "seed": seed}, restart=True)
-                first_tube = tmap[fkeys[sf_l]]
-                init_g = g_mat_l[0].copy()
-                init_g[1] = 0.0
-                eng.reset_tube(first_tube, np.ascontiguousarray(init_g))
-                for rel_i, abs_i in enumerate(range(sf_l, ef_l)):
-                    if per_frame_shimmer and glot_arr is not None and glot_arr.shape[1] >= 8:
-                        f_shim = float(glot_arr[abs_i, 7])
-                        if f_shim != cur_shim:
-                            eng.configure_perturbation({"jitter": 0.0, "shimmer": f_shim, "flutter": flutter, "seed": seed})
-                            cur_shim = f_shim
-                    parts_local.append(eng.block_tube(tmap[fkeys[abs_i]], np.ascontiguousarray(g_mat_l[rel_i]), step_samples))
+            with self._acquire_lock(lock, speaker):
+                prev_sc = int(eng.section_count) if is_3d else None
+                prev_pert = dict(eng.perturbation) if isinstance(eng.perturbation, dict) else None
+                prev_flutter = float(eng.flutter)
+                try:
+                    if is_3d and target_sc is not None and eng.section_count != target_sc:
+                        eng.set_section_count(target_sc)
+                    eng.configure_perturbation({"jitter": 0.0, "shimmer": cur_shim, "flutter": flutter, "seed": seed}, restart=True)
+                    first_tube = tmap[fkeys[sf_l]]
+                    init_g = g_mat_l[0].copy()
+                    init_g[1] = 0.0
+                    eng.reset_tube(first_tube, np.ascontiguousarray(init_g))
+                    for rel_i, abs_i in enumerate(range(sf_l, ef_l)):
+                        if per_frame_shimmer and glot_arr is not None and glot_arr.shape[1] >= 8:
+                            f_shim = float(glot_arr[abs_i, 7])
+                            if f_shim != cur_shim:
+                                eng.configure_perturbation({"jitter": 0.0, "shimmer": f_shim, "flutter": flutter, "seed": seed})
+                                cur_shim = f_shim
+                        parts_local.append(eng.block_tube(tmap[fkeys[abs_i]], np.ascontiguousarray(g_mat_l[rel_i]), step_samples))
+                finally:
+                    try:
+                        if is_3d and prev_sc is not None and eng.section_count != prev_sc:
+                            eng.set_section_count(prev_sc)
+                        eng.configure_perturbation(prev_pert, restart=True)
+                        eng.flutter = prev_flutter
+                    except Exception:
+                        pass
             pcm_arr = np.ascontiguousarray(np.concatenate(parts_local), dtype=np.float64)
             _VTL_PHRASE_CACHE.put(ckey_l, pcm_arr, int(pcm_arr.nbytes))
             return pcm_arr
@@ -2149,6 +2459,12 @@ class DenseEngineManager:
         }
 
     def batch_contours(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return self._batch_contours_impl(payload)
+        except EngineBusyError as exc:
+            return exc.result
+
+    def _batch_contours_impl(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Batch-extract real VTL 2.4 mid-sagittal contours + Amin + F1/F2/F3 for up to 64 19-D poses."""
         speaker = str(payload.get("speaker", "JD2"))
         poses = payload.get("poses")

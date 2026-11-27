@@ -489,12 +489,20 @@ function timeStyle(xmin: number, xmax: number) {
   return { left: left + '%', width: Math.max(0, right - left) + '%' };
 }
 
-function editorStyle(xmin: number, xmax: number) {
-  const leftPct = Math.max(0, Math.min(92, percent(xmin)));
-  const rightPct = Math.min(100, Math.max(leftPct + 6, percent(xmax)));
+function editorStyle(xmin: number, xmax: number): Record<string, string> {
+  const rawLeft = Math.max(0, Math.min(100, percent(xmin)));
+  const rawRight = Math.max(rawLeft, Math.min(100, percent(xmax)));
+  const spanPct = Math.max(6, rawRight - rawLeft);
+  if (rawLeft > 78) {
+    return {
+      left: 'auto',
+      right: `${Math.max(0.5, 100 - rawRight).toFixed(2)}%`,
+      width: `max(64px, ${spanPct.toFixed(2)}%)`,
+    };
+  }
   return {
-    left: `${leftPct}%`,
-    width: `max(58px, ${(rightPct - leftPct).toFixed(2)}%)`,
+    left: `${rawLeft.toFixed(2)}%`,
+    width: `max(64px, ${spanPct.toFixed(2)}%)`,
   };
 }
 
@@ -1015,6 +1023,6 @@ onBeforeUnmount(() => {
 .align-head {
   z-index: 5;
   width: 1.5px;
-  background: #f3a341;
+  background: var(--danger);
 }
 </style>

@@ -2,6 +2,7 @@ import { SAMPLE_RATE_HZ, type Clip, type VcProject } from '@vocalcut/core';
 import { defaultTractParams, tractRecordToArray19 } from '@/stores/workbench';
 import { audioBufferFile, type WorkspaceAudio } from '@/data/workspace-transfer';
 import { buildAnnotationSynthesis } from '@/components/research/annotation-audio';
+import { textPoseSource } from '@/data/ipa-pose-source';
 import { trackFrameAt } from '@/components/research/annotation-edit';
 import { blobToBase64 } from '@/components/research/research-utils';
 
@@ -37,6 +38,9 @@ export async function voiceTransferOperand(range: TransferRange, project: VcProj
   const count = Math.floor((endSmp - startSmp) / FRAME_SMP);
   let wav_base64: string | undefined;
   if (choice.audio) {
+    if (choice.audio.sampleRate !== SAMPLE_RATE_HZ) {
+      throw new Error(`${choice.label} 采样率为 ${choice.audio.sampleRate} Hz，请先转换为 48 kHz 工程时基`);
+    }
     const mono = new AudioBuffer({ length: count * FRAME_SMP, sampleRate: SAMPLE_RATE_HZ, numberOfChannels: 1 });
     const dest = mono.getChannelData(0);
     for (let ch = 0; ch < choice.audio.numberOfChannels; ch++) {
@@ -48,12 +52,17 @@ export async function voiceTransferOperand(range: TransferRange, project: VcProj
   let rows_pa: number[][] | undefined;
   if (choice.rowsPa?.length) {
     const rows = choice.rowsPa;
-    rows_pa = Array.from({ length: count }, (_, i) => rows[Math.min(rows.length - 1, Math.floor(startSmp / FRAME_SMP) + i)]);
+    const expectedClipFrames = Math.ceil(choice.durationSmp / FRAME_SMP);
+    const relativeRows = choice.startSmp > 0 && rows.length <= expectedClipFrames + 2;
+    const baseFrame = Math.floor((relativeRows ? startSmp - choice.startSmp : startSmp) / FRAME_SMP);
+    rows_pa = Array.from({ length: count }, (_, i) => rows[Math.max(0, Math.min(rows.length - 1, baseFrame + i))]);
   } else if (!choice.audio && (choice.phrase || choice.poseFrames?.length)) {
     const neutral = tractRecordToArray19(defaultTractParams());
     const fallback = { f0Hz: 140, tract: neutral, releaseTract: neutral, lipWidth: 1, larynxHeight: 0 };
     const anchors = Object.values(project.phonation_anchors).sort((a, b) => a.t_smp - b.t_smp);
-    const controls = choice.phrase ? buildAnnotationSynthesis(project, choice.phrase, anchors, startSmp, endSmp, fallback) : undefined;
+    const controls = choice.phrase
+      ? buildAnnotationSynthesis(project, choice.phrase, anchors, startSmp, endSmp, fallback, undefined, textPoseSource.value)
+      : undefined;
     if (controls && !controls.ok) throw new Error(controls.error.hint);
     const data = controls?.value;
     rows_pa = Array.from({ length: count }, (_, i) => {
@@ -121,7 +130,8 @@ export function transferOutputClip(range: TransferRange, durationSmp: number, ta
     if (!mapped || local === 0 || local === inputSmp) return Math.min(local === inputSmp && mapped ? durationSmp : local, durationSmp);
     const index = mapped.findIndex(value => value >= local);
     if (index <= 0) return index === 0 ? 0 : durationSmp;
-    const weight = (local - mapped[index - 1]) / (mapped[index] - mapped[index - 1]);
+    const span = mapped[index] - mapped[index - 1];
+    const weight = span > 0 ? (local - mapped[index - 1]) / span : 0;
     return Math.round((index - 1 + weight) * durationSmp / (mapped.length - 1));
   }
   function retime<T extends { start_smp: number; end_smp: number }>(span: T) {

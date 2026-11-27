@@ -8,7 +8,7 @@ import {
 } from '@/components/research/annotation-audio';
 import type { AnnotationTractFrame } from '@/components/research/annotation-edit';
 import { applyPeakAudioGain, defaultVoiceRenderMode, synthesisGainMode, voiceRenderLabels, voiceRenderMode, type VoiceRenderMode } from '@/data/voice-renderer';
-import { speakerReferenceAudio, speakerReferenceName } from '@/data/synthesis-speaker';
+import { effectiveSpeakerBaseF0Hz, speakerReferenceAudio, speakerReferenceName } from '@/data/synthesis-speaker';
 import { createVoicePlaybackBus, measureVoicePlaybackGain, voicePlaybackGain } from '@/data/voice-playback-gain';
 import { syncLocalModelsSilently } from '@/data/local-models';
 import {
@@ -18,17 +18,18 @@ import {
   setConfiguredSplitterDefault,
   type SetSplitterDefaultResult,
 } from '@/data/splitter-layout';
-import type { SynthesisGainMode } from '@vocalcut/model-adapters';
+import { defaultVtlTransport, type SynthesisGainMode } from '@vocalcut/model-adapters';
 import { normalizeInterfaceFonts, type InterfaceFonts } from '@/styles/interface-fonts';
 import { normalizeAnatomyAppearance, type AnatomyAppearance } from '@/styles/anatomy-appearance';
 import { isWhisperModelId, type WhisperModelId } from '@/data/whisper-models';
 import { initialWorkspace, exploreLabel } from '@vocalcut/edition';
-import { selectWorkspaceBackground } from '@/data/workspace-images';
+import { activeWorkspaceBackground, selectWorkspaceBackground } from '@/data/workspace-images';
 import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from 'vue';
 import {
-  F0_LIMIT_HZ,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
+  assertInRange,
+  assertValidF0Hz,
   msToSamples,
   type ComputeDevice,
   type Clip,
@@ -53,8 +54,13 @@ import { retime, type RetimeResult } from '../../packages/core-ts/src/retime';
 import {
   applyAppearanceToRoot,
   applyPageScaleToRoot,
+  BACKDROP_BLUR_MAX_PX,
+  BACKDROP_VEIL_MAX_PCT,
+  backdropTreatmentDefaults,
+  backdropVeilDefault,
   computeAutoPageScale,
   defaultAppearance,
+  getSkin,
   listBackdrops,
   listSkins,
   mountStyleBackdoor,
@@ -68,16 +74,33 @@ import {
   runThemeViewTransition,
   type AppearanceConfig,
   type BackdropId,
+  type BackdropTreatment,
+  type StyleColorMode,
   type StyleOverrides,
 } from '@/styles/skin-registry';
 import {
   BACKDROP_COLOR_PRESETS,
   colorModeByLocalTime,
+  normalizeHex,
+  originalSurfacePaletteId,
+  paletteShortName,
+  paletteTokens,
   resolveColorMode,
+  themeBackdropColors,
   type ColorMode,
   type ThemeMode,
   type WaveformColorMode,
 } from '@/styles/themes';
+import {
+  deleteLookPreset,
+  normalizeSavedLooksState,
+  saveLookPreset,
+  setDefaultLookPreset,
+  updateLookPreset,
+  type SavedLookPreset,
+  type SavedLookSnapshot,
+  type SavedLooksState,
+} from '@/data/saved-looks';
 import {
   DEFAULT_TRACT_EXTRAS,
   cloneTractExtras,
@@ -89,8 +112,10 @@ import {
 export type WorkspaceId = 'home' | 'explore' | 'research' | 'studio';
 
 interface ArrangerExportSource {
-  exportMidi?: ()=>Blob;
-  renderVoice?: (format:'wav'|'mp3',signal:AbortSignal)=>Promise<Blob>;
+  exportMidi?: () => Blob;
+  exportVsqx?: () => Blob;
+  exportSvp?: () => Blob;
+  renderVoice?: (format: 'wav' | 'mp3', signal: AbortSignal) => Promise<Blob>;
   originalGrid?: import('@vocalcut/core').TextGridDocument;
   renderAudio?: (format: 'wav' | 'mp3', separate: boolean, signal: AbortSignal) => Promise<Blob>;
   clip?: Clip;
@@ -110,7 +135,7 @@ export type GuideModuleId =
   | 'stage'
   | 'card'
   | 'explore';
-export type SettingsTabId = 'appearance' | 'style-lab' | 'layout' | 'engine' | 'shortcuts';
+export type SettingsTabId = 'appearance' | 'style-lab' | 'layout' | 'engine' | 'shortcuts' | 'credits';
 export type LayoutDensity = 'compact' | 'standard' | 'spacious';
 export type TimelineTrackScale = 'compact' | 'standard' | 'tall';
 export type AiDrawerDockMode = 'docked' | 'overlay';
@@ -210,6 +235,8 @@ export interface SynthesizeRangeOptions {
   speakerWavBase64?: string | null;
   /** When set on long (>4 s) neural or physical synthesis, streams first chunk into Web Audio immediately while remaining chunks finish in parallel. */
   streamPlay?: PlayAudioOptions;
+  /** Optional callback notified as soon as streaming synthesis metadata delivers the 50 Hz tract trajectory. */
+  onStreamTractFrames?: (frames: AnnotationTractFrame[]) => void;
   /** Optional shared timeline state for multi-window gapless streaming (e.g. >60 s songs). */
   streamChain?: StreamPlaybackChain;
 }
@@ -277,25 +304,25 @@ export const VTL_PARAM_META: ReadonlyArray<{
   defaultVal: number;
   core6?: boolean;
 }> = [
-  { key: 'LP', label: '唇突 LP', min: -1, max: 1, step: 0.02, defaultVal: 0.28, core6: true },
-  { key: 'LD', label: '唇开 LD', min: -2, max: 4, step: 0.02, defaultVal: 0.62, core6: true },
-  { key: 'JA', label: '下颌 JA', min: -7, max: 0, step: 0.05, defaultVal: -2.1, core6: true },
-  { key: 'TCX', label: '舌背 TCX', min: -3, max: 4, step: 0.05, defaultVal: 0.55, core6: true },
-  { key: 'TCY', label: '舌背 TCY', min: -3, max: 1, step: 0.05, defaultVal: 0.15, core6: true },
-  { key: 'VO', label: '鼻化 VO', min: -0.1, max: 1.5, step: 0.02, defaultVal: 0.0, core6: true },
-  { key: 'HX', label: '舌骨 HX', min: 0, max: 1, step: 0.02, defaultVal: 0.55 },
-  { key: 'HY', label: '喉高 HY', min: -6, max: -3.5, step: 0.05, defaultVal: -4.75 },
-  { key: 'JX', label: '下颌前移 JX', min: -0.5, max: 0, step: 0.02, defaultVal: -0.1 },
-  { key: 'VS', label: '软腭形状 VS', min: 0, max: 1, step: 0.02, defaultVal: 0.5 },
-  { key: 'TTX', label: '舌尖 TTX', min: 1.5, max: 7.5, step: 0.05, defaultVal: 3.65 },
-  { key: 'TTY', label: '舌尖 TTY', min: -3, max: 2.5, step: 0.05, defaultVal: 0.35 },
-  { key: 'TBX', label: '舌叶 TBX', min: -3, max: 6.5, step: 0.05, defaultVal: 2.15 },
-  { key: 'TBY', label: '舌叶 TBY', min: -3, max: 5, step: 0.05, defaultVal: 0.45 },
-  { key: 'TRX', label: '舌根 TRX', min: -4, max: 2, step: 0.05, defaultVal: -0.75 },
-  { key: 'TRY', label: '舌根 TRY', min: -6, max: 0, step: 0.05, defaultVal: -1.85 },
-  { key: 'TS1', label: '舌侧 TS1', min: 0, max: 1, step: 0.02, defaultVal: 0.12 },
-  { key: 'TS2', label: '舌侧 TS2', min: 0, max: 1, step: 0.02, defaultVal: 0.08 },
-  { key: 'TS3', label: '舌侧 TS3', min: -1, max: 1, step: 0.05, defaultVal: 0.05 },
+  { key: 'LP', label: '唇突 LP', min: -1, max: 1, step: 0.02, defaultVal: -0.013, core6: true },
+  { key: 'LD', label: '唇开 LD', min: -2, max: 4, step: 0.02, defaultVal: 0.875, core6: true },
+  { key: 'JA', label: '下颌 JA', min: -7, max: 0, step: 0.05, defaultVal: -4.507, core6: true },
+  { key: 'TCX', label: '舌背 TCX', min: -3, max: 4, step: 0.05, defaultVal: 0.098, core6: true },
+  { key: 'TCY', label: '舌背 TCY', min: -3, max: 1, step: 0.05, defaultVal: -1.73, core6: true },
+  { key: 'VO', label: '鼻化 VO', min: -0.1, max: 1.5, step: 0.02, defaultVal: -0.1, core6: true },
+  { key: 'HX', label: '舌骨 HX', min: 0, max: 1, step: 0.02, defaultVal: 0.51 },
+  { key: 'HY', label: '喉高 HY', min: -6, max: -3.5, step: 0.05, defaultVal: -4.699 },
+  { key: 'JX', label: '下颌前移 JX', min: -0.5, max: 0, step: 0.02, defaultVal: -0.119 },
+  { key: 'VS', label: '软腭形状 VS', min: 0, max: 1, step: 0.02, defaultVal: 0.35 },
+  { key: 'TTX', label: '舌尖 TTX', min: 1.5, max: 7.5, step: 0.05, defaultVal: 4.753 },
+  { key: 'TTY', label: '舌尖 TTY', min: -3, max: 2.5, step: 0.05, defaultVal: -0.972 },
+  { key: 'TBX', label: '舌叶 TBX', min: -3, max: 6.5, step: 0.05, defaultVal: 2.621 },
+  { key: 'TBY', label: '舌叶 TBY', min: -3, max: 5, step: 0.05, defaultVal: -0.974 },
+  { key: 'TRX', label: '舌根 TRX', min: -4, max: 2, step: 0.05, defaultVal: -2.24 },
+  { key: 'TRY', label: '舌根 TRY', min: -6, max: 0, step: 0.05, defaultVal: -2.95 },
+  { key: 'TS1', label: '舌侧 TS1', min: 0, max: 1, step: 0.02, defaultVal: 0.3 },
+  { key: 'TS2', label: '舌侧 TS2', min: 0, max: 1, step: 0.02, defaultVal: 0.198 },
+  { key: 'TS3', label: '舌侧 TS3', min: -1, max: 1, step: 0.05, defaultVal: 0.28 },
 ];
 
 export const VTL_PARAM_ORDER: readonly TractParamName[] = [
@@ -509,14 +536,17 @@ interface HistorySnapshot {
   projectJson: string;
   assetIds: string[];
   activeClipId: string;
+  activeVoiceId: string;
   tractParams: Record<TractParamName, number>;
   tractExtras: TractPoseExtras;
   glottisParams: GlottisM27Params;
-  editedAnnotationAudio: AudioBuffer | null;
+  /** Reference ID into the bounded edited-audio cache (never stores raw AudioBuffer in snapshots) */
+  editedAnnotationAudioId: string | null;
   localEdit?: { undo: () => void; redo: () => void };
 }
 
 const STORAGE_APPEARANCE_KEY = 'vocalcut.appearance.v1';
+const STORAGE_SAVED_LOOKS_KEY = 'vocalcut.savedLooks.v1';
 const STORAGE_ZOOM_KEY = 'vocalcut.zoom.v1';
 const STORAGE_PREFS_KEY = 'vocalcut.prefs.v1';
 
@@ -594,16 +624,24 @@ export interface WorkbenchStore {
   resolvedColorMode: Ref<ColorMode>;
   paletteId: Ref<string>;
   customAccentHex: Ref<string>;
+  activePalette: Readonly<Ref<Record<string, string>>>;
+  accentPickerColor: Readonly<Ref<string>>;
   surfaceStyle: Ref<string>;
+  styleColorMode: Ref<StyleColorMode>;
   backdropId: Ref<BackdropId>;
   backdropColorScheme: Ref<string>;
   backdropCustomColors: Ref<[string, string, string]>;
+  backdropActiveColors: Readonly<Ref<readonly [string, string, string]>>;
   glassBlur: Ref<number>;
   glassAlpha: Ref<number>;
   cardAlpha: Ref<number>;
   interfaceFonts: Ref<InterfaceFonts>;
   anatomyAppearance: Ref<AnatomyAppearance>;
-  bgSat: Ref<number>;
+  backdropTreatment: Readonly<Ref<BackdropTreatment>>;
+  backdropVeilPct: Readonly<Ref<number>>;
+  backdropTreatmentAutomatic: Readonly<Ref<boolean>>;
+  savedLooks: Readonly<Ref<SavedLooksState>>;
+  activeSavedLookId: Readonly<Ref<string | null>>;
   bgCov: Ref<number>;
   waveformColorMode: Ref<WaveformColorMode>;
   waveformCustomHex: Ref<string>;
@@ -663,7 +701,7 @@ export interface WorkbenchStore {
   canRedo: ComputedRef<boolean>;
   undoCount: ComputedRef<number>;
   redoCount: ComputedRef<number>;
-  executeCommand: (cmd: WorkbenchCommand) => CommandExecResult;
+  executeCommand: (cmd: WorkbenchCommand, options?: { localEdit?: HistorySnapshot['localEdit'] }) => CommandExecResult;
   checkpointHistory: (label: string, localEdit?: HistorySnapshot['localEdit']) => void;
   getRestorableAssetIds: () => Set<string>;
   undo: () => boolean;
@@ -683,6 +721,7 @@ export interface WorkbenchStore {
   setPalette: (id: string) => void;
   setCustomAccent: (hex: string) => void;
   setSurfaceStyle: (id: string) => void;
+  setStyleColorMode: (mode: StyleColorMode) => void;
   setBackdrop: (id: BackdropId) => void;
   setBackdropColorScheme: (schemeId: string) => void;
   setBackdropCustomColors: (colors: [string, string, string]) => void;
@@ -692,12 +731,20 @@ export interface WorkbenchStore {
   setInterfaceFonts: (patch: Partial<InterfaceFonts>) => void;
   setAnatomyAppearance: (patch: Partial<AnatomyAppearance>) => void;
   setBgSat: (pct: number) => void;
+  setBackdropBlur: (px: number) => void;
+  setBackdropVeil: (pct: number) => void;
+  resetBackdropTreatment: () => void;
   setBgCov: (val: number) => void;
   setStyleOverrides: (patch: StyleOverrides) => void;
   setWaveformAppearance: (mode: WaveformColorMode, customHex?: string) => void;
   exportAppearanceJson: () => string;
   importAppearanceJson: (raw: string) => boolean;
   resetAppearance: () => void;
+  saveCurrentLook: (mode?: ColorMode, name?: string) => boolean;
+  applySavedLook: (mode: ColorMode, id: string, originEvent?: MouseEvent) => boolean;
+  updateSavedLookFromCurrent: (mode: ColorMode, id: string, nextName?: string) => boolean;
+  deleteSavedLook: (mode: ColorMode, id: string) => void;
+  toggleDefaultSavedLook: (mode: ColorMode, id: string) => void;
 
   // Layout & Zoom Actions
   setPageScale: (scale: number, manual?: boolean) => void;
@@ -712,6 +759,7 @@ export interface WorkbenchStore {
     trackScale: TimelineTrackScale;
     aiDockMode: AiDrawerDockMode;
     navPlacement: NavPlacement;
+    showSplitters: boolean;
   }>) => void;
   setComputeDevice: (device: ComputeDevice) => void;
 
@@ -814,6 +862,7 @@ function createWorkbenchStore(): WorkbenchStore {
     timelineTrackScale?: TimelineTrackScale;
     aiDrawerDockMode?: AiDrawerDockMode;
     navPlacement?: NavPlacement;
+    showSplitters?: boolean;
     aiToolsModel?: string;
     aiToolsBaseUrl?: string;
     deepSeekAsrEnabled?: boolean;
@@ -851,7 +900,12 @@ function createWorkbenchStore(): WorkbenchStore {
   const resolvedColorMode = ref<ColorMode>(resolveColorMode(themeMode.value));
   const paletteId = ref<string>(normalizePalette(urlParams.palette ?? savedApp?.paletteId ?? baseApp.paletteId));
   const customAccentHex = ref<string>(savedApp?.customAccentHex ?? baseApp.customAccentHex);
+  const activePalette = computed(() => paletteTokens(paletteId.value, resolvedColorMode.value, customAccentHex.value));
+  const accentPickerColor = computed(() => (
+    paletteId.value === 'custom' ? normalizeHex(customAccentHex.value) : undefined
+  ) ?? activePalette.value['--accent']);
   const surfaceStyle = ref<string>(normalizeSkinId(urlParams.style ?? savedApp?.surfaceStyle ?? baseApp.surfaceStyle));
+  const styleColorMode = ref<StyleColorMode>(savedApp?.styleColorMode === 'original' ? 'original' : 'current');
   const backdropId = ref<BackdropId>(normalizeBackdropId(urlParams.bg ?? savedApp?.backdropId ?? baseApp.backdropId));
   const backdropColorScheme = ref<string>(savedApp?.backdropColorScheme ?? baseApp.backdropColorScheme);
   const backdropCustomColors = ref<[string, string, string]>(
@@ -859,10 +913,13 @@ function createWorkbenchStore(): WorkbenchStore {
       ? [savedApp.backdropCustomColors[0], savedApp.backdropCustomColors[1], savedApp.backdropCustomColors[2]]
       : [...baseApp.backdropCustomColors],
   );
+  const backdropActiveColors = computed(() => backdropColorScheme.value === 'theme'
+    ? themeBackdropColors(activePalette.value)
+    : backdropCustomColors.value);
   const glassBlur = ref<number>(urlParams.blur ?? savedApp?.glassBlur ?? baseApp.glassBlur);
   const surfaceOpacity = ref<NonNullable<AppearanceConfig['surfaceOpacity']>>(savedApp?.surfaceOpacity || {});
   const defaultsForStyle = (style: string) => {
-    const values: Record<string, [number,number]> = {neumorphism:[67,64], clay:[73,72], glass:[44,45], minimal:[76,62],
+    const values: Record<string, [number,number]> = {neumorphism:[67,64], clay:[73,72], glass:[30,32], minimal:[76,62],
       material:[77,72], swiss:[82,75], bauhaus:[83,78], brutal:[84,78]};
     const [panel,card] = values[style] ?? [66,64];
     return {panel,card};
@@ -880,11 +937,38 @@ function createWorkbenchStore(): WorkbenchStore {
       : savedApp?.fonts;
   const interfaceFonts = ref(normalizeInterfaceFonts(initialFontsInput));
   const anatomyAppearance = ref(normalizeAnatomyAppearance(savedApp?.anatomy));
+  const savedBlur = savedApp?.bgBlur;
+  const bgBlur = ref<number | null>(typeof savedBlur === 'number' && Number.isFinite(savedBlur) ? savedBlur : null);
+  const savedVeil = savedApp?.bgVeil;
+  const bgVeil = ref<number | null>(typeof savedVeil === 'number' && Number.isFinite(savedVeil) ? savedVeil : null);
   const bgSat = ref<number>(savedApp?.bgSat ?? baseApp.bgSat);
+  const bgSatAuto = ref(savedApp?.bgSatAuto ?? (bgSat.value === baseApp.bgSat));
   const bgCov = ref<number>(savedApp?.bgCov ?? baseApp.bgCov);
   const waveformColorMode = ref<WaveformColorMode>(savedApp?.waveformColorMode ?? baseApp.waveformColorMode);
   const waveformCustomHex = ref<string>(savedApp?.waveformCustomHex ?? baseApp.waveformCustomHex);
   const styleOverrides = ref<StyleOverrides>({ ...(savedApp?.overrides ?? {}) });
+  const backdropTreatment = computed<BackdropTreatment>(() => {
+    const defaults = backdropTreatmentDefaults(activeWorkspaceBackground.value ? null : backdropId.value);
+    const blur = bgBlur.value ?? defaults.blurPx;
+    const saturation = styleOverrides.value.bgSat ?? (bgSatAuto.value ? defaults.saturationPct : bgSat.value);
+    return {
+      blurPx: Math.max(0, Math.min(BACKDROP_BLUR_MAX_PX, blur)),
+      saturationPct: Math.max(20, Math.min(220, saturation)),
+    };
+  });
+  const backdropVeilPct = computed<number>(() => {
+    const customImage = Boolean(activeWorkspaceBackground.value);
+    const fallback = backdropVeilDefault(customImage ? null : backdropId.value, resolvedColorMode.value, customImage);
+    const raw = bgVeil.value ?? fallback;
+    return Math.max(0, Math.min(BACKDROP_VEIL_MAX_PCT, Math.round(raw)));
+  });
+  const backdropTreatmentAutomatic = computed(() =>
+    bgBlur.value === null && bgVeil.value === null && bgSatAuto.value && styleOverrides.value.bgSat === undefined,
+  );
+  const savedLooks = ref<SavedLooksState>(
+    normalizeSavedLooksState(safeReadJson<unknown>(STORAGE_SAVED_LOOKS_KEY)),
+  );
+  const activeSavedLookId = ref<string | null>(null);
   const customSkinCounter = ref<number>(0);
 
   if (urlParams.openLab) {
@@ -898,7 +982,7 @@ function createWorkbenchStore(): WorkbenchStore {
     autoPageScale.value ? computeAutoPageScale() : (savedZoom?.scale ?? computeAutoPageScale()),
   );
   const viewportWidth = ref<number>(typeof window !== 'undefined' ? window.innerWidth : 1920);
-  const showSplitters = ref<boolean>(true);
+  const showSplitters = ref<boolean>(savedPrefs?.showSplitters !== false);
   const splitterLayoutVersion = ref<number>(0);
 
   // Selection & Transport
@@ -945,7 +1029,7 @@ function createWorkbenchStore(): WorkbenchStore {
   const generatedVoiceModes = new WeakMap<AudioBuffer,VoiceRenderMode>();
   const generatedGainModes = new WeakMap<AudioBuffer, SynthesisGainMode>();
   const renderedSynthesisInfo = new WeakMap<AudioBuffer, SynthesisInfo>();
-  const streamPlayedBuffers = new WeakSet<AudioBuffer>();
+  let streamPlayedBuffers = new WeakSet<AudioBuffer>();
   let activeStreamNodes: AudioBufferSourceNode[] = [];
   let activeVoiceGainBus: (ReturnType<typeof createVoicePlaybackBus> & { measured: boolean }) | undefined;
 
@@ -965,7 +1049,7 @@ function createWorkbenchStore(): WorkbenchStore {
     if (stale(annotationAudioBuffer.value)) annotationAudioBuffer.value = null;
     if (stale(lastAudioBuffer.value)) lastAudioBuffer.value = null;
   });
-  watch(customSpeakerAudioBase64, () => {
+  watch([customSpeakerAudioBase64, effectiveSpeakerBaseF0Hz], () => {
     const stale = (audio: AudioBuffer | null) => audio && renderedSynthesisInfo.get(audio)?.mode === 'neural';
     if (stale(annotationAudioBuffer.value)) annotationAudioBuffer.value = null;
     if (stale(lastAudioBuffer.value)) lastAudioBuffer.value = null;
@@ -997,7 +1081,7 @@ function createWorkbenchStore(): WorkbenchStore {
     const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     toasts.value = [...toasts.value.slice(-4), { id, message, kind, createdAt: Date.now() }];
     if (durationMs > 0) {
-      window.setTimeout(() => dismissToast(id), durationMs);
+      globalThis.setTimeout(() => dismissToast(id), durationMs);
     }
   };
 
@@ -1008,6 +1092,35 @@ function createWorkbenchStore(): WorkbenchStore {
   // Undo / Redo Stack
   const undoStack = ref<HistorySnapshot[]>([]);
   const redoStack = ref<HistorySnapshot[]>([]);
+  const editedAudioCache = new Map<string, AudioBuffer>();
+  const editedAudioIds = new WeakMap<AudioBuffer, string>();
+  let editedAudioSeq = 0;
+
+  const registerEditedAudioId = (buf: AudioBuffer | null): string | null => {
+    if (!buf) return null;
+    let id = editedAudioIds.get(buf);
+    if (!id) {
+      id = `edited_audio_${++editedAudioSeq}`;
+      editedAudioIds.set(buf, id);
+    }
+    editedAudioCache.set(id, buf);
+    return id;
+  };
+
+  const pruneEditedAudioCache = (): void => {
+    const liveIds = new Set<string>();
+    if (editedAnnotationAudio.value) {
+      const curId = editedAudioIds.get(editedAnnotationAudio.value);
+      if (curId) liveIds.add(curId);
+    }
+    for (const snap of [...undoStack.value, ...redoStack.value]) {
+      if (snap.editedAnnotationAudioId) liveIds.add(snap.editedAnnotationAudioId);
+    }
+    for (const id of Array.from(editedAudioCache.keys())) {
+      if (!liveIds.has(id)) editedAudioCache.delete(id);
+    }
+  };
+
   const canUndo = computed(() => undoStack.value.length > 0);
   const canRedo = computed(() => redoStack.value.length > 0);
   const undoCount = computed(() => undoStack.value.length);
@@ -1016,12 +1129,13 @@ function createWorkbenchStore(): WorkbenchStore {
   const captureSnapshot = (label: string): HistorySnapshot => ({
     label,
     activeClipId: activeClipId.value,
+    activeVoiceId: activeVoiceId.value,
     projectJson: JSON.stringify(project.value),
     assetIds: Object.keys(project.value.assets),
     tractParams: { ...currentTractParams.value },
     tractExtras: cloneTractExtras(currentTractExtras.value),
     glottisParams: { ...currentGlottisParams.value },
-    editedAnnotationAudio: editedAnnotationAudio.value,
+    editedAnnotationAudioId: registerEditedAudioId(editedAnnotationAudio.value),
   });
 
   const getRestorableAssetIds = (): Set<string> => {
@@ -1033,23 +1147,36 @@ function createWorkbenchStore(): WorkbenchStore {
   };
 
   const restoreSnapshot = (snap: HistorySnapshot): void => {
-    project.value = JSON.parse(snap.projectJson) as VcProject;
+    // Keep revision strictly monotonic across undo/redo to prevent ABA proposal conflicts
+    const nextRevision = project.value.revision + 1;
+    const restored = JSON.parse(snap.projectJson) as VcProject;
+    restored.revision = nextRevision;
+    project.value = restored;
     activeClipId.value = snap.activeClipId;
+    if (snap.activeVoiceId && restored.voices[snap.activeVoiceId]) {
+      activeVoiceId.value = snap.activeVoiceId;
+    } else if (restored.voice_order[0]) {
+      activeVoiceId.value = restored.voice_order[0];
+    }
     currentTractParams.value = { ...snap.tractParams };
     currentTractExtras.value = cloneTractExtras(snap.tractExtras);
     currentGlottisParams.value = { ...snap.glottisParams };
-    editedAnnotationAudio.value = snap.editedAnnotationAudio;
+    editedAnnotationAudio.value = snap.editedAnnotationAudioId
+      ? (editedAudioCache.get(snap.editedAnnotationAudioId) ?? null)
+      : null;
     currentMetrics.value = computeAnalyticalMetrics(currentTractParams.value);
+    pruneEditedAudioCache();
   };
 
   const checkpointHistory = (label: string, localEdit?: HistorySnapshot['localEdit']): void => {
     undoStack.value = [...undoStack.value.slice(-99), { ...captureSnapshot(label), localEdit }];
     redoStack.value = [];
+    pruneEditedAudioCache();
   };
 
   /**
    * Apply a single command directly onto target state (project + tract + glottis).
-   * Rejects out-of-range inputs without silent clamping.
+   * Rejects invalid keys/NaN with `validation_error` and out-of-range inputs with `out_of_range`.
    */
   const applySingleCommandToState = (
     targetProject: VcProject,
@@ -1062,25 +1189,115 @@ function createWorkbenchStore(): WorkbenchStore {
 
     switch (cmd.type) {
       case 'artic.set_pose': {
-        const delta = (p.delta ?? p.params ?? {}) as TractDelta;
-        for (const [k, rawVal] of Object.entries(delta)) {
-          const meta = VTL_PARAM_META.find((m) => m.key === k);
-          if (!meta || typeof rawVal !== 'number' || !Number.isFinite(rawVal)) continue;
-          if (rawVal < meta.min - 0.001 || rawVal > meta.max + 0.001) {
+        const metaByKey = new Map(VTL_PARAM_META.map((m) => [m.key as string, m]));
+        const invalidFields: string[] = [];
+        const resolvedUpdates: Array<{ meta: (typeof VTL_PARAM_META)[number]; nextVal: number }> = [];
+
+        // 1. Absolute `params` payload: supports 19-dim array or Partial<Record<TractParamName, number>>
+        if (p.params !== undefined) {
+          if (Array.isArray(p.params)) {
+            if (p.params.length !== VTL_PARAM_ORDER.length) {
+              return {
+                ok: false,
+                error: {
+                  code: 'validation_error',
+                  field: 'params',
+                  value: p.params.length,
+                  hint: `params 数组必须为 ${VTL_PARAM_ORDER.length} 维声道参数`,
+                },
+              };
+            }
+            for (let i = 0; i < VTL_PARAM_ORDER.length; i++) {
+              const key = VTL_PARAM_ORDER[i];
+              const meta = metaByKey.get(key)!;
+              const rawVal = p.params[i];
+              if (typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
+                invalidFields.push(`params[${key}]`);
+                continue;
+              }
+              resolvedUpdates.push({ meta, nextVal: rawVal });
+            }
+          } else if (p.params && typeof p.params === 'object') {
+            for (const [k, rawVal] of Object.entries(p.params as Record<string, unknown>)) {
+              if (rawVal === undefined) continue;
+              const meta = metaByKey.get(k);
+              if (!meta || typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
+                invalidFields.push(`params.${k}`);
+                continue;
+              }
+              resolvedUpdates.push({ meta, nextVal: rawVal });
+            }
+          } else {
+            return {
+              ok: false,
+              error: {
+                code: 'validation_error',
+                field: 'params',
+                value: p.params,
+                hint: 'params 必须为 19 维数值数组或声道参数键值对象',
+              },
+            };
+          }
+        }
+
+        // 2. Relative `delta` payload: matches core CommandBus relative-offset semantics
+        if (p.delta !== undefined) {
+          if (!p.delta || typeof p.delta !== 'object' || Array.isArray(p.delta)) {
+            return {
+              ok: false,
+              error: {
+                code: 'validation_error',
+                field: 'delta',
+                value: p.delta,
+                hint: 'delta 必须为声道参数相对增量键值对象',
+              },
+            };
+          }
+          for (const [k, rawDelta] of Object.entries(p.delta as Record<string, unknown>)) {
+            if (rawDelta === undefined) continue;
+            const meta = metaByKey.get(k);
+            if (!meta || typeof rawDelta !== 'number' || !Number.isFinite(rawDelta)) {
+              invalidFields.push(`delta.${k}`);
+              continue;
+            }
+            const baseVal = targetTract[meta.key];
+            resolvedUpdates.push({ meta, nextVal: Number((baseVal + rawDelta).toFixed(6)) });
+          }
+        }
+
+        if (invalidFields.length > 0) {
+          return {
+            ok: false,
+            error: {
+              code: 'validation_error',
+              field: invalidFields[0],
+              value: invalidFields,
+              allowed: [...VTL_PARAM_ORDER],
+              hint: `声道参数包含非法键或非有限数值: ${invalidFields.join(', ')}`,
+            },
+          };
+        }
+
+        // Validate bounds before mutating any state (atomic all-or-nothing)
+        for (const { meta, nextVal } of resolvedUpdates) {
+          if (nextVal < meta.min - 1e-6 || nextVal > meta.max + 1e-6) {
             return {
               ok: false,
               error: {
                 code: 'out_of_range',
-                field: `tract.${k}`,
-                value: rawVal,
+                field: `tract.${meta.key}`,
+                value: nextVal,
                 allowed: { min: meta.min, max: meta.max, unit: 'vtl' },
-                hint: `声道参数 ${k} (${rawVal}) 超出解剖边界 [${meta.min}, ${meta.max}]`,
+                hint: `声道参数 ${meta.key} (${nextVal}) 超出解剖边界 [${meta.min}, ${meta.max}]`,
               },
             };
           }
+        }
+
+        for (const { meta, nextVal } of resolvedUpdates) {
           const prev = targetTract[meta.key];
-          targetTract[meta.key] = rawVal;
-          changes.push({ field: meta.label, before: prev.toFixed(2), after: rawVal.toFixed(2) });
+          targetTract[meta.key] = nextVal;
+          changes.push({ field: meta.label, before: prev.toFixed(2), after: nextVal.toFixed(2) });
         }
 
         // Also update selected phoneme segment params if syllable_id / segment_id provided
@@ -1142,16 +1359,11 @@ function createWorkbenchStore(): WorkbenchStore {
       case 'f0.set_targets': {
         const f0Hz = p.f0_hz !== undefined ? Number(p.f0_hz) : undefined;
         if (f0Hz !== undefined) {
-          if (!Number.isFinite(f0Hz) || f0Hz < F0_LIMIT_HZ.min || f0Hz > F0_LIMIT_HZ.max) {
+          const f0Chk = assertValidF0Hz('f0_hz', f0Hz);
+          if (!f0Chk.ok) {
             return {
               ok: false,
-              error: {
-                code: 'out_of_range',
-                field: 'f0_hz',
-                value: f0Hz,
-                allowed: { min: F0_LIMIT_HZ.min, max: F0_LIMIT_HZ.max, unit: 'Hz' },
-                hint: `基频 F0 (${f0Hz} Hz) 超出 VTL 物理声源极限 [${F0_LIMIT_HZ.min}, ${F0_LIMIT_HZ.max}] Hz`,
-              },
+              error: f0Chk.error,
             };
           }
           const prev = targetGlottis.f0_hz;
@@ -1164,8 +1376,26 @@ function createWorkbenchStore(): WorkbenchStore {
           const syll = clip.syllables[syllId];
           const bEndSt = typeof p.b_end_st === 'number' ? p.b_end_st : undefined;
           const mStPerS = typeof p.m_st_per_s === 'number' ? p.m_st_per_s : undefined;
-          const span = syll.targets[0];
-          if (span && (bEndSt !== undefined || mStPerS !== undefined)) {
+          if (bEndSt !== undefined || mStPerS !== undefined) {
+            let span = syll.targets[0];
+            if (!span) {
+              span = {
+                id: `${syll.id}_t0`,
+                span_id: syll.id,
+                start_smp: syll.start_smp,
+                end_smp: syll.end_smp,
+                voiced: true,
+                candidates: {
+                  default: {
+                    m_st_per_s: 0,
+                    b_end_st: 0,
+                    lambda_per_s: 28,
+                    source: 'default',
+                  },
+                },
+              };
+              syll.targets.push(span);
+            }
             const prevCand = span.candidates.user ?? span.candidates.default;
             span.candidates.user = {
               m_st_per_s: mStPerS ?? prevCand?.m_st_per_s ?? 0,
@@ -1186,16 +1416,11 @@ function createWorkbenchStore(): WorkbenchStore {
       case 'f0.draw': {
         const points = (p.points ?? []) as Array<{ t_smp: number; f0_hz: number }>;
         for (const pt of points) {
-          if (!Number.isFinite(pt.f0_hz) || pt.f0_hz < F0_LIMIT_HZ.min || pt.f0_hz > F0_LIMIT_HZ.max) {
+          const ptChk = assertValidF0Hz('f0.draw.f0_hz', pt.f0_hz);
+          if (!ptChk.ok) {
             return {
               ok: false,
-              error: {
-                code: 'out_of_range',
-                field: 'f0.draw.f0_hz',
-                value: pt.f0_hz,
-                allowed: { min: F0_LIMIT_HZ.min, max: F0_LIMIT_HZ.max, unit: 'Hz' },
-                hint: `手绘基频点 (${pt.f0_hz} Hz) 超出 [60, 600] Hz 范围`,
-              },
+              error: ptChk.error,
             };
           }
         }
@@ -1523,6 +1748,40 @@ function createWorkbenchStore(): WorkbenchStore {
       case 'subtitle.style': {
         const layer = stageLayer(targetProject, 'v3');
         if (!layer?.style) return { ok: false, error: { code: 'not_found', hint: '工程没有可编辑的字幕图层' } };
+        if (p.font_size_px !== undefined) {
+          const check = assertInRange('font_size_px', Number(p.font_size_px), 8, 240, 'px', '字幕字号须在 8–240 px 之间');
+          if (!check.ok) return check;
+        }
+        if (p.tilt_deg !== undefined) {
+          const check = assertInRange('tilt_deg', Number(p.tilt_deg), -180, 180, '°', '字幕倾斜角须在 -180° 至 180° 之间');
+          if (!check.ok) return check;
+        }
+        if (p.size_jitter && typeof p.size_jitter === 'object') {
+          const j = p.size_jitter as { min_pct?: unknown; max_pct?: unknown; seed?: unknown };
+          const cMin = assertInRange('size_jitter.min_pct', Number(j.min_pct), 20, 300, '%', '抖动下限须在 20%–300%');
+          if (!cMin.ok) return cMin;
+          const cMax = assertInRange('size_jitter.max_pct', Number(j.max_pct), 20, 300, '%', '抖动上限须在 20%–300%');
+          if (!cMax.ok) return cMax;
+          if (cMin.value > cMax.value) {
+            return { ok: false, error: { code: 'validation_error', hint: '字幕字号抖动下限不能大于上限' } };
+          }
+          if (!Number.isSafeInteger(j.seed)) {
+            return { ok: false, error: { code: 'validation_error', hint: '字幕字号抖动种子须为整数' } };
+          }
+        }
+        if (p.angle_jitter && typeof p.angle_jitter === 'object') {
+          const j = p.angle_jitter as { min_deg?: unknown; max_deg?: unknown; seed?: unknown };
+          const cMin = assertInRange('angle_jitter.min_deg', Number(j.min_deg), -90, 90, '°', '角度抖动下限须在 -90° 至 90°');
+          if (!cMin.ok) return cMin;
+          const cMax = assertInRange('angle_jitter.max_deg', Number(j.max_deg), -90, 90, '°', '角度抖动上限须在 -90° 至 90°');
+          if (!cMax.ok) return cMax;
+          if (cMin.value > cMax.value) {
+            return { ok: false, error: { code: 'validation_error', hint: '字幕角度抖动下限不能大于上限' } };
+          }
+          if (!Number.isSafeInteger(j.seed)) {
+            return { ok: false, error: { code: 'validation_error', hint: '字幕角度抖动种子须为整数' } };
+          }
+        }
         const prevMode = layer.style.reveal_mode;
         Object.assign(layer.style, p);
         changes.push({ field: '字幕样式', before: prevMode, after: layer.style.reveal_mode });
@@ -1578,15 +1837,22 @@ function createWorkbenchStore(): WorkbenchStore {
 
       case 'project.replace': {
         const incoming = p.project as VcProject | undefined;
-        if (!incoming || incoming.schema !== 'vocalcut/project') {
+        if (!incoming || incoming.schema !== 'vocalcut/project' || typeof incoming.clips !== 'object' ||
+            typeof incoming.layers !== 'object' || typeof incoming.settings !== 'object') {
           return {
             ok: false,
-            error: { code: 'validation_error', hint: '无效的 .vcproj 文件格式（缺少 vocalcut/project schema）' },
+            error: { code: 'validation_error', hint: '无效的 .vcproj 文件格式（缺少 vocalcut/project schema 或核心工程字段）' },
           };
         }
-        if (!incoming.arrangements) delete targetProject.arrangements;
-        Object.assign(targetProject, JSON.parse(JSON.stringify(incoming)));
-        changes.push({ field: '工程载入', before: targetProject.name, after: incoming.name });
+        const prevName = targetProject.name;
+        const cloned = JSON.parse(JSON.stringify(incoming)) as VcProject;
+        for (const key of ['arrangements', 'f0_pins', 'vibrato', 'perturbation'] as const) {
+          if (!(key in cloned) || cloned[key] === undefined) {
+            delete targetProject[key];
+          }
+        }
+        Object.assign(targetProject, cloned);
+        changes.push({ field: '工程载入', before: prevName, after: incoming.name });
         return { ok: true, changes };
       }
 
@@ -1602,7 +1868,10 @@ function createWorkbenchStore(): WorkbenchStore {
     }
   };
 
-  const executeCommand = (cmd: WorkbenchCommand): CommandExecResult => {
+  const executeCommand = (
+    cmd: WorkbenchCommand,
+    options?: { localEdit?: HistorySnapshot['localEdit'] },
+  ): CommandExecResult => {
     const clonedProject = JSON.parse(JSON.stringify(project.value)) as VcProject;
     const clonedTract = { ...currentTractParams.value };
     const clonedGlottis = { ...currentGlottisParams.value };
@@ -1613,7 +1882,7 @@ function createWorkbenchStore(): WorkbenchStore {
       return { ok: false, revision: project.value.revision, error: res.error };
     }
 
-    checkpointHistory(cmd.label ?? cmd.type);
+    checkpointHistory(cmd.label ?? cmd.type, options?.localEdit);
 
     clonedProject.revision = project.value.revision + 1;
     project.value = clonedProject;
@@ -1681,6 +1950,7 @@ function createWorkbenchStore(): WorkbenchStore {
     customAccentHex: customAccentHex.value,
     themeMode: themeMode.value,
     surfaceStyle: surfaceStyle.value,
+    styleColorMode: styleColorMode.value,
     backdropId: backdropId.value,
     backdropColorScheme: backdropColorScheme.value,
     backdropCustomColors: [...backdropCustomColors.value],
@@ -1691,7 +1961,10 @@ function createWorkbenchStore(): WorkbenchStore {
     fontDefaultVersion: 2,
     anatomy: { ...anatomyAppearance.value },
     surfaceOpacity: { ...surfaceOpacity.value, [surfaceStyle.value]: { panel: glassAlpha.value, card: cardAlpha.value } },
+    bgBlur: bgBlur.value,
+    bgVeil: bgVeil.value,
     bgSat: bgSat.value,
+    bgSatAuto: bgSatAuto.value,
     bgCov: bgCov.value,
     waveformColorMode: waveformColorMode.value,
     waveformCustomHex: waveformCustomHex.value,
@@ -1704,6 +1977,7 @@ function createWorkbenchStore(): WorkbenchStore {
     document.documentElement.dataset.trackScale = timelineTrackScale.value;
     document.documentElement.dataset.aiDock = aiDrawerDockMode.value;
     document.documentElement.dataset.navPlacement = navPlacement.value;
+    document.body?.classList.toggle('hide-splitters', !showSplitters.value);
   };
 
   const syncAppearance = (): void => {
@@ -1723,6 +1997,7 @@ function createWorkbenchStore(): WorkbenchStore {
       timelineTrackScale: timelineTrackScale.value,
       aiDrawerDockMode: aiDrawerDockMode.value,
       navPlacement: navPlacement.value,
+      showSplitters: showSplitters.value,
       aiToolsModel: aiToolsModel.value,
       aiToolsBaseUrl: aiToolsBaseUrl.value,
       deepSeekAsrEnabled: deepSeekAsrEnabled.value,
@@ -1730,21 +2005,189 @@ function createWorkbenchStore(): WorkbenchStore {
     });
   };
 
+  const persistSavedLooks = (next: SavedLooksState): void => {
+    savedLooks.value = next;
+    safeWriteJson(STORAGE_SAVED_LOOKS_KEY, next);
+  };
+
+  const captureCurrentLookSnapshot = (): SavedLookSnapshot => ({
+    appearance: buildAppearanceConfig(),
+    customBackgroundId: activeWorkspaceBackground.value?.id ?? null,
+    layout: {
+      density: layoutDensity.value,
+      navPlacement: navPlacement.value,
+      trackScale: timelineTrackScale.value,
+      aiDockMode: aiDrawerDockMode.value,
+      defaultTractViewMode: defaultTractViewMode.value,
+      showSplitters: showSplitters.value,
+      pageScale: pageScale.value,
+      autoPageScale: autoPageScale.value,
+    },
+  });
+
+  const applySavedLookSnapshot = (preset: SavedLookPreset, nextThemeMode?: ThemeMode): void => {
+    const a = preset.appearance;
+    const prevNav = navPlacement.value;
+    themeMode.value = nextThemeMode ?? preset.mode;
+    paletteId.value = normalizePalette(a.paletteId);
+    if (typeof a.customAccentHex === 'string') customAccentHex.value = a.customAccentHex;
+    surfaceStyle.value = normalizeSkinId(a.surfaceStyle);
+    styleColorMode.value = a.styleColorMode === 'original' ? 'original' : 'current';
+    backdropId.value = normalizeBackdropId(a.backdropId);
+    if (typeof a.backdropColorScheme === 'string') backdropColorScheme.value = a.backdropColorScheme;
+    if (Array.isArray(a.backdropCustomColors) && a.backdropCustomColors.length === 3) {
+      backdropCustomColors.value = [a.backdropCustomColors[0], a.backdropCustomColors[1], a.backdropCustomColors[2]];
+    }
+    if (typeof a.glassBlur === 'number') glassBlur.value = a.glassBlur;
+    surfaceOpacity.value = a.surfaceOpacity ? { ...a.surfaceOpacity } : {};
+    cardAlpha.value = Number.isFinite(a.cardAlpha)
+      ? Math.min(100, Math.max(15, a.cardAlpha!))
+      : defaultsForStyle(surfaceStyle.value).card;
+    glassAlpha.value = Number.isFinite(a.glassAlpha)
+      ? Math.min(98, Math.max(16, a.glassAlpha))
+      : defaultsForStyle(surfaceStyle.value).panel;
+    interfaceFonts.value = normalizeInterfaceFonts(a.fonts);
+    anatomyAppearance.value = normalizeAnatomyAppearance(a.anatomy);
+    bgBlur.value = a.bgBlur === null || (typeof a.bgBlur === 'number' && Number.isFinite(a.bgBlur)) ? a.bgBlur : null;
+    bgVeil.value = a.bgVeil === null || (typeof a.bgVeil === 'number' && Number.isFinite(a.bgVeil)) ? a.bgVeil : null;
+    if (typeof a.bgSat === 'number' && Number.isFinite(a.bgSat)) bgSat.value = a.bgSat;
+    bgSatAuto.value = a.bgSatAuto !== false;
+    if (typeof a.bgCov === 'number' && Number.isFinite(a.bgCov)) bgCov.value = a.bgCov;
+    if (a.waveformColorMode === 'theme' || a.waveformColorMode === 'blue' || a.waveformColorMode === 'custom') {
+      waveformColorMode.value = a.waveformColorMode;
+    }
+    if (typeof a.waveformCustomHex === 'string') waveformCustomHex.value = a.waveformCustomHex;
+    styleOverrides.value = a.overrides && typeof a.overrides === 'object' ? { ...a.overrides } : {};
+    selectWorkspaceBackground(preset.customBackgroundId ?? null);
+
+    layoutDensity.value = preset.layout.density;
+    navPlacement.value = preset.layout.navPlacement;
+    timelineTrackScale.value = preset.layout.trackScale;
+    aiDrawerDockMode.value = preset.layout.aiDockMode;
+    defaultTractViewMode.value = preset.layout.defaultTractViewMode;
+    showSplitters.value = preset.layout.showSplitters;
+    autoPageScale.value = preset.layout.autoPageScale;
+    pageScale.value = applyPageScaleToRoot(
+      preset.layout.autoPageScale ? computeAutoPageScale() : preset.layout.pageScale,
+    );
+    safeWriteJson(STORAGE_ZOOM_KEY, { scale: pageScale.value, auto: autoPageScale.value });
+
+    activeSavedLookId.value = preset.id;
+    syncAppearance();
+    persistPrefs();
+    if (prevNav !== navPlacement.value && typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    }
+  };
+
   const setThemeMode = (mode: ThemeMode, originEvent?: MouseEvent): void => {
     const next = normalizeMode(mode);
     if (next === themeMode.value) return;
+    const nextResolved = resolveColorMode(next);
+    const switchingPolarity = nextResolved !== resolvedColorMode.value;
+    const defaultId = switchingPolarity ? savedLooks.value.defaultIds[nextResolved] : null;
+    const defaultPreset = defaultId
+      ? savedLooks.value[nextResolved].find((item) => item.id === defaultId) ?? null
+      : null;
     runThemeViewTransition(() => {
-      themeMode.value = next;
-      syncAppearance();
+      if (defaultPreset) {
+        applySavedLookSnapshot(defaultPreset, next);
+      } else {
+        themeMode.value = next;
+        syncAppearance();
+      }
     }, originEvent);
   };
 
   const toggleColorMode = (originEvent?: MouseEvent): void => {
-    const next: ThemeMode = resolvedColorMode.value === 'dark' ? 'light' : 'dark';
+    const next: ColorMode = resolvedColorMode.value === 'dark' ? 'light' : 'dark';
+    const defaultId = savedLooks.value.defaultIds[next];
+    const defaultPreset = defaultId
+      ? savedLooks.value[next].find((item) => item.id === defaultId) ?? null
+      : null;
     runThemeViewTransition(() => {
-      themeMode.value = next;
-      syncAppearance();
+      if (defaultPreset) {
+        applySavedLookSnapshot(defaultPreset, next);
+      } else {
+        themeMode.value = next;
+        syncAppearance();
+      }
     }, originEvent);
+  };
+
+  const saveCurrentLook = (mode?: ColorMode, name?: string): boolean => {
+    const targetMode: ColorMode = mode ?? resolvedColorMode.value;
+    const skinName = getSkin(surfaceStyle.value)?.shortName ?? surfaceStyle.value;
+    const palName = paletteShortName(paletteId.value);
+    const autoName = name && name.trim() ? name.trim() : `${skinName} · ${palName}`;
+    const result = saveLookPreset(
+      savedLooks.value,
+      targetMode,
+      autoName,
+      captureCurrentLookSnapshot(),
+    );
+    if (!result.ok) {
+      pushToast(
+        `${targetMode === 'dark' ? '夜间' : '日间'}默认搭配最多保存 ${result.max} 份，请先删除或覆盖已有方案`,
+        'warning',
+        2600,
+      );
+      return false;
+    }
+    persistSavedLooks(result.state);
+    activeSavedLookId.value = result.preset.id;
+    pushToast(`已保存${targetMode === 'dark' ? '夜间' : '日间'}搭配「${result.preset.name}」`, 'success', 2200);
+    return true;
+  };
+
+  const applySavedLook = (mode: ColorMode, id: string, originEvent?: MouseEvent): boolean => {
+    const preset = savedLooks.value[mode].find((item) => item.id === id);
+    if (!preset) return false;
+    runThemeViewTransition(() => {
+      applySavedLookSnapshot(preset, mode);
+    }, originEvent);
+    pushToast(`已切换至「${preset.name}」`, 'info', 1800);
+    return true;
+  };
+
+  const updateSavedLookFromCurrent = (mode: ColorMode, id: string, nextName?: string): boolean => {
+    const exists = savedLooks.value[mode].find((item) => item.id === id);
+    if (!exists) return false;
+    const next = updateLookPreset(
+      savedLooks.value,
+      mode,
+      id,
+      captureCurrentLookSnapshot(),
+      nextName,
+    );
+    persistSavedLooks(next);
+    activeSavedLookId.value = id;
+    pushToast(`已用当前布局与外观更新「${nextName?.trim() || exists.name}」`, 'success', 2000);
+    return true;
+  };
+
+  const deleteSavedLook = (mode: ColorMode, id: string): void => {
+    const target = savedLooks.value[mode].find((item) => item.id === id);
+    if (!target) return;
+    persistSavedLooks(deleteLookPreset(savedLooks.value, mode, id));
+    if (activeSavedLookId.value === id) activeSavedLookId.value = null;
+    pushToast(`已删除搭配「${target.name}」`, 'info', 1800);
+  };
+
+  const toggleDefaultSavedLook = (mode: ColorMode, id: string): void => {
+    const target = savedLooks.value[mode].find((item) => item.id === id);
+    if (!target) return;
+    const isCurrentDefault = savedLooks.value.defaultIds[mode] === id;
+    const next = setDefaultLookPreset(savedLooks.value, mode, isCurrentDefault ? null : id);
+    persistSavedLooks(next);
+    const label = mode === 'dark' ? '夜间' : '日间';
+    pushToast(
+      isCurrentDefault
+        ? `已取消「${target.name}」的${label}默认身份`
+        : `已将「${target.name}」设为${label}默认，切换明暗时自动生效`,
+      'success',
+      2400,
+    );
   };
 
   const setPalette = (id: string): void => {
@@ -1758,14 +2201,39 @@ function createWorkbenchStore(): WorkbenchStore {
     syncAppearance();
   };
 
+  const setStyleColorMode = (mode: StyleColorMode): void => {
+    styleColorMode.value = mode;
+    syncAppearance();
+  };
+
   const setSurfaceStyle = (id: string): void => {
     surfaceOpacity.value = { ...surfaceOpacity.value, [surfaceStyle.value]: { panel: glassAlpha.value, card: cardAlpha.value } };
     surfaceStyle.value = normalizeSkinId(id);
-    const opacity = surfaceOpacity.value[surfaceStyle.value] ?? defaultsForStyle(surfaceStyle.value);
-    glassAlpha.value = opacity.panel;
-    cardAlpha.value = opacity.card;
-    // Reset per-skin overrides when switching presets so each skin shows its authentic geometry
-    styleOverrides.value = {};
+    const originalPalette = originalSurfacePaletteId(surfaceStyle.value);
+    if (styleColorMode.value === 'original' && originalPalette) {
+      const opacity = defaultsForStyle(surfaceStyle.value);
+      selectWorkspaceBackground(null);
+      paletteId.value = originalPalette;
+      backdropId.value = baseApp.backdropId;
+      backdropColorScheme.value = baseApp.backdropColorScheme;
+      backdropCustomColors.value = [...baseApp.backdropCustomColors];
+      glassBlur.value = surfaceStyle.value === 'glass' ? 10 : baseApp.glassBlur;
+      glassAlpha.value = opacity.panel;
+      cardAlpha.value = opacity.card;
+      bgBlur.value = null;
+      bgVeil.value = null;
+      bgSat.value = baseApp.bgSat;
+      bgSatAuto.value = true;
+      bgCov.value = baseApp.bgCov;
+      styleOverrides.value = {};
+    } else {
+      const opacity = surfaceOpacity.value[surfaceStyle.value] ?? defaultsForStyle(surfaceStyle.value);
+      glassAlpha.value = opacity.panel;
+      cardAlpha.value = opacity.card;
+      if (surfaceStyle.value === 'glass' && glassBlur.value < 10) {
+        glassBlur.value = 10;
+      }
+    }
     syncAppearance();
   };
 
@@ -1815,7 +2283,7 @@ function createWorkbenchStore(): WorkbenchStore {
   };
 
   const setGlassAlpha = (pct: number): void => {
-    glassAlpha.value = Math.max(25, Math.min(98, Math.round(pct)));
+    glassAlpha.value = Math.max(16, Math.min(98, Math.round(pct)));
     if (styleOverrides.value.glassAlpha !== undefined) {
       styleOverrides.value = { ...styleOverrides.value, glassAlpha: glassAlpha.value };
     }
@@ -1823,7 +2291,37 @@ function createWorkbenchStore(): WorkbenchStore {
   };
 
   const setBgSat = (pct: number): void => {
+    if (!Number.isFinite(pct)) return;
     bgSat.value = Math.max(20, Math.min(220, Math.round(pct)));
+    bgSatAuto.value = false;
+    if (styleOverrides.value.bgSat !== undefined) {
+      styleOverrides.value = { ...styleOverrides.value, bgSat: bgSat.value };
+    }
+    syncAppearance();
+  };
+
+  const setBackdropBlur = (px: number): void => {
+    if (!Number.isFinite(px)) return;
+    bgBlur.value = Math.max(0, Math.min(BACKDROP_BLUR_MAX_PX, Math.round(px)));
+    syncAppearance();
+  };
+
+  const setBackdropVeil = (pct: number): void => {
+    if (!Number.isFinite(pct)) return;
+    bgVeil.value = Math.max(0, Math.min(BACKDROP_VEIL_MAX_PCT, Math.round(pct)));
+    syncAppearance();
+  };
+
+  const resetBackdropTreatment = (): void => {
+    bgBlur.value = null;
+    bgVeil.value = null;
+    bgSat.value = baseApp.bgSat;
+    bgSatAuto.value = true;
+    if (styleOverrides.value.bgSat !== undefined) {
+      const overrides = { ...styleOverrides.value };
+      delete overrides.bgSat;
+      styleOverrides.value = overrides;
+    }
     syncAppearance();
   };
 
@@ -1863,6 +2361,7 @@ function createWorkbenchStore(): WorkbenchStore {
       if (c.customAccentHex) customAccentHex.value = c.customAccentHex;
       if (c.themeMode) themeMode.value = normalizeMode(c.themeMode);
       if (c.surfaceStyle) surfaceStyle.value = normalizeSkinId(c.surfaceStyle);
+      if (c.styleColorMode === 'current' || c.styleColorMode === 'original') styleColorMode.value = c.styleColorMode;
       if (c.backdropId) backdropId.value = normalizeBackdropId(c.backdropId);
       if (c.backdropColorScheme) backdropColorScheme.value = c.backdropColorScheme;
       if (Array.isArray(c.backdropCustomColors) && c.backdropCustomColors.length === 3) {
@@ -1875,8 +2374,19 @@ function createWorkbenchStore(): WorkbenchStore {
       if (typeof c.glassAlpha === 'number') glassAlpha.value = c.glassAlpha;
       if (c.fonts) interfaceFonts.value = normalizeInterfaceFonts(c.fonts);
       if (c.anatomy) anatomyAppearance.value = normalizeAnatomyAppearance(c.anatomy);
-      if (typeof c.bgSat === 'number') bgSat.value = c.bgSat;
+      if (c.bgBlur === null || (typeof c.bgBlur === 'number' && Number.isFinite(c.bgBlur))) bgBlur.value = c.bgBlur;
+      if (c.bgVeil === null || (typeof c.bgVeil === 'number' && Number.isFinite(c.bgVeil))) bgVeil.value = c.bgVeil;
+      if (typeof c.bgSat === 'number' && Number.isFinite(c.bgSat)) {
+        bgSat.value = c.bgSat;
+        bgSatAuto.value = c.bgSatAuto ?? (c.bgSat === baseApp.bgSat);
+      } else if (typeof c.bgSatAuto === 'boolean') {
+        bgSatAuto.value = c.bgSatAuto;
+      }
       if (typeof c.bgCov === 'number') bgCov.value = c.bgCov;
+      if (c.waveformColorMode === 'theme' || c.waveformColorMode === 'blue' || c.waveformColorMode === 'custom') {
+        waveformColorMode.value = c.waveformColorMode;
+      }
+      if (typeof c.waveformCustomHex === 'string') waveformCustomHex.value = c.waveformCustomHex;
       if (c.overrides && typeof c.overrides === 'object') styleOverrides.value = { ...c.overrides };
       syncAppearance();
       return true;
@@ -1892,6 +2402,7 @@ function createWorkbenchStore(): WorkbenchStore {
     customAccentHex.value = def.customAccentHex;
     themeMode.value = def.themeMode;
     surfaceStyle.value = def.surfaceStyle;
+    styleColorMode.value = 'current';
     backdropId.value = def.backdropId;
     backdropColorScheme.value = def.backdropColorScheme;
     backdropCustomColors.value = [...def.backdropCustomColors];
@@ -1901,7 +2412,10 @@ function createWorkbenchStore(): WorkbenchStore {
     glassAlpha.value = defaultsForStyle(def.surfaceStyle).panel;
     interfaceFonts.value = normalizeInterfaceFonts();
     anatomyAppearance.value = normalizeAnatomyAppearance();
+    bgBlur.value = null;
+    bgVeil.value = null;
     bgSat.value = def.bgSat;
+    bgSatAuto.value = true;
     bgCov.value = def.bgCov;
     waveformColorMode.value = def.waveformColorMode;
     waveformCustomHex.value = def.waveformCustomHex;
@@ -1956,6 +2470,7 @@ function createWorkbenchStore(): WorkbenchStore {
     trackScale: TimelineTrackScale;
     aiDockMode: AiDrawerDockMode;
     navPlacement: NavPlacement;
+    showSplitters: boolean;
   }>): void => {
     const placementChanged = patch.navPlacement !== undefined && patch.navPlacement !== navPlacement.value;
     if (patch.density) layoutDensity.value = patch.density;
@@ -1963,6 +2478,7 @@ function createWorkbenchStore(): WorkbenchStore {
     if (patch.trackScale) timelineTrackScale.value = patch.trackScale;
     if (patch.aiDockMode) aiDrawerDockMode.value = patch.aiDockMode;
     if (patch.navPlacement) navPlacement.value = patch.navPlacement;
+    if (typeof patch.showSplitters === 'boolean') showSplitters.value = patch.showSplitters;
     applyLayoutAttributes();
     persistPrefs();
     if (placementChanged && typeof window !== 'undefined') {
@@ -1998,21 +2514,14 @@ function createWorkbenchStore(): WorkbenchStore {
     if (activeProbePromise) return activeProbePromise;
     engineStatus.value = 'checking';
     activeProbePromise = (async () => {
-      try {
-        const res = await fetch('/api/vtl/meta', { signal: AbortSignal.timeout(4000) });
-        const ct = (res.headers.get('content-type') ?? '').toLowerCase();
-        if (res.ok && ct.includes('application/json')) {
-          const meta = (await res.json()) as Record<string, unknown>;
-          if (meta && meta.ok !== false) {
-            engineMeta.value = (meta.metadata as Record<string, unknown>) ?? meta;
-            engineStatus.value = 'python-vtl';
-            void syncLocalModelsSilently();
-            await requestVtlPose(currentTractParams.value);
-            return 'python-vtl';
-          }
-        }
-      } catch {
-        // fall through to prewarm/CAD fallback
+      const metaRes = await defaultVtlTransport.fetchMetaRaw(undefined, { timeoutMs: 4000 });
+      if (metaRes.ok) {
+        const meta = metaRes.value;
+        engineMeta.value = (meta.metadata as Record<string, unknown>) ?? meta;
+        engineStatus.value = 'python-vtl';
+        void syncLocalModelsSilently();
+        await requestVtlPose(currentTractParams.value);
+        return 'python-vtl';
       }
       engineStatus.value = 'prewarm-fallback';
       return 'prewarm-fallback';
@@ -2189,7 +2698,7 @@ function createWorkbenchStore(): WorkbenchStore {
             releaseTract: neutralFallbackTract,
             lipWidth: DEFAULT_TRACT_EXTRAS.lip_width,
             larynxHeight: DEFAULT_TRACT_EXTRAS.larynx_height,
-          }, opts.referenceTrack, opts.ipaPoseSource);
+          }, opts.referenceTrack, opts.ipaPoseSource, mode === 'neural' ? effectiveSpeakerBaseF0Hz.value : undefined);
           if (!plan.ok) {
             pushToast(plan.error.hint, 'warning');
             return null;
@@ -2212,12 +2721,10 @@ function createWorkbenchStore(): WorkbenchStore {
           && (body.sample_count > 4 * SAMPLE_RATE_HZ || Boolean(chain)),
         );
         if (wantStream && opts.streamPlay) {
-          const streamResp = await fetch('/api/vtl/synthesize-stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...body, audio_gain: audioGain }),
-            signal: synthController.signal,
-          });
+          const streamResp = await defaultVtlTransport.requestSynthesizeStream(
+            { ...body, audio_gain: audioGain },
+            { signal: synthController.signal },
+          );
           if (generation !== audioGeneration || synthController.signal.aborted) return null;
           const streamCt = (streamResp.headers.get('content-type') ?? '').toLowerCase();
           if (streamResp.ok && streamCt.includes('application/x-ndjson') && streamResp.body) {
@@ -2276,6 +2783,9 @@ function createWorkbenchStore(): WorkbenchStore {
                   m27RowsPa: m27Rows,
                   tractFrames: synthesisTractFrames(tractRows, m27Rows, totalSamples),
                 };
+                if (details.tractFrames?.length) {
+                  opts.onStreamTractFrames?.(details.tractFrames);
+                }
                 const missingArt = evt.missing_recorded_articulation as string[] | undefined;
                 if (missingArt?.length) {
                   const symbols = missingArt.map((ipa) => '[' + ipa + ']').join('、');
@@ -2447,10 +2957,10 @@ function createWorkbenchStore(): WorkbenchStore {
               const assembled = ctx.createBuffer(1, finalPcm.length, sampleRate);
               assembled.copyToChannel(finalPcm, 0);
               if (audioGain === 'peak') applyPeakAudioGain(assembled);
-              if (!opts.mode) generatedVoiceModes.set(assembled, mode);
+              generatedVoiceModes.set(assembled, mode);
               generatedGainModes.set(assembled, audioGain);
               renderedSynthesisInfo.set(assembled, details);
-              if (startedAudio) streamPlayedBuffers.add(assembled);
+              if (startedAudio && activeSeq === playbackSeq) streamPlayedBuffers.add(assembled);
               if (opts.cacheWaveform !== false) {
                 lastAudioBuffer.value = assembled;
                 if (opts.annotation) {
@@ -2469,21 +2979,18 @@ function createWorkbenchStore(): WorkbenchStore {
           }
         }
 
-        const resp = await fetch('/api/vtl/synthesize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...body, audio_gain: audioGain }),
-          signal: synthController.signal,
-        });
+        const synthRes = await defaultVtlTransport.requestSynthesizeRaw(
+          { ...body, audio_gain: audioGain },
+          { signal: synthController.signal },
+        );
         if (generation !== audioGeneration) return null;
-        if (resp.ok) {
-          const ct = resp.headers.get('content-type') ?? '';
+        if (synthRes.ok) {
           let arrayBuf: ArrayBuffer | null = null;
           let details: SynthesisInfo = { mode, sourceBadge: voiceRenderLabels[mode], device: mode === 'physical' ? 'cpu' : undefined };
-          if (ct.includes('audio/')) {
-            arrayBuf = await resp.arrayBuffer();
+          if (synthRes.value.kind === 'audio') {
+            arrayBuf = synthRes.value.buffer;
           } else {
-            const json = (await resp.json()) as { wav_base64?: string; state?: Record<string, unknown>;
+            const json = synthRes.value.data as { wav_base64?: string; state?: Record<string, unknown>;
               synth_mode?: VoiceRenderMode; source_badge?: string; device_effective?: string; voice_profile?: string; model_ms?: number;
               articulation_model?: string; articulation_frames_50hz?: number; ignored_geometry_fields?: string[];
               recorded_articulation?: RecordedArticulationSpan[]; missing_recorded_articulation?: string[];
@@ -2525,7 +3032,7 @@ function createWorkbenchStore(): WorkbenchStore {
             const decoded = await ctx.decodeAudioData(arrayBuf.slice(0));
             if (generation !== audioGeneration || (!opts.mode && mode !== voiceRenderMode.value)
               || (!opts.audioGain && audioGain !== synthesisGainMode.value)) return null;
-            if (!opts.mode) generatedVoiceModes.set(decoded,mode);
+            generatedVoiceModes.set(decoded, mode);
             generatedGainModes.set(decoded, audioGain);
             renderedSynthesisInfo.set(decoded, details);
             if (opts.cacheWaveform === false) return decoded;
@@ -2537,9 +3044,8 @@ function createWorkbenchStore(): WorkbenchStore {
             return decoded;
           }
         } else {
-          const result = await resp.json().catch(() => null) as {hint?:string;error?:{hint?:string}} | null;
           if (mode === 'neural' || !opts.prewarmAudioUrl) {
-            pushToast(result?.error?.hint ?? result?.hint ?? (voiceRenderLabels[mode]+'未返回可播放的音频'), 'warning');
+            pushToast(synthRes.error.hint || (voiceRenderLabels[mode]+'未返回可播放的音频'), 'warning');
             return null;
           }
         }
@@ -2587,6 +3093,7 @@ function createWorkbenchStore(): WorkbenchStore {
 
   const stopPlayback = (): void => {
     playbackSeq++;
+    streamPlayedBuffers = new WeakSet<AudioBuffer>();
     releaseVoiceGainBus();
     if (playbackFrame) cancelAnimationFrame(playbackFrame);
     playbackFrame = 0;
@@ -2747,6 +3254,10 @@ function createWorkbenchStore(): WorkbenchStore {
         payload: { project: parsed },
       });
       if (res.ok) {
+        stopPlayback();
+        playheadSmp.value = 0;
+        selectedSyllableId.value = '';
+        selectedPhonemeIds.value = [];
         activeClipId.value = project.value.clip_order[0] ?? activeClipId.value;
         activeVoiceId.value = project.value.voice_order[0] ?? activeVoiceId.value;
         if (typeof window !== 'undefined') window.dispatchEvent(new Event('vocalcut:project-imported'));
@@ -2843,16 +3354,24 @@ function createWorkbenchStore(): WorkbenchStore {
     resolvedColorMode,
     paletteId,
     customAccentHex,
+    activePalette,
+    accentPickerColor,
     surfaceStyle,
+    styleColorMode,
     backdropId,
     backdropColorScheme,
     backdropCustomColors,
+    backdropActiveColors,
     glassBlur,
     glassAlpha,
     cardAlpha,
     interfaceFonts,
     anatomyAppearance,
-    bgSat,
+    backdropTreatment,
+    backdropVeilPct,
+    backdropTreatmentAutomatic,
+    savedLooks,
+    activeSavedLookId,
     bgCov,
     waveformColorMode,
     waveformCustomHex,
@@ -2911,6 +3430,7 @@ function createWorkbenchStore(): WorkbenchStore {
     setPalette,
     setCustomAccent,
     setSurfaceStyle,
+    setStyleColorMode,
     setBackdrop,
     setBackdropColorScheme,
     setBackdropCustomColors,
@@ -2920,12 +3440,20 @@ function createWorkbenchStore(): WorkbenchStore {
     setInterfaceFonts,
     setAnatomyAppearance,
     setBgSat,
+    setBackdropBlur,
+    setBackdropVeil,
+    resetBackdropTreatment,
     setBgCov,
     setStyleOverrides,
     setWaveformAppearance,
     exportAppearanceJson,
     importAppearanceJson,
     resetAppearance,
+    saveCurrentLook,
+    applySavedLook,
+    updateSavedLookFromCurrent,
+    deleteSavedLook,
+    toggleDefaultSavedLook,
     setPageScale,
     resetAutoPageScale,
     setSplitterDefault,

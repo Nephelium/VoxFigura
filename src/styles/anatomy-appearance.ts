@@ -89,5 +89,6 @@ export function readAnatomyDisplay() {
   const colors = Object.fromEntries((Object.entries(CSS_NAMES) as [keyof Colors, string][])
     .map(([key, css]) => [key, style.getPropertyValue(`--anatomy-${css}`).trim() || fallback[key]])) as Colors;
   const head2d = Number(style.getPropertyValue('--anatomy-head-2d').trim() || 0.58);
-  return { ...colors, head2d, key: `${head2d}/${Object.values(colors).join('/')}` };
+  const head3d = Number(style.getPropertyValue('--anatomy-head-3d').trim() || 0.28);
+  return { ...colors, head2d, head3d, key: `${head2d}/${head3d}/${Object.values(colors).join('/')}` };
 }

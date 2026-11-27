@@ -66,12 +66,16 @@ const M27CurveEditor = (() => {
       this.ctx = canvas.getContext("2d");
       this.onChange = options.onChange || (() => {});
       this.onSelect = options.onSelect || (() => {});
+      this.onHistoryChange = options.onHistoryChange || (() => {});
       this.pad = { left: 42, right: 16, top: 18, bottom: 26 };
 
       this.knots = [
-        { t: 0.0, v: 0.0 },
-        { t: 1.0, v: 0.85 },
+        { t: 0.0, v: 1.0 },
+        { t: 1.0, v: 1.0 },
       ];
+      this._undoStack = [];
+      this._redoStack = [];
+      this._dragStartSnapshot = null;
       this.interpMode = "smoothstep";
       this.smoothMs = 25;
       this.enableGate = true;
@@ -83,6 +87,7 @@ const M27CurveEditor = (() => {
       this.bgMode = "waveform";
       this.spectrogramCanvas = null;
       this.alignIntervals = [];
+      this.ghostCurves = [];
       this.playheadNorm = null;
       this.snappedBoundarySec = null;
       this.dragIndex = -1;
@@ -100,6 +105,72 @@ const M27CurveEditor = (() => {
       this._events.abort();
     }
 
+    _cloneKnots(src = this.knots) {
+      return src.map((k) => ({ t: k.t, v: k.v }));
+    }
+
+    _knotsEqual(a, b) {
+      if (!a || !b || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i].t - b[i].t) > 1e-6 || Math.abs(a[i].v - b[i].v) > 1e-6) return false;
+      }
+      return true;
+    }
+
+    _emitHistory() {
+      this.onHistoryChange({ canUndo: this._undoStack.length > 0, canRedo: this._redoStack.length > 0 });
+    }
+
+    _pushHistory(snapshot = this._cloneKnots()) {
+      const top = this._undoStack[this._undoStack.length - 1];
+      if (top && this._knotsEqual(top, snapshot)) return;
+      this._undoStack.push(snapshot);
+      if (this._undoStack.length > 40) this._undoStack.shift();
+      this._redoStack = [];
+      this._emitHistory();
+    }
+
+    resetHistory() {
+      this._undoStack = [];
+      this._redoStack = [];
+      this._dragStartSnapshot = null;
+      this._emitHistory();
+    }
+
+    canUndo() {
+      return this._undoStack.length > 0;
+    }
+
+    canRedo() {
+      return this._redoStack.length > 0;
+    }
+
+    undo() {
+      if (!this._undoStack.length) return false;
+      this._redoStack.push(this._cloneKnots());
+      const prev = this._undoStack.pop();
+      this.knots = prev;
+      this.selectedIndex = clamp(this.selectedIndex, 0, Math.max(0, this.knots.length - 1));
+      this.render();
+      this._emitSelect();
+      this._emitHistory();
+      this.onChange(this.getKnots());
+      return true;
+    }
+
+    redo() {
+      if (!this._redoStack.length) return false;
+      this._undoStack.push(this._cloneKnots());
+      const next = this._redoStack.pop();
+      this.knots = next;
+      this.selectedIndex = clamp(this.selectedIndex, 0, Math.max(0, this.knots.length - 1));
+      this.render();
+      this._emitSelect();
+      this._emitHistory();
+      this.onChange(this.getKnots());
+      return true;
+    }
+
     _emitSelect() {
       const idx = clamp(this.selectedIndex, 0, Math.max(0, this.knots.length - 1));
       this.selectedIndex = idx;
@@ -107,6 +178,14 @@ const M27CurveEditor = (() => {
     }
 
     setKnots(knots, silent = false) {
+      if (silent) {
+        this._undoStack = [];
+        this._redoStack = [];
+        this._dragStartSnapshot = null;
+        this._emitHistory();
+      } else {
+        this._pushHistory();
+      }
       if (!Array.isArray(knots) || knots.length === 0) {
         this.knots = [
           { t: 0.0, v: 0.0 },
@@ -135,7 +214,7 @@ const M27CurveEditor = (() => {
     }
 
     /** 精确更新当前选中节点的 (t_norm, v_norm) */
-    updateSelectedKnot(tNorm, vNorm) {
+    updateSelectedKnot(tNorm, vNorm, recordHistory = true) {
       if (!Number.isFinite(tNorm) || !Number.isFinite(vNorm)) return;
       const i = this.selectedIndex;
       if (i < 0 || i >= this.knots.length) return;
@@ -150,6 +229,8 @@ const M27CurveEditor = (() => {
         newT = lo <= hi ? clamp(newT, lo, hi) : this.knots[i].t;
       }
       const newV = clamp(Number(vNorm), 0, 1);
+      if (Math.abs(this.knots[i].t - newT) < 1e-6 && Math.abs(this.knots[i].v - newV) < 1e-6) return;
+      if (recordHistory) this._pushHistory();
       this.knots[i] = { t: newT, v: newV };
       this.render();
       this._emitSelect();
@@ -157,10 +238,11 @@ const M27CurveEditor = (() => {
     }
 
     /** 手动精确打点（插入新节点并自动选中） */
-    addKnotAt(tNorm, vNorm) {
+    addKnotAt(tNorm, vNorm, recordHistory = true) {
       if (!Number.isFinite(tNorm) || !Number.isFinite(vNorm)) return false;
       const t = clamp(tNorm, 0, 1);
       const v = clamp(vNorm, 0, 1);
+      const before = recordHistory ? this._cloneKnots() : null;
       // 若已有极接近的点，直接更新并选中
       const near = this.knots.findIndex((k) => Math.abs(k.t - t) < MIN_GAP);
       if (near >= 0) {
@@ -172,6 +254,7 @@ const M27CurveEditor = (() => {
         this.knots.sort((a, b) => a.t - b.t);
         this.selectedIndex = this.knots.findIndex((k) => k.t === t && k.v === v);
       }
+      if (before) this._pushHistory(before);
       this.render();
       this._emitSelect();
       this.onChange(this.getKnots());
@@ -181,6 +264,7 @@ const M27CurveEditor = (() => {
     /** 删除当前选中节点（至少保留 2 个端点） */
     deleteSelectedKnot() {
       if (this.knots.length <= 2 || this.selectedIndex <= 0 || this.selectedIndex >= this.knots.length - 1) return false;
+      this._pushHistory();
       this.knots.splice(this.selectedIndex, 1);
       this.selectedIndex = clamp(this.selectedIndex - 1, 0, this.knots.length - 1);
       this.render();
@@ -189,7 +273,7 @@ const M27CurveEditor = (() => {
       return true;
     }
 
-    setVisualContext({ durSec, waveformPeaks, gateSeries, appliedSeries, frameCount, smoothMs, enableGate, interpMode, playheadNorm, bgMode, spectrogramCanvas, alignIntervals }) {
+    setVisualContext({ durSec, waveformPeaks, gateSeries, appliedSeries, frameCount, smoothMs, enableGate, interpMode, playheadNorm, bgMode, spectrogramCanvas, alignIntervals, ghostCurves }) {
       if (typeof durSec === "number" && durSec > 0) this.durSec = durSec;
       if (Array.isArray(waveformPeaks)) this.waveformPeaks = waveformPeaks;
       if (Array.isArray(gateSeries)) this.gateSeries = gateSeries;
@@ -202,6 +286,7 @@ const M27CurveEditor = (() => {
       if (bgMode === "waveform" || bgMode === "spectrogram") this.bgMode = bgMode;
       if (spectrogramCanvas !== undefined) this.spectrogramCanvas = spectrogramCanvas;
       if (Array.isArray(alignIntervals)) this.alignIntervals = alignIntervals;
+      if (Array.isArray(ghostCurves)) this.ghostCurves = ghostCurves;
       this.render();
     }
 
@@ -218,29 +303,33 @@ const M27CurveEditor = (() => {
           { t: 0.0, v: 0.0 },
           { t: 1.0, v: 0.0 },
         ],
+        const100: [
+          { t: 0.0, v: 1.0 },
+          { t: 1.0, v: 1.0 },
+        ],
         const80: [
-          { t: 0.0, v: 0.8 },
-          { t: 1.0, v: 0.8 },
+          { t: 0.0, v: 1.0 },
+          { t: 1.0, v: 1.0 },
         ],
         ramp_up: [
           { t: 0.0, v: 0.0 },
-          { t: 1.0, v: 0.9 },
+          { t: 1.0, v: 1.0 },
         ],
         ramp_down: [
-          { t: 0.0, v: 0.9 },
+          { t: 0.0, v: 1.0 },
           { t: 1.0, v: 0.0 },
         ],
         arch: [
           { t: 0.0, v: 0.0 },
-          { t: 0.35, v: 0.9 },
-          { t: 0.65, v: 0.9 },
+          { t: 0.35, v: 1.0 },
+          { t: 0.65, v: 1.0 },
           { t: 1.0, v: 0.0 },
         ],
         tail: [
           { t: 0.0, v: 0.0 },
           { t: 0.58, v: 0.05 },
-          { t: 0.85, v: 0.95 },
-          { t: 1.0, v: 0.95 },
+          { t: 0.85, v: 1.0 },
+          { t: 1.0, v: 1.0 },
         ],
       };
       if (presets[shapeId]) {
@@ -301,12 +390,19 @@ const M27CurveEditor = (() => {
         this.canvas.focus();
         const { px, py, t, v, rect } = this._fromEvent(ev);
         const hit = this._findKnot(px, py, rect);
+        this._dragStartSnapshot = this._cloneKnots();
         if (hit >= 0) {
           this.dragIndex = hit;
           this.selectedIndex = hit;
           this._emitSelect();
-        } else if (this.addKnotAt(t, v)) this.dragIndex = this.selectedIndex;
-        this.canvas.setPointerCapture(ev.pointerId);
+        } else if (this.addKnotAt(t, v, false)) {
+          this.dragIndex = this.selectedIndex;
+        }
+        try {
+          this.canvas.setPointerCapture(ev.pointerId);
+        } catch {
+          // ignore synthetic pointer events
+        }
         this.render();
       });
 
@@ -331,7 +427,7 @@ const M27CurveEditor = (() => {
               }
             }
           }
-          this.updateSelectedKnot(snappedT, v);
+          this.updateSelectedKnot(snappedT, v, false);
         } else {
           const hit = this._findKnot(px, py, rect);
           if (hit !== this.hoverIndex) {
@@ -342,14 +438,37 @@ const M27CurveEditor = (() => {
         }
       });
 
-      const endDrag = () => {
+      const endDrag = (ev) => {
         if (this.dragIndex >= 0) {
           this.dragIndex = -1;
           this.snappedBoundarySec = null;
+          if (this._dragStartSnapshot && !this._knotsEqual(this._dragStartSnapshot, this.knots)) {
+            this._pushHistory(this._dragStartSnapshot);
+          }
+          this._dragStartSnapshot = null;
+          if (ev && typeof ev.pointerId === "number" && this.canvas.hasPointerCapture?.(ev.pointerId)) {
+            try {
+              this.canvas.releasePointerCapture(ev.pointerId);
+            } catch {
+              // ignore
+            }
+          }
           this.render();
         }
       };
+      on("pointerup", endDrag);
+      on("pointercancel", endDrag);
       on("lostpointercapture", endDrag);
+
+      on("contextmenu", (ev) => {
+        const { px, py, rect } = this._fromEvent(ev);
+        const hit = this._findKnot(px, py, rect);
+        if (hit > 0 && hit < this.knots.length - 1) {
+          ev.preventDefault();
+          this.selectKnot(hit);
+          this.deleteSelectedKnot();
+        }
+      });
 
       on("dblclick", (ev) => {
         const { px, py, rect } = this._fromEvent(ev);
@@ -359,8 +478,21 @@ const M27CurveEditor = (() => {
         this.deleteSelectedKnot();
       });
 
-      // 键盘方向键微调：↑/↓ 调节权重，←/→ 调节时间，Shift 加速 5 倍，Delete 删点
+      // 键盘方向键微调：↑/↓ 调节权重，←/→ 调节时间，Shift 加速 5 倍，Delete 删点，Ctrl+Z/Y 撤销重做
       on("keydown", (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+          const low = ev.key.toLowerCase();
+          if (low === "z" && !ev.shiftKey) {
+            ev.preventDefault();
+            this.undo();
+            return;
+          }
+          if (low === "y" || (low === "z" && ev.shiftKey)) {
+            ev.preventDefault();
+            this.redo();
+            return;
+          }
+        }
         if (this.selectedIndex < 0 || this.selectedIndex >= this.knots.length) return;
         const k = this.knots[this.selectedIndex];
         const stepV = ev.shiftKey ? 0.05 : 0.01;
@@ -537,6 +669,34 @@ const M27CurveEditor = (() => {
             const shown = txt.length > maxChars ? txt.slice(0, maxChars) : txt;
             ctx.fillText(shown, (x0 + x1) * 0.5, rect.y0 + stripH * 0.5);
           }
+        }
+        ctx.restore();
+      }
+
+      // 3c. Optional ghost curves from other enabled organ tracks in dual mode
+      if (Array.isArray(this.ghostCurves) && this.ghostCurves.length > 0) {
+        const ghostColor = this._cssVar("--vm-ghost-curve", muted);
+        const gSamp = 96;
+        const gSigma = this.smoothMs > 0.5 ? Math.max(0.3, (this.smoothMs / 1000) * (gSamp / Math.max(0.1, this.durSec)) * 0.5) : 0;
+        ctx.save();
+        ctx.strokeStyle = ghostColor;
+        ctx.globalAlpha = 0.42;
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([3, 3]);
+        for (const ghost of this.ghostCurves) {
+          if (!ghost || !Array.isArray(ghost.knots) || ghost.knots.length < 2) continue;
+          const rawG = new Array(gSamp);
+          for (let i = 0; i < gSamp; i++) {
+            rawG[i] = evalKnots(ghost.knots, i / (gSamp - 1), this.interpMode);
+          }
+          const smG = gaussianSmooth1D(rawG, gSigma);
+          ctx.beginPath();
+          for (let i = 0; i < gSamp; i++) {
+            const pt = this._toXY(i / (gSamp - 1), smG[i], rect);
+            if (i === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.stroke();
         }
         ctx.restore();
       }

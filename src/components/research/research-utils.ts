@@ -1,4 +1,4 @@
-import { nasalPoseIpa, splitPhoneNotation, stripDottedCirclePlaceholders, phoneTraits, writtenToneLevels } from '@/data/ipa-segments';
+import { nasalPoseIpa, normalizedPhone, splitPhoneNotation, stripDottedCirclePlaceholders, phoneTraits, writtenToneLevels } from '@/data/ipa-segments';
 import { speechPhoneDurations, speechStopTiming } from '@/data/speech-timing';
 import { ref } from 'vue';
 import {
@@ -36,15 +36,6 @@ export interface PhonationLaneMeta {
   laneIdx: number;
 }
 
-export const PHONATION_LANES: readonly PhonationLaneMeta[] = [
-  { regime: 'pressed', shortLabel: '挤喉/紧声', enLabel: 'Pressed', laneIdx: 0 },
-  { regime: 'modal', shortLabel: '常态浊声', enLabel: 'Modal', laneIdx: 1 },
-  { regime: 'breathy', shortLabel: '气声', enLabel: 'Breathy', laneIdx: 2 },
-  { regime: 'whisper', shortLabel: '耳语', enLabel: 'Whisper', laneIdx: 3 },
-  { regime: 'creaky', shortLabel: '嘎裂声', enLabel: 'Creaky', laneIdx: 4 },
-  { regime: 'falsetto', shortLabel: '假声', enLabel: 'Falsetto', laneIdx: 5 },
-] as const;
-
 export interface QuickIpaItem {
   symbol: string;
   display?: string;
@@ -54,12 +45,16 @@ export interface QuickIpaItem {
 }
 
 const IPA_FAVORITES_KEY = 'vocalcut.ipa-favorites';
+export function ipaFavoriteKey(item: Pick<QuickIpaItem, 'entryId' | 'symbol'>): string {
+  if (item.entryId) return item.entryId;
+  return `sym:${normalizedPhone(item.symbol).replace(/[͜͡]/gu, '').replaceAll('g', 'ɡ')}`;
+}
 const ipaFavorites = ref<QuickIpaItem[]>([]);
 try {
   const saved: unknown = JSON.parse(localStorage.getItem(IPA_FAVORITES_KEY) ?? '[]');
   if (Array.isArray(saved)) {
     ipaFavorites.value = saved.filter((item): item is QuickIpaItem =>
-      typeof item?.symbol === 'string' && typeof item?.nameZh === 'string' && typeof item?.entryId === 'string');
+      typeof item?.symbol === 'string' && typeof item?.nameZh === 'string');
   }
 } catch {
   // The collection remains available for this session if storage is unavailable.
@@ -67,8 +62,9 @@ try {
 export { ipaFavorites };
 
 export function toggleIpaFavorite(item: QuickIpaItem): void {
-  ipaFavorites.value = ipaFavorites.value.some((saved) => saved.entryId === item.entryId)
-    ? ipaFavorites.value.filter((saved) => saved.entryId !== item.entryId)
+  const key = ipaFavoriteKey(item);
+  ipaFavorites.value = ipaFavorites.value.some((saved) => ipaFavoriteKey(saved) === key)
+    ? ipaFavorites.value.filter((saved) => ipaFavoriteKey(saved) !== key)
     : [...ipaFavorites.value, item];
   try {
     localStorage.setItem(IPA_FAVORITES_KEY, JSON.stringify(ipaFavorites.value));
@@ -147,6 +143,7 @@ export interface FullIpaPoseResult {
 }
 
 const CUSTOM_IPA_STORAGE_KEY = 'vocalcut.customIpaPoses.v1';
+const LINKED_VOWELS_STORAGE_KEY = 'vocalcut.ipaLinkedVowels.v1';
 
 function loadInitialCustomPoses(): Record<string, CustomIpaPoseEntry> {
   try {
@@ -158,7 +155,75 @@ function loadInitialCustomPoses(): Record<string, CustomIpaPoseEntry> {
   }
 }
 
+function loadInitialLinkedVowels(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LINKED_VOWELS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
 export const customIpaPoses = ref<Record<string, CustomIpaPoseEntry>>(loadInitialCustomPoses());
+export const linkedVowelRecordings = ref<Record<string, string>>(loadInitialLinkedVowels());
+
+function persistLinkedVowels(): void {
+  try {
+    localStorage.setItem(LINKED_VOWELS_STORAGE_KEY, JSON.stringify(linkedVowelRecordings.value));
+  } catch {
+    // ignore quota error
+  }
+}
+
+export function getLinkedVowelRecording(entryId: string, setId = selectedIpaPoseSetId.value): string | undefined {
+  const k = customPoseKey(entryId, setId);
+  return linkedVowelRecordings.value[k] ?? customIpaPoses.value[k]?.referenceRecordingId;
+}
+
+export function setLinkedVowelRecording(entryId: string, recordingId: string | undefined, setId = selectedIpaPoseSetId.value): void {
+  const k = customPoseKey(entryId, setId);
+  const next = { ...linkedVowelRecordings.value };
+  if (recordingId) next[k] = recordingId;
+  else delete next[k];
+  linkedVowelRecordings.value = next;
+  persistLinkedVowels();
+}
+
+export function clearLinkedVowelRecordingsForSet(setId: string): void {
+  const prefix = setId === RECORDED_IPA_SET_ID ? null : `${setId}::`;
+  const next = { ...linkedVowelRecordings.value };
+  let changed = false;
+  for (const k of Object.keys(next)) {
+    if (prefix ? k.startsWith(prefix) : !k.includes('::')) {
+      delete next[k];
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkedVowelRecordings.value = next;
+    persistLinkedVowels();
+  }
+}
+
+export function copyLinkedVowelRecordingsForSet(fromSetId: string, toSetId: string): void {
+  if (fromSetId === toSetId) return;
+  const fromPrefix = fromSetId === RECORDED_IPA_SET_ID ? null : `${fromSetId}::`;
+  const next = { ...linkedVowelRecordings.value };
+  let changed = false;
+  for (const [k, recId] of Object.entries(linkedVowelRecordings.value)) {
+    if (fromPrefix ? k.startsWith(fromPrefix) : !k.includes('::')) {
+      const entryId = fromPrefix ? k.slice(fromPrefix.length) : k;
+      next[customPoseKey(entryId, toSetId)] = recId;
+      changed = true;
+    }
+  }
+  if (changed) {
+    linkedVowelRecordings.value = next;
+    persistLinkedVowels();
+  }
+}
 
 export function customPoseKey(id:string, setId = selectedIpaPoseSetId.value):string {
   return setId === RECORDED_IPA_SET_ID ? id : setId + '::' + id;
@@ -426,7 +491,7 @@ export function buildSegmentsForSyllable(
     const role: SegmentAnchor['role'] =
       sym === 'sil' ? 'rest' : idx < nucIdx ? 'onset' : idx === nucIdx ? 'nucleus' : 'coda';
     const voiced = sym === 'sil' ? false : traits[idx].voiced;
-    const full = getFullPoseForIpa(nasalPoseIpa(sym), undefined, speaker, setId);
+    const full = getFullPoseForIpa(sym === 'sil' ? 'ə' : nasalPoseIpa(sym), undefined, speaker, setId);
     const savedPose = options?.segmentPoses?.[idx];
     const params19 =
       savedPose && Array.isArray(savedPose.params19) && savedPose.params19.length === 19
@@ -440,7 +505,7 @@ export function buildSegmentsForSyllable(
 
     const closureMs = Math.max(10, Math.min(Math.max(10, Math.floor(durMs - 1)), Math.round(durMs * 0.6)));
     const remAfterClosure = Math.max(1, Math.floor(durMs - closureMs));
-    const releaseMs = sym.endsWith('̚') || traits[idx].unreleased ? 1 : Math.max(1, Math.min(remAfterClosure, Math.round(durMs * 0.14)));
+    const releaseMs = sym.endsWith('̚') || traits[idx].unreleased ? 1 : Math.max(1, Math.min(50, remAfterClosure, Math.round(durMs * 0.14)));
     const aspMs = sym.includes('ʰ') ? Math.max(0, Math.min(Math.max(0, remAfterClosure - releaseMs), Math.round(durMs * 0.26))) : 0;
 
     return {
@@ -474,16 +539,47 @@ export function buildSegmentsForSyllable(
 
 export function replaceSegmentIpa(segment: SegmentAnchor, symbol: string, speaker: string, entryId?: string): SegmentAnchor {
   const cleanSymbol = stripDottedCirclePlaceholders(symbol).replaceAll('\u25cc', '').trim() || symbol;
+  if (cleanSymbol === 'sil') {
+    const { params19, extras } = getFullPoseForIpa('ə', undefined, speaker);
+    return {
+      ...segment,
+      ipa: 'sil',
+      role: 'rest',
+      voiced: false,
+      elastic: false,
+      params: [...params19],
+      lip_width: extras.lip_width,
+      larynx_height_cm: extras.larynx_height,
+      tongue_shape: [...extras.tongue_shape],
+      manual_root: extras.manual_root,
+      lip_shape: [...extras.lip_shape],
+      stop_timing: undefined,
+    };
+  }
   const poseIpa = nasalPoseIpa(cleanSymbol);
   const { params19, extras } = getFullPoseForIpa(poseIpa, poseIpa === cleanSymbol ? entryId : undefined, speaker);
-  const { stop, voiced, aspirated, unreleased } = phoneTraits(cleanSymbol);
-  const durationMs = samplesToMs(segment.end_smp - segment.start_smp);
-  const releaseMs = unreleased ? 1 : Math.max(1, Math.floor(durationMs * 0.12));
+  const traits = phoneTraits(cleanSymbol);
+  const { stop, voiced, aspirated, unreleased } = traits;
+  const nextRole: SegmentAnchor['role'] =
+    segment.role === 'rest'
+      ? (traits.syllabic || (traits.vowel && !traits.nonSyllabic) ? 'nucleus' : 'onset')
+      : segment.role;
+  const durationMs = Math.max(11, samplesToMs(segment.end_smp - segment.start_smp));
+  const closureMs = Math.max(10, Math.min(Math.max(10, Math.floor(durationMs - 1)), Math.floor(durationMs * 0.58)));
+  const remAfterClosure = Math.max(1, Math.floor(durationMs - closureMs));
+  const releaseMs = unreleased ? 1 : Math.max(1, Math.min(50, remAfterClosure, Math.floor(durationMs * 0.14)));
+  const aspMs = aspirated ? Math.max(0, Math.min(Math.max(0, remAfterClosure - releaseMs), Math.floor(durationMs * 0.24))) : 0;
+  const votMs = voiced
+    ? -Math.min(10, closureMs)
+    : aspirated
+      ? Math.min(38, releaseMs + aspMs)
+      : Math.min(12, releaseMs + aspMs);
   return {
     ...segment,
     ipa: cleanSymbol,
+    role: nextRole,
     voiced,
-    elastic: !stop && segment.role === 'nucleus',
+    elastic: !stop && nextRole === 'nucleus',
     params: [...params19],
     lip_width: extras.lip_width,
     larynx_height_cm: extras.larynx_height,
@@ -491,30 +587,23 @@ export function replaceSegmentIpa(segment: SegmentAnchor, symbol: string, speake
     manual_root: extras.manual_root,
     lip_shape: [...extras.lip_shape],
     stop_timing: stop ? {
-      closure_ms: Math.max(10, Math.floor(durationMs * 0.58)),
+      closure_ms: closureMs,
       release_ms: releaseMs,
-      aspiration_ms: aspirated ? Math.max(0, Math.floor(durationMs * 0.18)) : 0,
-      vot_ms: voiced ? -10 : aspirated ? 38 : 12,
+      aspiration_ms: aspMs,
+      vot_ms: votMs,
       auto_generated: true,
     } : undefined,
   };
 }
 
-export interface MiniTractPaths {
-  upperWall: string;
-  pharynxWall: string;
-  lowerJaw: string;
-  tongue: string;
-  airway: string;
-  nasal: string;
-  aminPt: [number, number];
-}
-
 export function formatTimecode(smp: number): string {
-  const sec = Math.max(0, smp / SAMPLE_RATE_HZ);
-  const mins = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return `${String(mins).padStart(2, '0')}:${rem.toFixed(2).padStart(5, '0')}`;
+  if (!Number.isFinite(smp) || smp <= 0) return '00:00.00';
+  const totalCs = Math.round((smp / SAMPLE_RATE_HZ) * 100);
+  const mins = Math.floor(totalCs / 6000);
+  const secCs = totalCs % 6000;
+  const secs = Math.floor(secCs / 100);
+  const cs = secCs % 100;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
 }
 
 export function blobToBase64(blob: Blob): Promise<string> {

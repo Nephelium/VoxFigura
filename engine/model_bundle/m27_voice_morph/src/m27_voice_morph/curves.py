@@ -153,12 +153,14 @@ def apply_f0_semitone_coupling(
     *,
     semitones: float,
     strength: float = 1.0,
-    f0_min: float = 40.0,
-    f0_max: float = 600.0,
+    f0_min: Optional[float] = None,
+    f0_max: Optional[float] = None,
     output_range_hz: Optional[Tuple[float, float]] = None,
 ) -> np.ndarray:
     """Shift log-F0 smoothly by `eff_weight(t) * semitones * strength` semitones."""
-    f0 = np.clip(np.asarray(f0_hz, dtype=np.float64), f0_min, f0_max)
+    f0 = np.maximum(np.asarray(f0_hz, dtype=np.float64), 1e-3)
+    if f0_min is not None or f0_max is not None:
+        f0 = np.clip(f0, f0_min if f0_min is not None else 1e-3, f0_max if f0_max is not None else np.inf)
     w = np.clip(np.asarray(eff_weight, dtype=np.float64), 0.0, 1.0)
     delta_st = float(semitones) * float(strength)
     if abs(delta_st) < 1e-6:
@@ -170,7 +172,9 @@ def apply_f0_semitone_coupling(
         invalid = (shifted < np.minimum(lo, f0) - 1e-3) | (shifted > np.maximum(hi, f0) + 1e-3)
         if np.any(invalid):
             raise F0ShiftOutOfRange(float(shifted[np.flatnonzero(invalid)[0]]))
-    return np.clip(shifted, f0_min, f0_max).astype(np.float32)
+    if f0_min is not None or f0_max is not None:
+        shifted = np.clip(shifted, f0_min if f0_min is not None else 1e-3, f0_max if f0_max is not None else np.inf)
+    return shifted.astype(np.float32)
 
 
 def slerp_speaker_sequence(

@@ -1,11 +1,20 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
+import { onSessionMediaUrlReleased } from './studio-media';
+
+const posterCache = new Map<string, string>();
+onSessionMediaUrlReleased(url => { posterCache.delete(url); });
 
 const props = defineProps<{ src: string }>();
 const host = ref<HTMLElement | null>(null);
 const poster = ref('');
 
 watch([host, () => props.src], ([element, src], _, onCleanup) => {
+  const cached = posterCache.get(src);
+  if (cached) {
+    poster.value = cached;
+    return;
+  }
   poster.value = '';
   if (!element) return;
 
@@ -24,7 +33,11 @@ watch([host, () => props.src], ([element, src], _, onCleanup) => {
     }
 
     function capture() {
-      if (video.seeking || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return;
+      if (video.seeking || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      if (!video.videoWidth || !video.videoHeight) {
+        release();
+        return;
+      }
       try {
         const canvas = document.createElement('canvas');
         const scale = Math.min(1, 240 / Math.max(video.videoWidth, video.videoHeight));
@@ -33,16 +46,26 @@ watch([host, () => props.src], ([element, src], _, onCleanup) => {
         const context = canvas.getContext('2d');
         if (context) {
           context.drawImage(video, 0, 0, canvas.width, canvas.height);
-          poster.value = canvas.toDataURL('image/jpeg', 0.8);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          poster.value = dataUrl;
+          posterCache.set(src, dataUrl);
+          if (posterCache.size > 64) {
+            const oldest = posterCache.keys().next().value;
+            if (oldest !== undefined) posterCache.delete(oldest);
+          }
         }
       } catch {
         // The media bin keeps its video icon if this source cannot be captured.
       } finally { release(); }
     }
 
-    video.preload = 'auto';
+    video.preload = 'metadata';
     video.muted = true;
     video.onloadedmetadata = () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        release();
+        return;
+      }
       if (Number.isFinite(video.duration) && video.duration > 0.1) {
         video.currentTime = Math.min(0.35, video.duration * 0.1);
       }

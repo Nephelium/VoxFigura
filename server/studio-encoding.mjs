@@ -41,8 +41,8 @@ function encoderArguments(encoder) {
 
 function pickMovieEncoder(fps) {
   if (process.env.VOCALCUT_CPU_ONLY === '1') return Promise.resolve(softwareEncoder);
-  const pending = encoderChecks.get(fps);
-  if (pending) return pending;
+  const cached = encoderChecks.get(fps);
+  if (cached) return cached;
   const check = (async () => {
     // Listing an encoder does not verify that its device and driver can encode 1080p.
     for (const encoder of hardwareEncoders) {
@@ -59,7 +59,10 @@ function pickMovieEncoder(fps) {
       }
     }
     return softwareEncoder;
-  })().finally(() => encoderChecks.delete(fps));
+  })().catch(err => {
+    encoderChecks.delete(fps);
+    throw err;
+  });
   encoderChecks.set(fps, check);
   return check;
 }
@@ -179,12 +182,18 @@ async function dispose(id,job) {
   if (jobs.get(id)!==job) return;
   jobs.delete(id);clearTimeout(job.timer);
   job.child.kill();job.mux?.kill();
-  await job.done.catch(()=>{});
-  await rm(job.dir,{recursive:true,force:true,maxRetries:5,retryDelay:150});
+  await Promise.all([job.done.catch(()=>{}), job.muxDone?.catch(()=>{})]);
+  await rm(job.dir,{recursive:true,force:true,maxRetries:5,retryDelay:150}).catch(()=>{});
 }
 function renew(id,job) {
   clearTimeout(job.timer);
-  job.timer=setTimeout(()=>void dispose(id,job).catch(()=>{}),120000);
+  job.timer=setTimeout(()=>{
+    if (job.busy && jobs.get(id) === job) {
+      renew(id, job);
+      return;
+    }
+    void dispose(id,job).catch(()=>{});
+  },120000);
   job.timer.unref();
 }
 async function sendFile(res,path,mime) {
@@ -196,12 +205,21 @@ async function audio(req,res,url) {
   if(!Object.hasOwn(transcodes,fmt)) return json(res,400,{hint:'所选音频编码不可用'});
   const dir=await mkdtemp(join(tmpdir(),'vocalcut-audio-'));
   let runner;
+  const onClose = () => { runner?.child.kill(); };
+  res.once('close', onClose);
   try {
     const [codec,container,mime]=transcodes[fmt], output=join(dir,'audio.'+fmt);
     runner=run(['-protocol_whitelist','pipe','-f','wav','-i','pipe:0','-map','0:a:0','-c:a',codec,...(['m4a','mp3'].includes(fmt)?['-b:a','256k']:[]),'-f',container,output],true);
     await Promise.all([pipeline(req,limited(768*1024*1024),runner.child.stdin),runner.done]);
-    await sendFile(res,output,mime);
-  } finally { runner?.child.kill();await runner?.done.catch(()=>{});await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:150}); }
+    if (!res.destroyed) await sendFile(res,output,mime);
+  } catch (e) {
+    if (!res.headersSent && !res.destroyed) json(res, 500, { hint: e instanceof Error ? e.message : '音频转码失败' });
+  } finally {
+    res.off('close', onClose);
+    runner?.child.kill();
+    await runner?.done.catch(()=>{});
+    await rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:150}).catch(()=>{});
+  }
 }
 export async function studioEncoding(req,res,url) {
   const path=url.pathname;
@@ -220,7 +238,7 @@ export async function studioEncoding(req,res,url) {
       const task = run(['-f', 'image2pipe', '-framerate', String(fps), '-vcodec', 'mjpeg',
         '-i', 'pipe:0', '-an', ...encoderArguments(encoder), video], true);
       const job = { ...task, dir, video, frame: 0, batches: new Map(), busy: false,
-        timer: undefined, mux: undefined, finishKey: undefined, output: undefined };
+        timer: undefined, mux: undefined, muxDone: undefined, finishKey: undefined, output: undefined };
       jobs.set(id, job);
       renew(id, job);
       return json(res, 201, { id, encoder: encoder.name, encoderLabel: encoder.label });
@@ -261,7 +279,9 @@ export async function studioEncoding(req,res,url) {
     job.finishKey = key;
     job.child.stdin.end();
     await job.done;
-    const mux=run(['-i',job.video,...(withSound?['-f','wav','-i',wav,'-map','0:v:0','-map','1:a:0','-c:a','aac','-b:a','256k']:[]),'-c:v','copy','-movflags','+faststart',output]);job.mux=mux.child;
+    const mux=run(['-i',job.video,...(withSound?['-f','wav','-i',wav,'-map','0:v:0','-map','1:a:0','-c:a','aac','-b:a','256k']:[]),'-c:v','copy','-movflags','+faststart',output]);
+    job.mux=mux.child;
+    job.muxDone=mux.done;
     await mux.done;
     job.output = output;
     if (!res.destroyed) {

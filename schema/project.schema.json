@@ -77,6 +77,10 @@
       "type": "string",
       "enum": ["C2", "D2", "E2", "F2", "G2", "A2", "B2", "C3", "D3", "E3", "F3", "G3"]
     },
+    "ScoreNotationId": {
+      "type": "string",
+      "enum": ["je", "sparks-nmn", "jianpu-ly", "jianpu-player", "fanqie"]
+    },
     "TempoEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -134,7 +138,7 @@
             "sha256": { "type": "string", "minLength": 1 }
           }
         },
-        "f0_ref_hz": { "type": "number", "minimum": 60, "maximum": 600 },
+        "f0_ref_hz": { "type": "number", "exclusiveMinimum": 0 },
         "range_st": {
           "type": "array",
           "items": { "type": "number", "minimum": -36, "maximum": 36 },
@@ -421,6 +425,7 @@
         "score": { "type": "string" },
         "score_tonic": { "$ref": "#/$defs/SongTonic" },
         "score_bpm": { "type": "number", "minimum": 30, "maximum": 260 },
+        "score_notation": { "$ref": "#/$defs/ScoreNotationId" },
         "reading_standard": { "type": "string" },
         "lang": { "type": "string", "enum": ["cmn", "en", "ja", "ipa", "mixed"] },
         "transcription": { "type": "string" }
@@ -507,6 +512,17 @@
         "seed": { "type": "integer" }
       }
     },
+    "SubtitleAngleJitterConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "min_deg", "max_deg", "seed"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "min_deg": { "type": "number", "minimum": -90, "maximum": 90 },
+        "max_deg": { "type": "number", "minimum": -90, "maximum": 90 },
+        "seed": { "type": "integer" }
+      }
+    },
     "SubtitleStyleConfig": {
       "type": "object",
       "additionalProperties": false,
@@ -526,7 +542,8 @@
           "minItems": 2,
           "maxItems": 2
         },
-        "size_jitter": { "$ref": "#/$defs/SubtitleJitterConfig" }
+        "size_jitter": { "$ref": "#/$defs/SubtitleJitterConfig" },
+        "angle_jitter": { "$ref": "#/$defs/SubtitleAngleJitterConfig" }
       }
     },
     "VisualLayer": {
@@ -575,7 +592,7 @@
       "additionalProperties": false,
       "required": ["f0_hz", "pr_pa", "xb_cm", "xt_cm", "ca_cm2", "lag_rad", "ra", "ps", "fl", "shim"],
       "properties": {
-        "f0_hz": { "type": "number", "minimum": 40, "maximum": 600 },
+        "f0_hz": { "type": "number", "exclusiveMinimum": 0 },
         "pr_pa": { "type": "number", "minimum": 0, "maximum": 1600 },
         "xb_cm": { "type": "number", "minimum": -0.05, "maximum": 0.3 },
         "xt_cm": { "type": "number", "minimum": -0.05, "maximum": 0.3 },
@@ -617,7 +634,7 @@
       "required": ["t_smp", "f0_hz"],
       "properties": {
         "t_smp": { "type": "integer", "minimum": 0 },
-        "f0_hz": { "type": "number", "minimum": 40, "maximum": 600 }
+        "f0_hz": { "type": "number", "exclusiveMinimum": 0 }
       }
     },
     "F0PinSegment": {

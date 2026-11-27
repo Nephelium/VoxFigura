@@ -23,11 +23,14 @@ function animate() {
 function sync() {
   const media = video.value;
   if (!media || media.readyState < 1 || unmounted) return;
-  const sec = props.timeSmp / 48000;
+  const rawSec = Math.max(0, props.timeSmp / 48000);
+  const maxSec = Number.isFinite(media.duration) && media.duration > 0 ? Math.max(0, media.duration - 0.01) : rawSec;
+  const atTail = Number.isFinite(media.duration) && media.duration > 0 && rawSec >= maxSec;
+  const sec = Math.min(rawSec, maxSec);
   if (Math.abs(media.currentTime - sec) > (props.playing ? 0.12 : 0.004)) media.currentTime = sec;
-  if (props.playing && media.paused) void media.play().catch(() => {});
-  if (!props.playing && !media.paused) media.pause();
-  if (props.playing && !raf) raf = requestAnimationFrame(animate);
+  if (props.playing && !atTail && media.paused) void media.play().catch(() => {});
+  if ((!props.playing || atTail) && !media.paused) media.pause();
+  if (props.playing && !atTail && !raf) raf = requestAnimationFrame(animate);
 }
 function onMediaReady() {
   sync();
@@ -40,7 +43,12 @@ onBeforeUnmount(() => {
   unmounted = true;
   cancelAnimationFrame(raf);
   raf = 0;
-  if (video.value && !video.value.paused) video.value.pause();
+  const media = video.value;
+  if (media) {
+    if (!media.paused) media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
 });
 </script>
 <template>

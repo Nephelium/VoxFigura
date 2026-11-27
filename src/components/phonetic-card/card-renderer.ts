@@ -1,47 +1,25 @@
 import { metricsFromVtlSnapshot } from '@/data/vtl-acoustic';
 import { loadReferenceGeometry, paintReferenceFrame, referenceFrame } from '@/data/reference-geometry';
 import {
-  cloneTractExtras,
   computeAnalyticalMetrics,
-  tractArray19ToRecord,
-  tractRecordToArray19,
-  type GlottisM27Params,
   type TractMetrics,
   type TractParamName,
-  type TractPoseExtras,
 } from '@/stores/workbench';
+import { parseColorRgb } from './card/card-themes';
 
 type CardImage = HTMLImageElement | HTMLCanvasElement;
-
-export interface CardAppearance {
-  view: 'sagittal' | 'model';
-  zoom: number;
-  style: 'app' | 'paper' | 'midnight';
-  vowel: boolean;
-  area: boolean;
-  parameters: boolean;
-  watermark: string;
-  titleScale?: number;
-  textScale?: number;
-  font?: 'sans' | 'serif';
-  offsetA?: CardOffset;
-  offsetB?: CardOffset;
-  mascotX?: number;
-  mascotY?: number;
-  mascotScale?: number;
-  resonances?: boolean;
-}
-
-type CardOffset = { x: number; y: number };
-export interface CardRegion { x: number; y: number; w: number; h: number }
-export interface CardHitRegions { a: CardRegion; b?: CardRegion; mascot?: CardRegion }
 
 interface OffscreenEmbedHandle {
   update: (state: Record<string, unknown>) => void;
   viewer?: {
     zoom: number;
     pan: [number, number];
+    needsRender?: boolean;
+    renderer?: {
+      setClearColor: (color: string | number, alpha?: number) => void;
+    };
     draw2D: () => void;
+    style3D?: () => void;
     renderNow: () => void;
   };
   setOptions: (opts: Record<string, unknown>) => void;
@@ -106,6 +84,7 @@ export interface VtlRasterOptions {
   labels?: boolean;
   focused?: boolean;
   transparentAirway?: boolean;
+  surfaceColor?: string;
   view?: 'sagittal' | 'model';
 }
 
@@ -122,7 +101,10 @@ export const CARD_TRACT_HEAD_VIEWBOX = { x: -15.2, y: -17.6, w: 24.0, h: 26.8 } 
 export const CARD_VTL_LIVE_ORAL_VIEWBOX = { x: -4.5, y: -6.25, w: 13.1, h: 15.45 } as const;
 
 export interface OffscreenVtlRenderer {
-  renderState: (state: Record<string, unknown>) => Promise<CardImage | null>;
+  renderState: (
+    state: Record<string, unknown>,
+    overrides?: { surfaceColor?: string },
+  ) => Promise<CardImage | null>;
   destroy: () => void;
 }
 
@@ -134,8 +116,14 @@ function resolveCssVarExpr(val: string, rootStyle: CSSStyleDeclaration): string 
   });
 }
 
-function normalizeColorForCompare(col: string): string {
-  return col.replace(/\s+/g, '').toLowerCase();
+function sameColor(a: string, b: string): boolean {
+  const ca = a.replace(/\s+/g, '').toLowerCase();
+  const cb = b.replace(/\s+/g, '').toLowerCase();
+  if (!ca || !cb) return false;
+  if (ca === cb) return true;
+  const ra = parseColorRgb(ca);
+  const rb = parseColorRgb(cb);
+  return Boolean(ra && rb && ra[0] === rb[0] && ra[1] === rb[1] && ra[2] === rb[2]);
 }
 
 function serializeSvgToImage(
@@ -143,6 +131,7 @@ function serializeSvgToImage(
   width: number,
   height: number,
   transparentAirway: boolean,
+  surfaceColor?: string,
 ): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
     const clone = svg.cloneNode(true) as SVGSVGElement;
@@ -153,9 +142,17 @@ function serializeSvgToImage(
     clone.style.fontFamily = '"Segoe UI", "PingFang SC", system-ui, sans-serif';
 
     const rootStyle = getComputedStyle(document.documentElement);
-    const panelColor = normalizeColorForCompare(rootStyle.getPropertyValue('--anatomy-bg').trim() || rootStyle.getPropertyValue('--panel').trim() || '#ffffff');
+    const hostPanelColors = [
+      rootStyle.getPropertyValue('--anatomy-bg').trim(),
+      rootStyle.getPropertyValue('--panel').trim(),
+      '#ffffff',
+      '#fcfcfc',
+      '#fffef9',
+    ].filter(Boolean);
 
-    // Inline any CSS variable values and optionally strip opaque panel fill on airway for dark stage compositing
+    const matchesHostPanel = (col: string) => hostPanelColors.some((p) => sameColor(col, p));
+
+    // Inline CSS variable values and remap host panel fills to the card surface so dark/light card overrides blend cleanly
     const allNodes: Element[] = [clone, ...Array.from(clone.querySelectorAll('*'))];
     for (const node of allNodes) {
       for (const attrName of ['fill', 'stroke', 'stop-color', 'color', 'style']) {
@@ -164,16 +161,29 @@ function serializeSvgToImage(
           node.setAttribute(attrName, resolveCssVarExpr(raw, rootStyle));
         }
       }
+      const role = node.getAttribute('data-role') ?? '';
+      const fill = (node.getAttribute('fill') ?? '').trim();
+      const tag = node.tagName.toLowerCase();
       if (transparentAirway) {
-        const role = node.getAttribute('data-role') ?? '';
-        const fill = normalizeColorForCompare(node.getAttribute('fill') ?? '');
         if (role === 'midsagittal-airway') {
           node.setAttribute('fill', 'rgba(94, 234, 212, 0.14)');
-        } else if (fill && (fill === panelColor || fill === '#ffffff' || fill === '#fcfcfc' || fill === '#fffef9')) {
-          if (node.tagName.toLowerCase() === 'rect') {
+        } else if (fill && matchesHostPanel(fill)) {
+          if (tag === 'rect') {
             node.setAttribute('fill', 'none');
           } else if (node.getAttribute('mask')?.includes('sectionOutsideTissue')) {
             node.setAttribute('fill', 'rgba(94, 234, 212, 0.11)');
+          }
+        }
+      } else if (surfaceColor) {
+        const inDentalBg = node.parentElement?.getAttribute('data-role') === 'rigid-dental-background';
+        if (
+          inDentalBg
+          || role === 'midsagittal-airway'
+          || role === 'tongue-floor-anchor'
+          || (fill && matchesHostPanel(fill) && (tag === 'rect' || Boolean(node.getAttribute('mask'))))
+        ) {
+          if (fill && fill !== 'none' && fill !== 'white' && fill !== 'black') {
+            node.setAttribute('fill', surfaceColor);
           }
         }
       }
@@ -265,13 +275,21 @@ export async function createOffscreenVtlRenderer(
 
   let destroyed = false;
   return {
-    async renderState(state: Record<string, unknown>): Promise<CardImage | null> {
+    async renderState(
+      state: Record<string, unknown>,
+      overrides?: { surfaceColor?: string },
+    ): Promise<CardImage | null> {
       if (destroyed || !handle || !state) return null;
+      const effectiveSurface = overrides?.surfaceColor ?? opts.surfaceColor;
       try {
         handle.update(state);
         if (isModel) {
           const spatial = host.querySelector('canvas');
           if (!spatial || !handle.viewer) return null;
+          if (effectiveSurface && handle.viewer.renderer) {
+            handle.viewer.renderer.setClearColor(effectiveSurface, 1);
+            handle.viewer.needsRender = true;
+          }
           handle.viewer.renderNow();
           const output = document.createElement('canvas');
           output.width = spatial.width;
@@ -286,9 +304,9 @@ export async function createOffscreenVtlRenderer(
           const outH = Math.round(width * (vb.h / vb.w));
           const clone = svg.cloneNode(true) as SVGSVGElement;
           clone.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
-          return await serializeSvgToImage(clone, width, outH, Boolean(opts.transparentAirway));
+          return await serializeSvgToImage(clone, width, outH, Boolean(opts.transparentAirway), effectiveSurface);
         }
-        return await serializeSvgToImage(svg, width, height, Boolean(opts.transparentAirway));
+        return await serializeSvgToImage(svg, width, height, Boolean(opts.transparentAirway), effectiveSurface);
       } catch {
         return null;
       }
@@ -306,81 +324,11 @@ export async function createOffscreenVtlRenderer(
   };
 }
 
-export interface CardPalette {
-  isDark: boolean;
-  app: string;
-  panel: string;
-  sidebar: string;
-  text: string;
-  muted: string;
-  border: string;
-  accent: string;
-  teal: string;
-  success: string;
-  warning: string;
-}
-
-export function readCardPalette(): CardPalette {
-  const root = document.documentElement;
-  const cs = getComputedStyle(root);
-  const isDark = root.dataset.theme === 'dark';
-  const pick = (name: string, fb: string) => cs.getPropertyValue(name).trim() || fb;
-  return {
-    isDark,
-    app: pick('--app', isDark ? '#15181e' : '#f7f8fa'),
-    panel: pick('--panel', isDark ? '#1d222b' : '#ffffff'),
-    sidebar: pick('--sidebar', isDark ? '#181c24' : '#f2f4f8'),
-    text: pick('--text', isDark ? '#e8edf5' : '#1e242c'),
-    muted: pick('--muted', isDark ? '#98a3b3' : '#5b6573'),
-    border: pick('--border', isDark ? '#2f3746' : '#d4dbe4'),
-    accent: pick('--accent', isDark ? '#58a6ff' : '#0969da'),
-    teal: pick('--teal', isDark ? '#45b7a7' : '#1d7f7a'),
-    success: pick('--success', isDark ? '#3fb950' : '#1a7f37'),
-    warning: pick('--warning', isDark ? '#d29922' : '#9a6700'),
-  };
-}
-
-function roundRectPath(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-): void {
-  const rad = Math.max(0, Math.min(r, w / 2, h / 2));
-  ctx.beginPath();
-  ctx.moveTo(x + rad, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rad);
-  ctx.arcTo(x + w, y + h, x, y + h, rad);
-  ctx.arcTo(x, y + h, x, y, rad);
-  ctx.arcTo(x, y, x + w, y, rad);
-  ctx.closePath();
-}
-
-function drawImageContain(
-  ctx: CanvasRenderingContext2D,
-  img: CardImage,
-  x: number, y: number, w: number, h: number,
-  zoom = 1,
-  dx = 0, dy = 0,
-): void {
-  const width = img instanceof HTMLImageElement ? img.naturalWidth : img.width;
-  const height = img instanceof HTMLImageElement ? img.naturalHeight : img.height;
-  if (!width || !height) return;
-  const scale = zoom * Math.min(w / width, h / height);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
-  ctx.clip();
-  ctx.drawImage(img, x + (w - width * scale) / 2 + dx, y + (h - height * scale) / 2 + dy, width * scale, height * scale);
-  ctx.restore();
-}
-
 export async function rasterReference(
   sample: string,
   phase = 0,
   showHead = false,
+  surfaceColor?: string,
 ): Promise<HTMLImageElement | null> {
   try {
     const clip = await loadReferenceGeometry(sample);
@@ -392,238 +340,14 @@ export async function rasterReference(
       labels: false,
       showHead,
       viewBox: vb,
+      background: 'transparent',
     });
     const outW = 900;
     const outH = Math.round(outW * (vb.h / vb.w));
-    return serializeSvgToImage(svg, outW, outH, false);
+    return serializeSvgToImage(svg, outW, outH, false, surfaceColor);
   } catch {
     return null;
   }
-}
-
-function drawMissingGeometry(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, palette: CardPalette) {
-  ctx.save();
-  ctx.fillStyle = palette.muted;
-  ctx.font = '15px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('未取得声道轮廓', x + w / 2, y + h / 2);
-  ctx.restore();
-}
-
-
-const sansTypeface = '"VC Inter", "VC Noto Sans SC", "Noto Sans SC", "Microsoft YaHei", "Segoe UI", sans-serif';
-const serifTypeface = '"VC Lora", "VC Noto Serif SC", "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif';
-const ipaTypeface = '"PTBIPAPlus", "Doulos SIL", "Charis SIL", serif';
-const numericTypeface = '"JetBrains Mono", "Consolas", monospace';
-
-function fitText(ctx: CanvasRenderingContext2D, text: string, width: number): string {
-  if (ctx.measureText(text).width <= width) return text;
-  const glyphs = Array.from(text);
-  while (glyphs.length && ctx.measureText(glyphs.join('') + '…').width > width) glyphs.pop();
-  return glyphs.join('') + '…';
-}
-
-function acousticPanel(ctx: CanvasRenderingContext2D, box: CardRegion, title: string, pal: CardPalette, u: number, typeface: string): void {
-  const { x, y, w, h } = box;
-  roundRectPath(ctx, x, y, w, h, 14 * u);
-  ctx.fillStyle = pal.sidebar;
-  ctx.fill();
-  ctx.strokeStyle = pal.border;
-  ctx.lineWidth = Math.max(1, u);
-  ctx.stroke();
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.font = '600 ' + Math.max(9, 19 * u) + 'px ' + typeface;
-  ctx.fillStyle = pal.text;
-  ctx.fillText(title, x + 14 * u, y + 18 * u, w - 28 * u);
-}
-
-type PlotSeries = ReadonlyArray<ReadonlyArray<readonly [number, number]>>;
-interface PlotAxes {
-  x: [number, number]; y: [number, number]; xLabel: string; yLabel: string;
-  xTicks: number[]; yTicks: number[]; dots?: boolean; dotLabels?: string[]; resonancePeaks?: number[];
-}
-
-function acousticPlot(ctx: CanvasRenderingContext2D, box: CardRegion, series: PlotSeries, palette: CardPalette, u: number, axes: PlotAxes): void {
-  const { x, y, w, h } = box;
-  const left = x + 53 * u, top = y + 55 * u;
-  const width = Math.max(4, w - 75 * u), height = Math.max(4, h - 100 * u);
-  const bottom = top + height;
-  const fx = (v: number) => left + (v - axes.x[0]) / (axes.x[1] - axes.x[0]) * width;
-  const fy = (v: number) => top + (v - axes.y[0]) / (axes.y[1] - axes.y[0]) * height;
-  ctx.font = Math.max(8, 12.5 * u) + 'px ' + numericTypeface;
-  ctx.lineWidth = Math.max(1, .9 * u);
-  ctx.strokeStyle = palette.border;
-  ctx.fillStyle = palette.muted;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-
-  ctx.beginPath();
-  for (const value of axes.yTicks) {
-    const position = fy(value);
-    ctx.moveTo(left, position);
-    ctx.lineTo(left + width, position);
-    ctx.fillText(String(value), left - 7 * u, position, 42 * u);
-  }
-  ctx.textAlign = 'center';
-  for (const value of axes.xTicks) {
-    const position = fx(value);
-    ctx.moveTo(position, top);
-    ctx.lineTo(position, bottom);
-    ctx.fillText(String(value), position, bottom + 12 * u, 46 * u);
-  }
-  ctx.stroke();
-  ctx.strokeRect(left, top, width, height);
-  ctx.font = '500 ' + Math.max(8, 13 * u) + 'px ' + sansTypeface;
-  ctx.textAlign = 'left';
-  ctx.fillText(axes.yLabel, left, top - 13 * u, width);
-  ctx.textAlign = 'center';
-  ctx.fillText(axes.xLabel, left + width / 2, bottom + 28 * u, width);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(left - 1, top - 1, width + 2, height + 2);
-  ctx.clip();
-  const colors = [palette.accent, palette.teal];
-  series.forEach((points, index) => {
-    if (!points.length) return;
-    ctx.strokeStyle = colors[index];
-    ctx.fillStyle = colors[index];
-    ctx.lineWidth = Math.max(1.7, 2.3 * u);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    if (!axes.dots) {
-      points.forEach(([px, py], point) => point ? ctx.lineTo(fx(px), fy(py)) : ctx.moveTo(fx(px), fy(py)));
-      ctx.stroke();
-      return;
-    }
-    const xx = fx(points[0][0]), yy = fy(points[0][1]);
-    const r = Math.max(3, (index ? 5.5 : 7.2) * u);
-    if (index) {
-      ctx.moveTo(xx, yy - r);
-      ctx.lineTo(xx + r, yy);
-      ctx.lineTo(xx, yy + r);
-      ctx.lineTo(xx - r, yy);
-      ctx.closePath();
-      ctx.fill();
-    } else {
-      ctx.arc(xx, yy, r, 0, Math.PI * 2);
-      ctx.fillStyle = palette.panel;
-      ctx.fill();
-      ctx.stroke();
-    }
-  });
-
-  if (axes.resonancePeaks?.length) {
-    ctx.strokeStyle = palette.accent;
-    ctx.lineWidth = Math.max(1, .8 * u);
-    ctx.setLineDash([3 * u, 4 * u]);
-    ctx.globalAlpha = .65;
-    ctx.beginPath();
-    for (const peak of axes.resonancePeaks) {
-      if (peak >= axes.x[0] && peak <= axes.x[1]) {
-        ctx.moveTo(fx(peak), top + 15 * u);
-        ctx.lineTo(fx(peak), bottom);
-      }
-    }
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  if (axes.dots) {
-    ctx.font = '700 ' + Math.max(9, 15 * u) + 'px ' + ipaTypeface;
-    ctx.textBaseline = 'middle';
-    series.forEach((points, index) => {
-      if (!points.length) return;
-      const [px, py] = points[0];
-      const dir = index ? 1 : -1;
-      const yy = Math.max(top + 11 * u, Math.min(bottom - 9 * u, fy(py) + dir * 15 * u));
-      const tag = axes.dotLabels?.[index] || (series.length === 2 ? (index ? 'B' : 'A') : '');
-      if (!tag) return;
-      ctx.textAlign = 'center';
-      ctx.strokeStyle = palette.sidebar;
-      ctx.lineWidth = 3 * u;
-      ctx.strokeText(tag, fx(px), yy);
-      ctx.fillStyle = colors[index];
-      ctx.fillText(tag, fx(px), yy);
-    });
-  } else if (axes.resonancePeaks?.length) {
-    ctx.font = '600 ' + Math.max(8, 11 * u) + 'px ' + numericTypeface;
-    ctx.fillStyle = palette.text;
-    ctx.textAlign = 'center';
-    axes.resonancePeaks.forEach((frequency, index) => {
-      if (frequency >= axes.x[0] && frequency <= axes.x[1]) ctx.fillText('F' + (index + 1), fx(frequency), top + 6 * u);
-    });
-  }
-}
-
-function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  let cur = '';
-  for (const ch of Array.from(text)) {
-    const test = cur + ch;
-    if (ctx.measureText(test).width > maxWidth && cur.length > 0) {
-      lines.push(cur);
-      cur = ch;
-    } else {
-      cur = test;
-    }
-  }
-  if (cur) lines.push(cur);
-  return lines;
-}
-
-export interface ExploreCardRenderOptions {
-  canvas: HTMLCanvasElement;
-  canvasWidth: number;
-  canvasHeight: number;
-  targetWidth: number;
-  targetHeight: number;
-  mode: 'single' | 'compare';
-  wordLabel: string;
-  ipaLabel: string;
-  labelA: string;
-  ipaA: string;
-  labelB: string;
-  ipaB: string;
-  metricsA: TractMetrics;
-  metricsB: TractMetrics | null;
-  glottis: GlottisM27Params;
-  paramsA: Record<TractParamName, number>;
-  paramsB: Record<TractParamName, number>;
-  vtlImageSingle: CardImage | null;
-  vtlImageA: CardImage | null;
-  vtlImageB: CardImage | null;
-  morphPct?: number;
-  glyphOk: boolean;
-  geometryNote?: string;
-  appearance: CardAppearance;
-  mascot?: CardImage | null;
-  motionZoom?: number;
-}
-
-
-function boundedScale(value: number | undefined, fallback = 1, min = .65, max = 1.8): number {
-  return typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
-}
-
-function evenlySpaced(from: number, to: number, steps: number): number[] {
-  return Array.from({ length: steps + 1 }, (_, i) => Math.round((from + (to - from) * i / steps) * 10) / 10);
-}
-
-function compareCaption(role: 'A' | 'B', label: string): string {
-  const caption = label.replace(/^音\s*[AB]\s*[·：:]\s*/u, '')
-    .replace(/\s*(?:\[[^\]]+\]|\/[^/]+\/)\s*$/u, '').trim();
-  return caption ? role + ' · ' + caption : role;
-}
-
-export interface InterpolatedExploreFrame {
-  params: Record<TractParamName, number>;
-  extras: TractPoseExtras;
-  state: Record<string, unknown> | null;
-  metrics: TractMetrics;
-  alpha: number;
 }
 
 export function parseMetricsFromSnapshot(state: Record<string, unknown> | null, params: Record<TractParamName, number>): TractMetrics {

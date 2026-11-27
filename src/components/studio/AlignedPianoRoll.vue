@@ -1,18 +1,26 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { F0_LIMIT_HZ, SAMPLE_RATE_HZ, TONIC_MIDI, type F0PinPoint, type F0PinSegment, type SongTonic } from '@vocalcut/core';
+import {
+  DEFAULT_SCORE_NOTATION,
+  SAMPLE_RATE_HZ,
+  TONIC_MIDI,
+  isValidF0Hz,
+  type F0PinPoint,
+  type F0PinSegment,
+  type ScoreNotationId,
+  type SongTonic,
+} from '@vocalcut/core';
 import { MAX_MIDI, MIN_MIDI, jianpuKeyLabel, midiHz, noteInRange, noteTranspositionLimits, type ArrangerTimeRange } from './arranger-edit';
 import { INSTRUMENT_MIDI_RANGE } from './arranger-score';
 import { validArrangerF0, type PitchTool } from './arranger-pitch';
-
 import { gridSample, gridBeat, type NoteSpan, type BeatChange, type MeterChange } from './midi-score';
 
 export type PianoKeyLabelMode = 'note' | 'jianpu' | 'hz';
 
 export interface RollNote {
   eventId?: string;
-  overlayColor?:string;
-  overlayTrack?:string;
+  overlayColor?: string;
+  overlayTrack?: string;
   velocity?: number;
   rowId: string;
   rowIndex: number;
@@ -44,15 +52,16 @@ const props = withDefaults(defineProps<{
   pencil?: boolean;
   verticalPencil?: boolean;
   rangeLyrics?: boolean;
+  selectionNotes?: readonly RollNote[];
   vocalRange?: boolean;
   ghostNotes?: readonly RollNote[];
   eventTrack?: boolean;
   locked?: boolean;
   division?: number;
   beatMap?: BeatChange[];
-  meters?:MeterChange[];
+  meters?: MeterChange[];
   originSmp?: number;
-  lyricTimes?: {id:string;text:string;start:number;end:number}[];
+  lyricTimes?: { id: string; text: string; start: number; end: number }[];
   pitchReference?: readonly { t_smp: number; f0_hz: number }[];
   referenceOrigin?: number;
   synthF0Points?: readonly SynthF0Point[];
@@ -61,6 +70,7 @@ const props = withDefaults(defineProps<{
   pitchTool?: PitchTool;
   pitchPins?: readonly F0PinSegment[];
   tonic?: SongTonic;
+  notation?: ScoreNotationId;
   rowHeight?: number;
   keyLabelMode?: PianoKeyLabelMode;
   notes: RollNote[];
@@ -68,7 +78,7 @@ const props = withDefaults(defineProps<{
   activeRow: string | null;
   activeNote: number;
   pxPerBeat: number;
-  beatsPerMeasure?: 2 | 4;
+  beatsPerMeasure?: 2 | 3 | 4 | 6;
   leadPixels: number;
   bpm: number;
   endSmp: number;
@@ -81,8 +91,10 @@ const props = withDefaults(defineProps<{
   gridBeats?: readonly number[];
   phones?: readonly RollPhone[];
 }>(), {
-  division:16, originSmp:0,
+  division: 16,
+  originSmp: 0,
   tonic: 'C3',
+  notation: DEFAULT_SCORE_NOTATION,
   rowHeight: 24,
   beatsPerMeasure: 4,
   keyLabelMode: 'note',
@@ -94,18 +106,20 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   select: [rowId: string, note: number];
   pitch: [rowId: string, note: number, midi: number];
-  createNotes: [notes:NoteSpan[]];
-  assignLyrics:[ids:string[]];
-  changeEvent: [id:string,midi:number,start:number,end:number];
-  removeEvent: [id:string];
+  createNotes: [notes: NoteSpan[]];
+  assignLyrics: [notes: RollNote[]];
+  changeEvent: [id: string, midi: number, start: number, end: number];
+  removeEvent: [id: string];
   transpose: [semitones: number];
   voiceControls: [rowId: string, noteIndex: number, anchor: HTMLButtonElement];
   duration: [rowId: string, note: number, beats: number];
   strike: [midi: number, assign: boolean];
+  previewPitch: [midi: number];
   drawPitch: [points: F0PinPoint[]];
   erasePitch: [startSmp: number, endSmp: number];
   cursor: [sample: number];
   range: [startSmp: number, endSmp: number];
+  clearRange: [];
   phoneBoundary: [rowId: string, index: number, sample: number];
   'update:zoom': [zoom: number];
   'update:rowHeight': [rowHeight: number];
@@ -113,27 +127,37 @@ const emit = defineEmits<{
 }>();
 
 const KEY_W = 104;
-const cornerTools=ref<HTMLElement>();
-const cornerHeight=ref(48);
-const tierHeight=computed(()=>(props.lyricTimes?.length ? 18 : 0) + (props.phones?.length ? rowH.value : 0));
-const rulerH=computed(()=>Math.max(cornerHeight.value,26+tierHeight.value));
-const barHeight=computed(()=>rulerH.value-tierHeight.value);
+const cornerTools = ref<HTMLElement>();
+const cornerHeight = ref(48);
+const tierHeight = computed(() => (props.lyricTimes?.length ? rowH.value : 0) + (props.phones?.length ? rowH.value : 0));
+const rulerH = computed(() => Math.max(cornerHeight.value, 26 + tierHeight.value));
+const barHeight = computed(() => rulerH.value - tierHeight.value);
 const black = new Set([1, 3, 6, 8, 10]);
 const pitchNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
 const noteName = (midi: number) => pitchNames[midi % 12] + (Math.floor(midi / 12) - 1);
+
+const DEFAULT_ROLL_MIN_MIDI = 12; // C0 (~16.35 Hz)
+const DEFAULT_ROLL_MAX_MIDI = INSTRUMENT_MIDI_RANGE[1]; // C8 (~4186 Hz)
+
 const minMidi = computed(() => {
-  const minimum=props.vocalRange ? MIN_MIDI : props.eventTrack ? 0 : props.hasInstruments ? INSTRUMENT_MIDI_RANGE[0] : MIN_MIDI;
-  return props.ghostNotes?.reduce((low,n)=>Math.min(low,n.midi),minimum) ?? minimum;
+  let low: number = props.vocalRange ? DEFAULT_ROLL_MIN_MIDI : INSTRUMENT_MIDI_RANGE[0];
+  for (const n of props.notes) if (n.midi < low) low = Math.max(MIN_MIDI, n.midi - 2);
+  for (const n of props.ghostNotes ?? []) if (n.midi < low) low = Math.max(MIN_MIDI, n.midi - 2);
+  return Math.max(MIN_MIDI, low);
 });
+
 const maxMidi = computed(() => {
-  const maximum=props.vocalRange ? MAX_MIDI : props.eventTrack ? 127 : props.hasInstruments ? INSTRUMENT_MIDI_RANGE[1] : MAX_MIDI;
-  return props.ghostNotes?.reduce((high,n)=>Math.max(high,n.midi),maximum) ?? maximum;
+  let high: number = props.vocalRange ? DEFAULT_ROLL_MAX_MIDI : INSTRUMENT_MIDI_RANGE[1];
+  for (const n of props.notes) if (n.midi > high) high = Math.min(MAX_MIDI, n.midi + 2);
+  for (const n of props.ghostNotes ?? []) if (n.midi > high) high = Math.min(MAX_MIDI, n.midi + 2);
+  return Math.min(MAX_MIDI, high);
 });
+
 const keys = computed(() => Array.from({ length: maxMidi.value - minMidi.value + 1 }, (_, i) => maxMidi.value - i));
 
 const keyModes: ReadonlyArray<{ id: PianoKeyLabelMode; short: string; title: string }> = [
   { id: 'note', short: '音名', title: '音名刻度 (C4, D4, E4…)' },
-  { id: 'jianpu', short: '简谱', title: '首调简谱刻度 (按 1 = 主音实时换算)' },
+  { id: 'jianpu', short: '简谱', title: '首调简谱刻度 (按当前记谱法与主音换算)' },
   { id: 'hz', short: '频率', title: '十二平均律精确频率 (Hz)' },
 ];
 
@@ -146,13 +170,14 @@ const drag = ref<{
   x: number;
   y: number;
   midi: number;
+  lastPreviewMidi: number;
   beats: number;
   startBeats: number;
   eventStart: number;
   eventEnd: number;
   scale: number;
   pointer: number;
-  resize: boolean;
+  resize: 'none' | 'start' | 'end';
   group: boolean;
   semitones: number;
 } | null>(null);
@@ -177,17 +202,18 @@ function pitchStrokePath(points: readonly F0PinPoint[]) {
   return points.map(({ t_smp, f0_hz }, index) => `${index ? 'L' : 'M'}${x(t_smp).toFixed(2)} ${pitchY(f0_hz).toFixed(2)}`).join(' ');
 }
 
-const draftPitchPath = computed(() => (props.pitchPins ?? []).map(pin => pitchStrokePath(pin.points)).join(' '));
+const draftPitchPath = computed(() => (props.pitchPins ?? []).map((pin) => pitchStrokePath(pin.points)).join(' '));
 const gesturePitchPath = computed(() => pitchStrokePath(pitchGesture.value?.points ?? []));
 const eraseRange = computed(() => {
   const gesture = pitchGesture.value;
   if (gesture?.tool !== 'erase') return undefined;
-  const halfWidthSmp = Math.ceil(samplesPerBeat.value * 4 / props.pxPerBeat);
+  const halfWidthSmp = Math.ceil((samplesPerBeat.value * 4) / props.pxPerBeat);
   return {
     startSmp: Math.max(0, Math.min(gesture.fromSmp, gesture.toSmp) - halfWidthSmp),
     endSmp: Math.min(props.endSmp, Math.max(gesture.fromSmp, gesture.toSmp) + halfWidthSmp),
   };
 });
+
 const rangeDrag = ref<{ pointer: number; x: number; moved: boolean; startSmp: number; endSmp: number }>();
 const rollRange = computed(() => {
   const range = rangeDrag.value?.moved ? rangeDrag.value : props.selectedRange;
@@ -196,12 +222,13 @@ const rollRange = computed(() => {
     endSmp: Math.max(range.startSmp, range.endSmp),
   };
 });
-const rangeLimits = computed(() => noteTranspositionLimits(props.notes.filter(note => noteInRange(note, props.selectedRange))));
+const rangeLimits = computed(() => noteTranspositionLimits(props.notes.filter((note) => noteInRange(note, props.selectedRange)), props.eventTrack));
 const phoneDrag = ref<{ pointer: number; rowId: string; index: number; sample: number }>();
+
 const sampleOn = (event: PointerEvent | MouseEvent, element: HTMLElement) =>
-  Math.max(0, Math.min(props.endSmp, Math.round(
-    (event.clientX - element.getBoundingClientRect().left) * element.offsetWidth /
-    Math.max(1, element.getBoundingClientRect().width) * samplesPerBeat.value / props.pxPerBeat,
+  Math.max(0, Math.min(Math.max(props.endSmp, props.originSmp + samplesPerBeat.value * 16), Math.round(
+    ((event.clientX - element.getBoundingClientRect().left) * element.offsetWidth)
+      / Math.max(1, element.getBoundingClientRect().width) * samplesPerBeat.value / props.pxPerBeat,
   )));
 
 function movePhoneBoundary(event: PointerEvent, phone: RollPhone, finish = false) {
@@ -220,15 +247,15 @@ function movePhoneBoundary(event: PointerEvent, phone: RollPhone, finish = false
 function nudgePhoneBoundary(phone: RollPhone, direction: number) {
   if (!phone.boundary) return;
   emit('phoneBoundary', phone.rowId, phone.index, Math.max(phone.boundary.minSmp,
-    Math.min(phone.boundary.maxSmp, phone.startSmp + direction * SAMPLE_RATE_HZ / 200)));
+    Math.min(phone.boundary.maxSmp, phone.startSmp + (direction * SAMPLE_RATE_HZ) / 200)));
 }
 
 function gridCoordinates(event: PointerEvent, grid: HTMLElement) {
   const rect = grid.getBoundingClientRect();
-  const px = (event.clientX - rect.left) * grid.offsetWidth / Math.max(1, rect.width);
-  const py = (event.clientY - rect.top) * grid.offsetHeight / Math.max(1, rect.height);
+  const px = ((event.clientX - rect.left) * grid.offsetWidth) / Math.max(1, rect.width);
+  const py = ((event.clientY - rect.top) * grid.offsetHeight) / Math.max(1, rect.height);
   return {
-    t_smp: Math.round(px * samplesPerBeat.value / props.pxPerBeat),
+    t_smp: Math.round((px * samplesPerBeat.value) / props.pxPerBeat),
     f0_hz: midiHz(maxMidi.value + 0.5 - py / rowH.value),
   };
 }
@@ -236,68 +263,92 @@ function gridCoordinates(event: PointerEvent, grid: HTMLElement) {
 function beginRange(event: PointerEvent) {
   if (event.button !== 0 || rangeDrag.value || !props.endSmp) return;
   const lane = event.currentTarget as HTMLElement;
+  scroller.value?.focus({ preventScroll: true });
   event.preventDefault();
   lane.setPointerCapture(event.pointerId);
   const sample = sampleOn(event, lane);
   rangeDrag.value = { pointer: event.pointerId, x: event.clientX, moved: false, startSmp: sample, endSmp: sample };
 }
 
-const beatMap = computed(() => props.beatMap ?? [{beat:0,sample:props.originSmp,samplesPerBeat:samplesPerBeat.value}]);
-const gridStep = computed(() => 4/props.division);
-const snapIndex = (sample:number) => Math.max(0,Math.round(gridBeat(sample,beatMap.value)/gridStep.value));
-const atIndex = (index:number) => gridSample(index*gridStep.value,beatMap.value);
+const beatMap = computed(() => props.beatMap ?? [{ beat: 0, sample: props.originSmp, samplesPerBeat: samplesPerBeat.value }]);
+const gridStep = computed(() => 4 / props.division);
+const snapIndex = (sample: number) => Math.max(0, Math.floor(gridBeat(sample, beatMap.value) / gridStep.value + 1e-6));
+const roundSnapIndex = (sample: number) => Math.max(0, Math.round(gridBeat(sample, beatMap.value) / gridStep.value));
+const atIndex = (index: number) => gridSample(index * gridStep.value, beatMap.value);
+
 interface PencilGesture {
-  pointer:number; midi:number; first:number; last:number; cells:Map<number,number>;
+  pointer: number;
+  midi: number;
+  first: number;
+  last: number;
+  cells: Map<number, number>;
 }
 const pencilDrag = ref<PencilGesture>();
 const pencilSpans = computed<NoteSpan[]>(() => {
-  const drag=pencilDrag.value;
-  if (!drag) return [];
-  const lo=Math.min(drag.first,drag.last), hi=Math.max(lo+1,drag.first,drag.last);
-  if (!props.verticalPencil) return [{midi:drag.midi,startSmp:atIndex(lo),endSmp:atIndex(hi)}];
-  const notes:NoteSpan[]=[];
-  for (let cell=lo;cell<hi;cell++) {
-    const midi=drag.cells.get(cell) ?? drag.midi;
-    const previous=notes.at(-1);
-    if(previous?.midi===midi) previous.endSmp=atIndex(cell+1);
-    else notes.push({midi,startSmp:atIndex(cell),endSmp:atIndex(cell+1)});
+  const gesture = pencilDrag.value;
+  if (!gesture) return [];
+  const lo = Math.min(gesture.first, gesture.last);
+  const hi = Math.max(gesture.first, gesture.last) + 1;
+  if (!props.verticalPencil) {
+    return [{ midi: gesture.midi, startSmp: atIndex(lo), endSmp: atIndex(hi) }];
+  }
+  const notes: NoteSpan[] = [];
+  for (let cell = lo; cell < hi; cell++) {
+    const midi = gesture.cells.get(cell) ?? gesture.midi;
+    const previous = notes.at(-1);
+    if (previous?.midi === midi) previous.endSmp = atIndex(cell + 1);
+    else notes.push({ midi, startSmp: atIndex(cell), endSmp: atIndex(cell + 1) });
   }
   return notes;
 });
-watch(()=>[props.pencil,props.verticalPencil,props.locked,props.division,props.beatMap],()=>{pencilDrag.value=undefined;});
-type SelectionCorner={sample:number; midi:number};
-const lyricBox=ref<{pointer:number;start:SelectionCorner;end:SelectionCorner}>();
-function selectionCorner(event:PointerEvent, grid:HTMLElement):SelectionCorner {
-  const point=gridCoordinates(event,grid);
-  return {sample:point.t_smp,midi:Math.round(midiAtHz(point.f0_hz))};
-}
-const boxBounds=computed(()=>{
-  const b=lyricBox.value;
-  if(b) return {left:Math.min(b.start.sample,b.end.sample),right:Math.max(b.start.sample,b.end.sample)+1,
-    low:Math.min(b.start.midi,b.end.midi),high:Math.max(b.start.midi,b.end.midi)};
+watch(() => [props.pencil, props.verticalPencil, props.locked, props.division, props.beatMap], () => {
+  pencilDrag.value = undefined;
 });
-watch(()=>[props.rangeLyrics,props.locked,props.notes],()=>{lyricBox.value=undefined;});
+
+type SelectionCorner = { sample: number; midi: number };
+const lyricBox = ref<{ pointer: number; start: SelectionCorner; end: SelectionCorner }>();
+function selectionCorner(event: PointerEvent, grid: HTMLElement): SelectionCorner {
+  const point = gridCoordinates(event, grid);
+  return { sample: point.t_smp, midi: Math.round(midiAtHz(point.f0_hz)) };
+}
+const boxBounds = computed(() => {
+  const b = lyricBox.value;
+  if (b) {
+    return {
+      left: Math.min(b.start.sample, b.end.sample),
+      right: Math.max(b.start.sample, b.end.sample) + 1,
+      low: Math.min(b.start.midi, b.end.midi),
+      high: Math.max(b.start.midi, b.end.midi),
+    };
+  }
+  return undefined;
+});
+watch(() => [props.rangeLyrics, props.locked, props.selectionNotes, props.notes], () => { lyricBox.value = undefined; });
+
 function beginPitchGesture(event: PointerEvent) {
   if (event.button !== 0 || pitchGesture.value) return;
   const grid = event.currentTarget as HTMLElement;
   if (props.rangeLyrics && !props.locked) {
-    const start=selectionCorner(event,grid);
+    const start = selectionCorner(event, grid);
     grid.setPointerCapture(event.pointerId);
     event.preventDefault();
-    lyricBox.value={pointer:event.pointerId,start,end:start};
+    lyricBox.value = { pointer: event.pointerId, start, end: start };
     return;
   }
   if (props.pencil && !props.locked && !event.shiftKey && !(event.target as HTMLElement).closest('.roll-note')) {
-    const point=gridCoordinates(event,grid);
-    const first=snapIndex(point.t_smp);
-    const midi=Math.max(minMidi.value,Math.min(maxMidi.value,Math.round(midiAtHz(point.f0_hz))));
+    const point = gridCoordinates(event, grid);
+    const first = snapIndex(point.t_smp);
+    const midi = Math.max(minMidi.value, Math.min(maxMidi.value, Math.round(midiAtHz(point.f0_hz))));
     grid.setPointerCapture(event.pointerId);
     event.preventDefault();
-    pencilDrag.value={pointer:event.pointerId,midi,first,last:first,cells:new Map([[first,midi]])};
+    pencilDrag.value = { pointer: event.pointerId, midi, first, last: first, cells: new Map([[first, midi]]) };
+    emit('previewPitch', midi);
     return;
   }
   if (props.locked || props.pitchTool === 'notes' || props.pitchTool === 'range') {
-    if (event.shiftKey || !(event.target as HTMLElement).closest('.roll-note')) beginRange(event);
+    if (event.shiftKey || !(event.target as HTMLElement).closest('.roll-note')) {
+      beginRange(event);
+    }
     return;
   }
   const { t_smp, f0_hz } = gridCoordinates(event, grid);
@@ -309,23 +360,32 @@ function beginPitchGesture(event: PointerEvent) {
 }
 
 function movePitchGesture(event: PointerEvent) {
-  if(lyricBox.value?.pointer===event.pointerId) {lyricBox.value.end=selectionCorner(event,event.currentTarget as HTMLElement);return;}
-  if (pencilDrag.value?.pointer===event.pointerId) {
-    const drag=pencilDrag.value;
-    const grid=event.currentTarget as HTMLElement;
-    const events=event.getCoalescedEvents?.() ?? [];
-    for (const point of [...events,event]) {
-      const {t_smp,f0_hz}=gridCoordinates(point,grid);
-      const index=snapIndex(t_smp);
+  if (lyricBox.value?.pointer === event.pointerId) {
+    lyricBox.value.end = selectionCorner(event, event.currentTarget as HTMLElement);
+    return;
+  }
+  if (pencilDrag.value?.pointer === event.pointerId) {
+    const gesture = pencilDrag.value;
+    const grid = event.currentTarget as HTMLElement;
+    const events = event.getCoalescedEvents?.() ?? [];
+    for (const point of events.length ? events : [event]) {
+      const { t_smp, f0_hz } = gridCoordinates(point, grid);
+      const index = snapIndex(t_smp);
       if (props.verticalPencil) {
-        const midi=Math.max(minMidi.value,Math.min(maxMidi.value,Math.round(midiAtHz(f0_hz))));
-        const from=drag.last, to=index;
-        for(let i=Math.min(from,to);i<Math.max(from,to);i++) drag.cells.set(i,drag.midi);
-        // A vertical move on a boundary chooses the pitch of the next time cell.
-        drag.midi=midi;
-        drag.cells.set(index,midi);
+        const midi = Math.max(minMidi.value, Math.min(maxMidi.value, Math.round(midiAtHz(f0_hz))));
+        const step = index >= gesture.last ? 1 : -1;
+        for (let cell = gesture.last; cell !== index; cell += step) {
+          if (step > 0 || !gesture.cells.has(cell)) {
+            gesture.cells.set(cell, gesture.midi);
+          }
+        }
+        if (midi !== gesture.midi) {
+          gesture.midi = midi;
+          emit('previewPitch', midi);
+        }
+        gesture.cells.set(index, midi);
       }
-      drag.last=index;
+      gesture.last = index;
     }
     return;
   }
@@ -350,27 +410,31 @@ function movePitchGesture(event: PointerEvent) {
 }
 
 function releasePitchGesture(event: PointerEvent) {
-  if(lyricBox.value?.pointer===event.pointerId) {
+  if (lyricBox.value?.pointer === event.pointerId) {
     movePitchGesture(event);
-    const b=boxBounds.value!;
-    const hits=props.notes.filter(n=>n.eventId && n.startSmp<b.right && n.endSmp>b.left && n.midi>=b.low && n.midi<=b.high);
-    lyricBox.value=undefined;
-    emit('assignLyrics',hits.map(n=>n.eventId!));
+    const b = boxBounds.value!;
+    const hits = (props.selectionNotes ?? props.notes).filter((n) => n.startSmp < b.right && n.endSmp > b.left && n.midi >= b.low && n.midi <= b.high);
+    lyricBox.value = undefined;
+    emit('assignLyrics', hits);
     return;
   }
-  if (pencilDrag.value?.pointer===event.pointerId) {
+  if (pencilDrag.value?.pointer === event.pointerId) {
     movePitchGesture(event);
-    const spans=pencilSpans.value;
-    pencilDrag.value=undefined;
-    if(spans.length && !props.locked) emit('createNotes',spans);
+    const spans = pencilSpans.value;
+    pencilDrag.value = undefined;
+    if (spans.length && !props.locked) emit('createNotes', spans);
     return;
   }
   if (rangeDrag.value?.pointer === event.pointerId) {
     movePitchGesture(event);
     const { startSmp, endSmp, moved } = rangeDrag.value;
     rangeDrag.value = undefined;
-    if (moved && startSmp !== endSmp) emit('range', Math.min(startSmp, endSmp), Math.max(startSmp, endSmp));
-    else emit('cursor', endSmp);
+    if (moved && startSmp !== endSmp) {
+      emit('range', Math.min(startSmp, endSmp), Math.max(startSmp, endSmp));
+    } else {
+      if (props.selectedRange) emit('clearRange');
+      emit('cursor', endSmp);
+    }
     return;
   }
   const gesture = pitchGesture.value;
@@ -382,19 +446,35 @@ function releasePitchGesture(event: PointerEvent) {
 }
 
 function cancelPitchGesture(event: PointerEvent) {
-  if(lyricBox.value?.pointer===event.pointerId) lyricBox.value=undefined;
-  if (pencilDrag.value?.pointer===event.pointerId) pencilDrag.value=undefined;
+  if (lyricBox.value?.pointer === event.pointerId) lyricBox.value = undefined;
+  if (pencilDrag.value?.pointer === event.pointerId) pencilDrag.value = undefined;
   if (pitchGesture.value?.pointer === event.pointerId) pitchGesture.value = null;
   if (rangeDrag.value?.pointer === event.pointerId) rangeDrag.value = undefined;
 }
 
+function onGridDoubleClick(event: MouseEvent) {
+  if (props.locked || props.pitchTool !== 'notes' || props.rangeLyrics) return;
+  if ((event.target as HTMLElement).closest('.roll-note')) return;
+  const grid = event.currentTarget as HTMLElement;
+  const rect = grid.getBoundingClientRect();
+  const px = ((event.clientX - rect.left) * grid.offsetWidth) / Math.max(1, rect.width);
+  const py = ((event.clientY - rect.top) * grid.offsetHeight) / Math.max(1, rect.height);
+  const sample = Math.round((px * samplesPerBeat.value) / props.pxPerBeat);
+  const midi = Math.max(minMidi.value, Math.min(maxMidi.value, Math.round(maxMidi.value + 0.5 - py / rowH.value)));
+  const cell = snapIndex(sample);
+  const beatsSpan = Math.max(1, Math.round(1 / gridStep.value));
+  const span: NoteSpan = { midi, startSmp: atIndex(cell), endSmp: atIndex(cell + beatsSpan) };
+  emit('previewPitch', midi);
+  emit('createNotes', [span]);
+}
+
 function isTonicDegree(midi: number): boolean {
-  return ((midi - TONIC_MIDI[props.tonic]) % 12 + 12) % 12 === 0;
+  return (((midi - TONIC_MIDI[props.tonic]) % 12) + 12) % 12 === 0;
 }
 
 function keyDisplayLabel(midi: number): string {
   if (props.keyLabelMode === 'jianpu') {
-    return jianpuKeyLabel(midi, props.tonic);
+    return jianpuKeyLabel(midi, props.tonic, props.notation);
   }
   if (props.keyLabelMode === 'hz') {
     const hz = midiHz(midi).toFixed(1);
@@ -404,13 +484,13 @@ function keyDisplayLabel(midi: number): string {
 }
 
 function keyTooltip(midi: number): string {
-  return `${noteName(midi)} · 简谱 ${jianpuKeyLabel(midi, props.tonic)} (1=${props.tonic}) · ${midiHz(midi).toFixed(1)} Hz`;
+  return `${noteName(midi)} · 简谱 ${jianpuKeyLabel(midi, props.tonic, props.notation)} (1=${props.tonic}) · ${midiHz(midi).toFixed(1)} Hz`;
 }
 
 const referencePath = computed(() => {
   let previous = -Infinity;
   return (props.pitchReference ?? [])
-    .filter(({ f0_hz }) => Number.isFinite(f0_hz) && f0_hz >= F0_LIMIT_HZ.min && f0_hz <= F0_LIMIT_HZ.max)
+    .filter(({ f0_hz }) => isValidF0Hz(f0_hz))
     .map(({ t_smp, f0_hz }) => {
       const cmd = t_smp - previous > 480 ? 'M' : 'L';
       previous = t_smp;
@@ -443,13 +523,13 @@ function buildSmoothSegmentPath(pts: ReadonlyArray<{ px: number; py: number }>):
 
 const synthF0Path = computed(() => {
   if (!props.showSynthF0 || !props.synthF0Points?.length) return '';
-  const maxGapSmp = 1440; // >30 ms gap splits voiced phrases cleanly across rests / voiceless stops
+  const maxGapSmp = 1440;
   const segments: Array<Array<{ px: number; py: number }>> = [];
   let current: Array<{ px: number; py: number }> = [];
   let prevSmp = -Infinity;
 
   for (const { t_smp, f0_hz } of props.synthF0Points) {
-    if (!Number.isFinite(f0_hz) || f0_hz < F0_LIMIT_HZ.min || f0_hz > F0_LIMIT_HZ.max) {
+    if (!isValidF0Hz(f0_hz)) {
       if (current.length) {
         segments.push(current);
         current = [];
@@ -473,7 +553,9 @@ const synthF0Path = computed(() => {
 
 function currentDrag(note: RollNote) {
   const active = drag.value;
-  return active?.note.rowId === note.rowId && active.note.noteIndex === note.noteIndex ? active : null;
+  if (!active) return null;
+  if (note.eventId && active.note.eventId) return active.note.eventId === note.eventId ? active : null;
+  return active.note.rowId === note.rowId && active.note.noteIndex === note.noteIndex ? active : null;
 }
 
 function displayedMidi(note: RollNote) {
@@ -486,9 +568,9 @@ function displayedMidi(note: RollNote) {
 }
 
 const rollWidth = computed(() => {
-  const pageWidth = width.value - KEY_W;
-  const end = x((props.ghostNotes ?? []).reduce((last,n)=>Math.max(last,n.endSmp),props.endSmp));
-  return end > pageWidth ? end + pageWidth : Math.max(pageWidth, end + props.pxPerBeat * 1.5);
+  const pageWidth = Math.max(320, width.value - KEY_W);
+  const end = x((props.ghostNotes ?? []).reduce((last, n) => Math.max(last, n.endSmp), props.endSmp));
+  return end > pageWidth ? end + pageWidth : Math.max(pageWidth, end + props.pxPerBeat * 4);
 });
 const measureWidth = computed(() => props.pxPerBeat * props.beatsPerMeasure);
 const measures = computed(() => Math.max(1, Math.ceil((rollWidth.value - props.leadPixels) / measureWidth.value)));
@@ -497,50 +579,62 @@ const expressiveBeats = computed(() => (props.gridBeats ?? []).map((sample, beat
 })));
 const eventMeasures = computed(() => {
   if (!props.eventTrack) return [];
-  const endBeat=gridBeat(rollWidth.value*samplesPerBeat.value/props.pxPerBeat,beatMap.value);
-  const meters=props.meters ?? [{beat:0,numerator:props.beatsPerMeasure,denominator:4}];
-  const labels:number[]=[];
-  for(const [i,meter] of meters.entries()) {
-    const limit=Math.min(endBeat,meters[i+1]?.beat ?? Infinity);
-    const length=meter.numerator*4/meter.denominator;
-    for(let b=meter.beat; b<limit && labels.length<20000; b+=length) labels.push(x(gridSample(b,beatMap.value)));
+  const endBeat = gridBeat((rollWidth.value * samplesPerBeat.value) / props.pxPerBeat, beatMap.value);
+  const meters = props.meters?.length ? props.meters : [{ beat: 0, numerator: props.beatsPerMeasure, denominator: 4 }];
+  const labels: number[] = [];
+  for (const [i, meter] of meters.entries()) {
+    const limit = Math.min(endBeat, meters[i + 1]?.beat ?? Infinity);
+    const length = (meter.numerator * 4) / meter.denominator;
+    if (length <= 0) continue;
+    for (let b = meter.beat; b < limit && labels.length < 20000; b += length) {
+      labels.push(x(gridSample(b, beatMap.value)));
+    }
   }
   return labels;
 });
-const measureLabels = computed(() => props.eventTrack ? eventMeasures.value
+const measureLabels = computed(() => (props.eventTrack
+  ? eventMeasures.value
   : props.gridBeats
-  ? expressiveBeats.value.filter(beat => beat.measure).map(beat => beat.x)
-  : Array.from({ length: measures.value }, (_, index) => props.leadPixels + index * measureWidth.value));
+    ? expressiveBeats.value.filter((beat) => beat.measure).map((beat) => beat.x)
+    : Array.from({ length: measures.value }, (_, index) => props.leadPixels + index * measureWidth.value)));
 
-watch(() => props.playheadSmp, sample => {
+// Adaptive LOD for fine subdivision grid lines so low zoom doesn't turn into solid gray blur
+const effectiveGridStep = computed(() => {
+  let step = gridStep.value;
+  while (step * props.pxPerBeat < 12 && step < 4) step *= 2;
+  return step;
+});
+
+watch(() => props.playheadSmp, (sample) => {
   const element = scroller.value;
   if (sample === null || !element) return;
   const pageWidth = element.clientWidth - KEY_W;
   if (pageWidth <= 0) return;
   const position = x(sample);
   if (position >= element.scrollLeft + pageWidth || position < element.scrollLeft) {
-    element.scrollLeft = position;
+    element.scrollLeft = Math.max(0, position - pageWidth * 0.15);
   }
 });
 
 function centerPitch(midi?: number) {
   const element = scroller.value;
   if (element) {
-    element.scrollTop = Math.max(0, y(midi ?? props.notes[0]?.midi ?? 57) - (element.clientHeight - rulerH.value) / 2);
+    const targetMidi = midi ?? props.notes[0]?.midi ?? TONIC_MIDI[props.tonic] + 7;
+    element.scrollTop = Math.max(0, y(targetMidi) - (element.clientHeight - rulerH.value) / 2);
   }
 }
 
 onMounted(() => {
   const target = scroller.value;
   if (!target) return;
-  const measure=()=>{
-    width.value=target.clientWidth;
-    if(cornerTools.value) cornerHeight.value=cornerTools.value.offsetHeight+2;
+  const measure = () => {
+    width.value = target.clientWidth;
+    if (cornerTools.value) cornerHeight.value = cornerTools.value.offsetHeight + 2;
   };
   measure();
   observer = new ResizeObserver(measure);
   observer.observe(target);
-  if(cornerTools.value) observer.observe(cornerTools.value);
+  if (cornerTools.value) observer.observe(cornerTools.value);
   centerPitch();
 });
 onBeforeUnmount(() => observer?.disconnect());
@@ -588,18 +682,31 @@ function zoomAt(event: WheelEvent) {
 
 function selectNote(event: PointerEvent, note: RollNote) {
   if (event.button !== 0 || event.shiftKey) return;
-  if (props.locked) {emit('select',note.rowId,note.noteIndex); return;}
+  if (props.locked) {
+    emit('select', note.rowId, note.noteIndex);
+    return;
+  }
   const button = event.currentTarget as HTMLButtonElement;
   const startBeats = note.writtenBeats ?? (note.endSmp - note.startSmp) / samplesPerBeat.value;
-  const group = !props.eventTrack && noteInRange(note, props.selectedRange);
-  const resize = !group && (event.target as HTMLElement).classList.contains('note-end');
+  const group = noteInRange(note, props.selectedRange);
+  const targetEl = event.target as HTMLElement;
+  const resize: 'none' | 'start' | 'end' = group
+    ? 'none'
+    : targetEl.classList.contains('note-end')
+      ? 'end'
+      : targetEl.classList.contains('note-start') && Boolean(note.eventId)
+        ? 'start'
+        : 'none';
   drag.value = {
     note,
     x: event.clientX,
     y: event.clientY,
     midi: note.midi,
+    lastPreviewMidi: note.midi,
     beats: startBeats,
-    startBeats, eventStart:note.startSmp,eventEnd:note.endSmp,
+    startBeats,
+    eventStart: note.startSmp,
+    eventEnd: note.endSmp,
     scale: button.getBoundingClientRect().height / Math.max(1, button.offsetHeight),
     pointer: event.pointerId,
     resize,
@@ -613,83 +720,126 @@ function selectNote(event: PointerEvent, note: RollNote) {
 function moveNote(event: PointerEvent) {
   const active = drag.value;
   if (!active || active.pointer !== event.pointerId) return;
-  if (active.note.eventId) {
-    const dx=(event.clientX-active.x)/active.scale;
-    const delta=dx*samplesPerBeat.value/props.pxPerBeat;
-    const n=active.note;
-    if (Math.abs(dx)>=3 && active.resize) {
-      const minEnd=gridSample(gridBeat(n.startSmp,beatMap.value)+gridStep.value,beatMap.value);
-      active.eventEnd=Math.max(minEnd,atIndex(snapIndex(n.endSmp+delta)));
-    } else if (Math.abs(dx)>=3) {
-      active.eventStart=atIndex(snapIndex(n.startSmp+delta));
-      active.eventEnd=active.eventStart+n.endSmp-n.startSmp;
-    } else {active.eventStart=n.startSmp;active.eventEnd=n.endSmp;}
-    if (!active.resize) active.midi=Math.max(0,Math.min(127,n.midi+Math.round((active.y-event.clientY)/(rowH.value*active.scale))));
+
+  if (active.group) {
+    const delta = Math.round((active.y - event.clientY) / (rowH.value * active.scale));
+    const { min, max } = rangeLimits.value;
+    const clamped = Math.max(min, Math.min(max, delta));
+    if (clamped !== active.semitones) {
+      active.semitones = clamped;
+      emit('previewPitch', active.note.midi + clamped);
+    }
     return;
   }
-  if (active.resize) {
+
+  if (active.note.eventId) {
+    const dx = (event.clientX - active.x) / active.scale;
+    const delta = (dx * samplesPerBeat.value) / props.pxPerBeat;
+    const n = active.note;
+    const minLenStep = gridStep.value;
+    if (Math.abs(dx) >= 3 && active.resize === 'end') {
+      const minEnd = gridSample(gridBeat(n.startSmp, beatMap.value) + minLenStep, beatMap.value);
+      active.eventEnd = Math.max(minEnd, atIndex(roundSnapIndex(n.endSmp + delta)));
+    } else if (Math.abs(dx) >= 3 && active.resize === 'start') {
+      const maxStart = gridSample(gridBeat(n.endSmp, beatMap.value) - minLenStep, beatMap.value);
+      active.eventStart = Math.max(props.originSmp, Math.min(maxStart, atIndex(roundSnapIndex(n.startSmp + delta))));
+    } else if (Math.abs(dx) >= 3) {
+      active.eventStart = Math.max(props.originSmp, atIndex(roundSnapIndex(n.startSmp + delta)));
+      active.eventEnd = active.eventStart + (n.endSmp - n.startSmp);
+    } else {
+      active.eventStart = n.startSmp;
+      active.eventEnd = n.endSmp;
+    }
+    if (active.resize === 'none') {
+      const [low, high] = n.instrumental ? [0, 127] : [MIN_MIDI, MAX_MIDI];
+      const nextMidi = Math.max(low, Math.min(high, n.midi + Math.round((active.y - event.clientY) / (rowH.value * active.scale))));
+      if (nextMidi !== active.lastPreviewMidi) {
+        active.lastPreviewMidi = nextMidi;
+        emit('previewPitch', nextMidi);
+      }
+      active.midi = nextMidi;
+    }
+    return;
+  }
+
+  if (active.resize === 'end') {
     const change = Math.round(((event.clientX - active.x) * 16) / (props.pxPerBeat * active.scale)) / 16;
     active.beats = change === 0 ? active.startBeats : Math.max(1 / 16, active.startBeats + change);
   } else {
     const delta = Math.round((active.y - event.clientY) / (rowH.value * active.scale));
-    if (active.group) active.semitones = delta;
-    else {
-      const [min, max] = active.note.instrumental ? INSTRUMENT_MIDI_RANGE : [MIN_MIDI, MAX_MIDI];
-      active.midi = Math.max(min, Math.min(max, active.note.midi + delta));
+    const [min, max] = active.note.instrumental ? INSTRUMENT_MIDI_RANGE : [MIN_MIDI, MAX_MIDI];
+    const nextMidi = Math.max(min, Math.min(max, active.note.midi + delta));
+    if (nextMidi !== active.lastPreviewMidi) {
+      active.lastPreviewMidi = nextMidi;
+      emit('previewPitch', nextMidi);
     }
+    active.midi = nextMidi;
   }
 }
 
 function releaseNote(event: PointerEvent) {
   if (!drag.value || drag.value.pointer !== event.pointerId) return;
   moveNote(event);
-  const { note, midi, beats, startBeats, group, semitones,eventStart,eventEnd } = drag.value;
+  const { note, midi, beats, startBeats, group, semitones, eventStart, eventEnd, x: startX, y: startY } = drag.value;
+  const movedLessThanThreshold = Math.hypot(event.clientX - startX, event.clientY - startY) < 3;
   drag.value = null;
-  if (note.eventId) {
-    if (!props.locked && (midi!==note.midi || eventStart!==note.startSmp || eventEnd!==note.endSmp)) emit('changeEvent',note.eventId,midi,eventStart,eventEnd);
-    else if(!props.locked) emit('voiceControls',note.rowId,note.noteIndex,event.currentTarget as HTMLButtonElement);
+
+  if (group && semitones) {
+    emit('transpose', semitones);
     return;
   }
-  if (group && semitones) emit('transpose', semitones);
-  else if (note.midi !== midi) emit('pitch', note.rowId, note.noteIndex, midi);
+  if (props.selectedRange && movedLessThanThreshold) {
+    emit('clearRange');
+  }
+  if (note.eventId) {
+    if (!props.locked && (midi !== note.midi || eventStart !== note.startSmp || eventEnd !== note.endSmp)) {
+      emit('changeEvent', note.eventId, midi, eventStart, eventEnd);
+    } else if (!props.locked) {
+      emit('voiceControls', note.rowId, note.noteIndex, event.currentTarget as HTMLButtonElement);
+    }
+    return;
+  }
+  if (note.midi !== midi) emit('pitch', note.rowId, note.noteIndex, midi);
   else if (beats !== startBeats) emit('duration', note.rowId, note.noteIndex, beats);
   else if (note.instrumental) emit('strike', midi, false);
   else emit('voiceControls', note.rowId, note.noteIndex, event.currentTarget as HTMLButtonElement);
 }
 
+function deleteFocusedNote(event: KeyboardEvent, note: RollNote) {
+  if (props.selectedRange || props.locked || !note.eventId || event.repeat) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit('removeEvent', note.eventId);
+}
+
 function nudgeNotePitch(note: RollNote, semitones: number) {
+  if (props.locked) return;
   if (noteInRange(note, props.selectedRange)) {
     emit('transpose', semitones);
     return;
   }
-  const { min, max } = noteTranspositionLimits([note]);
-  if (semitones >= min && semitones <= max) emit('pitch', note.rowId, note.noteIndex, note.midi + semitones);
-}
-
-function prepareNoteAudition(event: KeyboardEvent, note: RollNote) {
-  if (event.isComposing || event.keyCode === 229 || event.repeat) return;
-  emit('select', note.rowId, note.noteIndex);
-  if (note.instrumental) {
-    event.preventDefault();
-    emit('strike', note.midi, false);
+  const { min, max } = noteTranspositionLimits([note], props.eventTrack);
+  if (semitones >= min && semitones <= max) {
+    emit('previewPitch', note.midi + semitones);
+    emit('pitch', note.rowId, note.noteIndex, note.midi + semitones);
   }
 }
 
 function revealTransposedNotes(notes: readonly RollNote[], semitones: number) {
   const element = scroller.value;
   if (!element) return;
-  const width = element.clientWidth - KEY_W;
-  const height = element.clientHeight - rulerH.value;
-  const withinView = notes.filter(note => x(note.startSmp) < element.scrollLeft + width && x(note.endSmp) > element.scrollLeft);
-  const visiblePitch = (midi: number) => y(midi) < element.scrollTop + height && y(midi) + rowH.value > element.scrollTop;
-  if (withinView.some(note => visiblePitch(note.midi + semitones))) return;
-  const anchor = withinView.find(note => visiblePitch(note.midi)) ?? withinView[0] ?? notes[0];
+  const visWidth = element.clientWidth - KEY_W;
+  const visHeight = element.clientHeight - rulerH.value;
+  const withinView = notes.filter((note) => x(note.startSmp) < element.scrollLeft + visWidth && x(note.endSmp) > element.scrollLeft);
+  const visiblePitch = (midi: number) => y(midi) < element.scrollTop + visHeight && y(midi) + rowH.value > element.scrollTop;
+  if (withinView.some((note) => visiblePitch(note.midi + semitones))) return;
+  const anchor = withinView.find((note) => visiblePitch(note.midi)) ?? withinView[0] ?? notes[0];
   if (anchor) centerPitch(anchor.midi + semitones);
 }
 
 function showRow(rowId: string) {
   const element = scroller.value;
-  const note = props.notes.find(item => item.rowId === rowId);
+  const note = props.notes.find((item) => item.rowId === rowId);
   if (!element || !note) return;
   const start = x(note.startSmp);
   const end = x(note.endSmp);
@@ -710,7 +860,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
   <div ref="scroller" class="piano-scroll" :class="{ compact: rowH < 19, 'hz-mode': keyLabelMode === 'hz' }" aria-label="钢琴卷帘" tabindex="0" @wheel="zoomAt">
     <div
       class="piano-layout"
-      :class="{ 'expressive-grid': !!gridBeats || eventTrack, 'note-pencil':pencil }"
+      :class="{ 'expressive-grid': !!gridBeats || eventTrack, 'note-pencil': pencil }"
       :style="{
         '--key-width': KEY_W + 'px',
         '--key-height': rowH + 'px',
@@ -724,46 +874,65 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
     >
       <div class="piano-corner">
         <div ref="cornerTools" class="corner-tools">
-        <div class="corner-caption">琴键 · 小节</div>
-        <div class="key-mode-pills seg control-seg xs" role="group" aria-label="琴键刻度切换">
-          <button
-            v-for="mode in keyModes"
-            :key="mode.id"
-            type="button"
-            class="key-mode-pill"
-            :class="{ active: keyLabelMode === mode.id }"
-            :aria-pressed="keyLabelMode === mode.id"
-            :title="mode.title"
-            @click="emit('update:keyLabelMode', mode.id)"
-          >
-            {{ mode.short }}
-          </button>
-        </div>
+          <div class="corner-caption">琴键 · 小节</div>
+          <div class="key-mode-pills seg control-seg xs" role="group" aria-label="琴键刻度切换">
+            <button
+              v-for="mode in keyModes"
+              :key="mode.id"
+              type="button"
+              class="key-mode-pill"
+              :class="{ active: keyLabelMode === mode.id }"
+              :aria-pressed="keyLabelMode === mode.id"
+              :title="mode.title"
+              @click="emit('update:keyLabelMode', mode.id)"
+            >
+              {{ mode.short }}
+            </button>
+          </div>
         </div>
       </div>
-      <div class="piano-ruler" :aria-label="`时间标尺，每小节 ${beatsPerMeasure} 拍`" title="点击跳播，横向拖动选段"
-        @pointerdown="beginRange" @pointermove="movePitchGesture" @pointerup="releasePitchGesture"
-        @pointercancel="cancelPitchGesture" @lostpointercapture="cancelPitchGesture">
+
+      <div
+        class="piano-ruler"
+        :aria-label="`时间标尺，每小节 ${beatsPerMeasure} 拍`"
+        title="点击跳播，横向拖动选段"
+        @pointerdown="beginRange"
+        @pointermove="movePitchGesture"
+        @pointerup="releasePitchGesture"
+        @pointercancel="cancelPitchGesture"
+        @lostpointercapture="cancelPitchGesture"
+      >
         <i v-for="(beat, index) in expressiveBeats" :key="index" class="tempo-beat" :class="{ measure: beat.measure }" :style="{ left: beat.x + 'px' }" />
         <span v-for="(position, index) in measureLabels" :key="index" :style="{ left: position + 'px' }">{{ index + 1 }}</span>
         <div v-if="lyricTimes?.length" class="sung-tier" aria-label="实际演唱字界">
-          <div v-for="word in lyricTimes" :key="word.id" class="phone-span" :style="{left:x(word.start)+'px',width:x(word.end-word.start)+'px'}" :title="'演唱字界 · '+word.text">{{word.text}}</div>
+          <div v-for="word in lyricTimes" :key="word.id" class="phone-span" :style="{ left: x(word.start) + 'px', width: Math.max(1, x(word.end - word.start)) + 'px' }" :title="'演唱字界 · ' + word.text">{{ word.text }}</div>
         </div>
         <div v-if="phones?.length" class="phone-tier" aria-label="音素" @click.stop>
-          <div v-for="phone in phones" :key="phone.rowId + ':' + phone.index" class="phone-span"
+          <div
+            v-for="phone in phones"
+            :key="phone.rowId + ':' + phone.index"
+            class="phone-span ipa"
             :style="{ left: x(phone.startSmp) + 'px', width: Math.max(1, x(phone.endSmp - phone.startSmp)) + 'px' }"
-            :title="phone.ipa" translate="no">{{ phone.ipa }}</div>
-          <button v-for="phone in phones.filter(item => item.boundary)" :key="'boundary:' + phone.rowId + ':' + phone.index"
-            class="phone-boundary" type="button" :aria-label="'音素边界 ' + phone.ipa"
+            :title="phone.ipa"
+            translate="no"
+          >{{ phone.ipa }}</div>
+          <button
+            v-for="phone in phones.filter((item) => item.boundary)"
+            :key="'boundary:' + phone.rowId + ':' + phone.index"
+            class="phone-boundary"
+            type="button"
+            :aria-label="'音素边界 ' + phone.ipa"
             :style="{ left: x(phoneDrag?.rowId === phone.rowId && phoneDrag.index === phone.index ? phoneDrag.sample : phone.startSmp) + 'px' }"
             @pointerdown.stop="movePhoneBoundary($event, phone)"
             @pointermove="movePhoneBoundary($event, phone)"
             @pointerup.stop="movePhoneBoundary($event, phone, true)"
             @lostpointercapture="phoneDrag = undefined"
             @keydown.left.prevent="nudgePhoneBoundary(phone, -1)"
-            @keydown.right.prevent="nudgePhoneBoundary(phone, 1)" />
+            @keydown.right.prevent="nudgePhoneBoundary(phone, 1)"
+          />
         </div>
       </div>
+
       <div class="piano-keys">
         <div v-for="midi in keys" :key="midi" class="key-slot">
           <button
@@ -783,22 +952,71 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           </button>
         </div>
       </div>
+
       <div
         class="piano-grid"
-        :class="{ 'pitch-draw': pitchTool === 'draw', 'pitch-erase': pitchTool === 'erase', 'range-tool': pitchTool === 'range', 'lyric-selection-tool':rangeLyrics }"
+        :class="{
+          'pitch-draw': pitchTool === 'draw',
+          'pitch-erase': pitchTool === 'erase',
+          'range-tool': pitchTool === 'range',
+          'lyric-selection-tool': rangeLyrics,
+        }"
         :style="{ height: bodyHeight + 'px' }"
         @pointerdown="beginPitchGesture"
         @pointermove="movePitchGesture"
         @pointerup="releasePitchGesture"
         @pointercancel="cancelPitchGesture"
         @lostpointercapture="cancelPitchGesture"
+        @dblclick="onGridDoubleClick"
       >
-        <i v-for="left in eventMeasures" :key="'bar:'+left" class="tempo-beat measure" :style="{left:left+'px'}" />
-        <template v-if="eventTrack"><i v-for="(section,i) in beatMap" :key="i" class="note-grid-lines" :style="{left:x(section.sample)+'px', width:Math.max(0,(beatMap[i+1]?x(beatMap[i+1].sample):rollWidth)-x(section.sample))+'px', backgroundSize:x(section.samplesPerBeat*gridStep)+'px 100%',backgroundPositionX:-x((section.beat % gridStep)*section.samplesPerBeat)+'px'}" /></template>
-        <div v-for="n in ghostNotes" :key="'ghost:'+(n.overlayTrack ?? '')+':'+n.rowId+':'+n.noteIndex" class="ghost-note" aria-hidden="true"
-          :style="{background:n.overlayColor,left:x(n.startSmp)+'px',top:y(n.midi)+2+'px',width:x(n.endSmp-n.startSmp)+'px',height:(rowH-4)+'px'}" />
-        <i v-if="boxBounds" class="lyric-box" :style="{left:x(boxBounds.left)+'px',width:Math.max(2,x(boxBounds.right-boxBounds.left))+'px',top:y(boxBounds.high)+'px',height:(boxBounds.high-boxBounds.low+1)*rowH+'px'}" />
-        <div v-for="n in pencilSpans" :key="n.startSmp" class="roll-note pencil-preview" :style="{left:x(n.startSmp)+'px',width:x(n.endSmp-n.startSmp)+'px',top:y(n.midi)+'px'}"></div>
+        <i v-for="left in eventMeasures" :key="'bar:' + left" class="tempo-beat measure" :style="{ left: left + 'px' }" />
+        <template v-if="eventTrack">
+          <i
+            v-for="(section, i) in beatMap"
+            :key="i"
+            class="note-grid-lines"
+            :style="{
+              left: x(section.sample) + 'px',
+              width: Math.max(0, (beatMap[i + 1] ? x(beatMap[i + 1].sample) : rollWidth) - x(section.sample)) + 'px',
+              backgroundSize: Math.max(8, x(section.samplesPerBeat * effectiveGridStep)) + 'px 100%',
+              backgroundPositionX: -x((section.beat % effectiveGridStep) * section.samplesPerBeat) + 'px',
+            }"
+          />
+        </template>
+
+        <div
+          v-for="n in ghostNotes"
+          :key="'ghost:' + (n.overlayTrack ?? '') + ':' + n.rowId + ':' + n.noteIndex"
+          class="ghost-note"
+          aria-hidden="true"
+          :style="{
+            '--ghost-color': n.overlayColor,
+            left: x(n.startSmp) + 'px',
+            top: y(n.midi) + 2 + 'px',
+            width: Math.max(2, x(n.endSmp - n.startSmp)) + 'px',
+            height: (rowH - 4) + 'px',
+          }"
+        />
+        <i
+          v-if="boxBounds"
+          class="lyric-box"
+          :style="{
+            left: x(boxBounds.left) + 'px',
+            width: Math.max(2, x(boxBounds.right - boxBounds.left)) + 'px',
+            top: y(boxBounds.high) + 'px',
+            height: (boxBounds.high - boxBounds.low + 1) * rowH + 'px',
+          }"
+        />
+        <div
+          v-for="n in pencilSpans"
+          :key="n.startSmp + ':' + n.midi"
+          class="roll-note pencil-preview"
+          :style="{
+            left: x(n.startSmp) + 'px',
+            width: Math.max(4, x(n.endSmp - n.startSmp)) + 'px',
+            top: y(n.midi) + (rowH < 18 ? 1.5 : 2.5) + 'px',
+          }"
+        />
         <i v-for="(beat, index) in expressiveBeats" :key="'beat:' + index" class="tempo-beat" :class="{ measure: beat.measure }" :style="{ left: beat.x + 'px' }" />
         <div
           v-for="midi in keys"
@@ -837,24 +1055,28 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
           :data-arranger-syllable-target="note.instrumental ? undefined : ''"
           :tabindex="pitchTool === 'notes' || (pitchTool === 'range' && noteInRange(note, selectedRange)) ? undefined : -1"
           :aria-description="noteInRange(note, rollRange) ? '已选中，上下拖动或按方向键可整体移调' : undefined"
-          :title="`${note.char} · ${noteName(note.midi)} (${jianpuKeyLabel(note.midi, tonic)}) · ${midiHz(note.midi).toFixed(1)} Hz · ${(note.startSmp / SAMPLE_RATE_HZ).toFixed(3)} 秒${noteInRange(note, rollRange) ? ' · 已选中' : ''}`"
+          :title="`${note.char || '器乐'} · ${noteName(note.midi)} (${jianpuKeyLabel(note.midi, tonic, notation)}) · ${midiHz(note.midi).toFixed(1)} Hz · ${(note.startSmp / SAMPLE_RATE_HZ).toFixed(3)} 秒${noteInRange(note, rollRange) ? ' · 已选中' : ''}`"
           :style="{
             left: x(currentDrag(note)?.eventStart ?? note.startSmp) + 'px',
             top: y(displayedMidi(note)) + (rowH < 18 ? 1.5 : 2.5) + 'px',
-            width: Math.max(2, note.eventId && currentDrag(note) ? x(currentDrag(note)!.eventEnd-currentDrag(note)!.eventStart) : currentDrag(note)?.resize ? currentDrag(note)!.beats * pxPerBeat : x(note.endSmp - note.startSmp)) + 'px',
+            width: Math.max(4, note.eventId && currentDrag(note) ? x(currentDrag(note)!.eventEnd - currentDrag(note)!.eventStart) : currentDrag(note)?.resize === 'end' ? currentDrag(note)!.beats * pxPerBeat : x(note.endSmp - note.startSmp)) + 'px',
+            '--vel-pct': `${Math.max(12, Math.min(100, Math.round(((note.velocity ?? 86) / 127) * 100)))}%`,
           }"
           @pointerdown="selectNote($event, note)"
           @pointermove="moveNote"
           @pointerup="releaseNote"
           @pointercancel="drag = null"
           @lostpointercapture="drag = null"
-          @keydown.delete.prevent="!locked && note.eventId && emit('removeEvent',note.eventId)"
-          @keydown.enter.prevent="emit('select', note.rowId, note.noteIndex); note.instrumental && !note.eventId ? emit('strike', note.midi, false) : emit('voiceControls', note.rowId, note.noteIndex, $event.currentTarget as HTMLButtonElement)"
-          @keydown.space.exact="prepareNoteAudition($event, note)"
+          @keydown.delete="deleteFocusedNote($event, note)"
+          @keydown.backspace="deleteFocusedNote($event, note)"
+          @keydown.enter.prevent="emit('select', note.rowId, note.noteIndex); emit('voiceControls', note.rowId, note.noteIndex, $event.currentTarget as HTMLButtonElement)"
           @keydown.up.prevent="nudgeNotePitch(note, 1)"
           @keydown.down.prevent="nudgeNotePitch(note, -1)"
         >
-          <span>{{ note.char }}</span><span class="note-end" aria-hidden="true" />
+          <span v-if="note.eventId" class="note-start" aria-hidden="true" />
+          <span class="note-label">{{ note.char || (rowH >= 20 ? noteName(displayedMidi(note)) : '') }}</span>
+          <span class="note-vel-bar" aria-hidden="true" />
+          <span class="note-end" aria-hidden="true" />
         </button>
         <svg
           v-if="synthF0Path"
@@ -882,16 +1104,19 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 
 <style scoped>
 .piano-scroll {
+  position: relative;
+  isolation: isolate;
   min-height: 0;
   min-width: 0;
   height: 100%;
   overflow: auto;
   overscroll-behavior: contain;
-  border-radius: var(--r-panel, 10px);
+  border-radius: var(--r-panel);
   background: var(--panel);
 }
 .piano-layout {
   display: grid;
+  --note-block-height: calc(var(--key-height) - 5px);
   grid-template-columns: var(--key-width) 1fr;
   grid-template-rows: var(--ruler-height) auto;
 }
@@ -904,10 +1129,10 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 }
 .piano-corner {
   left: 0;
-  z-index: 6;
+  z-index: calc(var(--z-sticky) + 2);
   display: grid;
   align-items: center;
-  border: 1px solid var(--border);
+  border: var(--border-w) solid var(--border);
 }
 .corner-tools {
   display: grid;
@@ -924,22 +1149,24 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .key-mode-pills { width: 100%; }
 .key-mode-pills .key-mode-pill { flex: 1 1 0; min-width: 0; padding-inline: 1px; }
 .piano-ruler {
-  z-index: 4;
-  border-block: 1px solid var(--border);
+  z-index: var(--z-sticky);
+  border-block: var(--border-w) solid var(--border);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
 }
 .piano-ruler > span {
   position: absolute;
-  z-index: 2;
+  z-index: calc(var(--z-base) + 1);
   top: 0;
   height: calc(var(--bar-height) - 2px);
   display: flex;
   align-items: center;
   margin-left: 7px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: var(--control-font-size-sm);
   line-height: 1;
 }
-.piano-ruler { cursor: crosshair; touch-action: none; user-select: none; }
 .expressive-grid .piano-ruler::before,
 .expressive-grid .piano-ruler::after,
 .expressive-grid .piano-grid::before,
@@ -947,41 +1174,76 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .tempo-beat {
   position: absolute;
   inset-block: 0;
-  border-left: 1px dashed color-mix(in srgb, var(--text) 20%, transparent);
+  border-left: 1px dashed color-mix(in srgb, var(--text) 18%, transparent);
   pointer-events: none;
-  z-index: 1;
+  z-index: var(--z-base);
 }
 .tempo-beat.measure {
   border-left-style: solid;
   border-left-color: color-mix(in srgb, var(--text) 28%, var(--panel));
 }
-.note-pencil .piano-grid { cursor:crosshair; }
-.ghost-note {position:absolute;pointer-events:none;z-index:1;box-sizing:border-box;border:1px dashed var(--muted);background:var(--muted);opacity:.25;border-radius:4px;}
-.pencil-preview {pointer-events:none;opacity:.6;}
-.note-grid-lines {position:absolute;inset-block:0;pointer-events:none;z-index:1;background-image:linear-gradient(to right,var(--border) 1px,transparent 1px);mask-image:repeating-linear-gradient(to bottom,black 0 3px,transparent 3px 6px);}
-.lyric-selection-tool {cursor:crosshair;}
-.lyric-selection-tool .roll-note {pointer-events:none;}
-.lyric-box {position:absolute;z-index:8;pointer-events:none;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 22%,transparent);}
-.sung-tier {position:absolute;left:0;right:0;top:var(--bar-height);height:18px;overflow:hidden;}
+.note-pencil .piano-grid { cursor: crosshair; }
+.ghost-note {
+  position: absolute;
+  pointer-events: none;
+  z-index: var(--z-base);
+  box-sizing: border-box;
+  border: 1px dashed var(--ghost-color, var(--muted));
+  background: color-mix(in srgb, var(--ghost-color, var(--muted)) 28%, transparent);
+  border-radius: var(--r-ctrl);
+}
+.lyric-selection-tool .ghost-note { border-style: solid; }
+.piano-layout.note-pencil .piano-grid,
+.lyric-selection-tool { touch-action: none; }
+.pencil-preview { pointer-events: none; opacity: 0.65; }
+.note-grid-lines {
+  position: absolute;
+  inset-block: 0;
+  pointer-events: none;
+  z-index: var(--z-base);
+  background-image: linear-gradient(to right, color-mix(in srgb, var(--border) 68%, transparent) 1px, transparent 1px);
+}
+.lyric-selection-tool { cursor: crosshair; }
+.lyric-selection-tool .roll-note { pointer-events: none; }
+.lyric-box {
+  position: absolute;
+  z-index: calc(var(--z-base) + 5);
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.sung-tier {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--bar-height);
+  height: var(--key-height);
+  overflow: hidden;
+}
 .phone-tier {
   position: absolute;
   inset: auto 0 0;
-  height:var(--key-height);
-  box-sizing:border-box;
-  z-index: 3;
-  border-top: 1px solid var(--border);
+  height: var(--key-height);
+  box-sizing: border-box;
+  z-index: calc(var(--z-base) + 2);
+  border-top: var(--border-w) solid var(--border);
   background: var(--panel);
   cursor: default;
 }
 .phone-span {
   position: absolute;
-  inset-block: 2px;
-  padding: 2px 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: var(--note-block-height);
+  display: flex;
+  align-items: center;
+  line-height: 1;
+  padding: 0 3px;
   border: 1px solid var(--border);
   border-radius: 3px;
   background: color-mix(in srgb, var(--accent) 11%, var(--panel));
   color: var(--text);
-  font-size: .91rem;
+  font-size: min(0.91rem, calc((var(--note-block-height) - 2px) * 0.74));
   white-space: nowrap;
   overflow: hidden;
 }
@@ -1002,14 +1264,14 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .piano-keys {
   position: sticky;
   left: 0;
-  z-index: 5;
-  box-shadow: 5px 0 12px rgba(15, 23, 42, 0.18);
-  background: #354255;
+  z-index: calc(var(--z-sticky) + 1);
+  box-shadow: 4px 0 10px color-mix(in srgb, var(--shadow-ink) 14%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 92%, var(--border));
 }
 .key-slot {
   height: var(--key-height);
-  background: linear-gradient(180deg, #f4f6fb, #c5cfdd);
-  border-bottom: 1px solid #a4afbf;
+  background: linear-gradient(180deg, var(--piano-white-base), var(--piano-white-shade));
+  border-bottom: 1px solid color-mix(in srgb, var(--shadow-ink) 22%, transparent);
 }
 .piano-key {
   display: flex;
@@ -1018,36 +1280,50 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
   width: 100%;
   height: 100%;
   border: 0;
-  border-radius: 0 4px 4px 0;
+  border-radius: 0 3px 3px 0;
   padding: 0 7px 0 3px;
   cursor: pointer;
-  font: 11px var(--font-mono, monospace);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
   font-variant-numeric: tabular-nums;
-  color: #26364f;
-  background: linear-gradient(180deg, #fdfefe, #e3e7ed);
-  box-shadow: inset 0 1px 1px #fff, inset 0 -3px 0 #c4cddd, inset -2px 0 0 #c6ceda;
+  color: var(--piano-white-fg);
+  background: linear-gradient(180deg, var(--piano-white-base), var(--piano-white-shade));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--piano-white-base) 92%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--shadow-ink) 18%, transparent),
+    inset -2px 0 0 color-mix(in srgb, var(--shadow-ink) 14%, transparent);
   white-space: nowrap;
   overflow: hidden;
+  transition: background-color var(--dur-fast) var(--ease-out-expo), color var(--dur-fast) var(--ease-out-expo);
 }
 .piano-key.is-tonic:not(.black) {
-  background: linear-gradient(180deg, #eef6ff, #d4e4fa);
-  color: #123c7a;
+  background: color-mix(in srgb, var(--accent) 26%, var(--piano-white-base));
+  color: var(--piano-white-fg);
+  box-shadow:
+    inset -3px 0 0 var(--accent),
+    inset 0 -1px 0 color-mix(in srgb, var(--shadow-ink) 20%, transparent);
   font-weight: 700;
 }
 .piano-key.black {
-  width: 64%;
+  width: 62%;
   height: calc(100% + 1px);
   position: relative;
-  z-index: 1;
+  z-index: var(--z-base);
   padding: 0 5px 0 2px;
-  border-radius: 0 4px 4px 0;
-  background: linear-gradient(175deg, #53657d 0%, #253348 52%, #172437 100%);
-  color: #f3f7ff;
-  box-shadow: inset 0 1px 1px #8596ae, inset 0 -3px 0 #111c2d, inset -2px 0 0 #152037, 2px 2px 4px rgba(15, 23, 43, 0.35);
-  font-size: 0.833333rem;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(175deg, var(--piano-black-top) 0%, var(--piano-black-bot) 100%);
+  color: var(--piano-black-fg);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--piano-black-fg) 18%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--piano-black-fg) 12%, transparent),
+    2px 1px 4px color-mix(in srgb, var(--shadow-ink) 45%, transparent);
+  font-size: var(--control-font-size-xs);
 }
 .piano-key.black.is-tonic {
-  color: #93c5fd;
+  color: var(--accent);
+  box-shadow:
+    inset -2px 0 0 var(--accent),
+    2px 1px 4px color-mix(in srgb, var(--shadow-ink) 45%, transparent);
   font-weight: 700;
 }
 .hz-mode .piano-key {
@@ -1067,9 +1343,9 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .piano-key:hover,
 .piano-key.pressed,
 .piano-key:active {
-  background: linear-gradient(180deg, #b2d7ff, #74a6ec);
-  color: #152e5b;
-  box-shadow: inset 0 2px 5px rgba(26, 76, 142, 0.45), inset -2px -2px 0 #5e90d0;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--ctrl-inset);
 }
 .piano-grid {
   position: relative;
@@ -1091,7 +1367,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
   border-inline: 1px solid var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   pointer-events: none;
-  z-index: 1;
+  z-index: var(--z-base);
 }
 .piano-ruler::before,
 .piano-ruler::after,
@@ -1100,19 +1376,25 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
   content: '';
   position: absolute;
   inset: 0 0 0 var(--first-beat);
-  z-index: 1;
+  z-index: var(--z-base);
   pointer-events: none;
 }
 .piano-ruler::before,
 .piano-grid::before {
-  background-image: repeating-linear-gradient(to right,
-    color-mix(in srgb, var(--text) 20%, transparent) 0 1px, transparent 1px var(--beat-width));
-  mask-image: repeating-linear-gradient(to bottom, black 0 4px, transparent 4px 8px);
+  background-image: repeating-linear-gradient(
+    to right,
+    color-mix(in srgb, var(--text) 18%, transparent) 0 1px,
+    transparent 1px var(--beat-width)
+  );
+  mask-image: repeating-linear-gradient(to bottom, var(--text) 0 4px, transparent 4px 8px);
 }
 .piano-ruler::after,
 .piano-grid::after {
-  background-image: repeating-linear-gradient(to right,
-    color-mix(in srgb, var(--text) 28%, var(--panel)) 0 1px, transparent 1px var(--measure-width));
+  background-image: repeating-linear-gradient(
+    to right,
+    color-mix(in srgb, var(--text) 28%, var(--panel)) 0 1px,
+    transparent 1px var(--measure-width)
+  );
 }
 .key-guide {
   position: absolute;
@@ -1132,73 +1414,96 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .pitch-reference {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: calc(var(--z-base) + 1);
   pointer-events: none;
-  color: color-mix(in srgb, var(--violet, var(--accent)) 78%, transparent);
+  color: color-mix(in srgb, var(--violet) 78%, transparent);
 }
 .piano-rest {
   position: absolute;
   inset-block: 0;
-  z-index: 1;
+  z-index: var(--z-base);
   background: repeating-linear-gradient(140deg, transparent 0 6px, color-mix(in srgb, var(--text) 8%, transparent) 6px 7px);
 }
 .roll-note {
   position: absolute;
-  z-index: 2;
-  height: calc(var(--key-height) - 5px);
-  padding: 0 5px;
+  z-index: calc(var(--z-base) + 1);
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--note-block-height);
+  padding: 0;
   display: inline-flex;
   align-items: center;
-  border-radius: 4px;
-  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--text));
+  border-radius: var(--r-ctrl);
+  border: var(--border-w) solid color-mix(in srgb, var(--note-color, var(--accent)) 68%, var(--text));
   color: var(--text);
-  background: color-mix(in srgb, var(--accent) 28%, var(--panel));
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.22);
-  font-size: 0.958333rem;
+  background: color-mix(in srgb, var(--note-color, var(--accent)) 28%, var(--panel));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--panel) 32%, transparent);
+  font-size: var(--control-font-size);
   white-space: nowrap;
   overflow: hidden;
-  cursor: ns-resize;
+  cursor: grab;
   touch-action: none;
   user-select: none;
 }
+.roll-note:active { cursor: grabbing; }
+.compact .piano-layout { --note-block-height: calc(var(--key-height) - 3px); }
 .compact .roll-note {
-  height: calc(var(--key-height) - 3px);
-  font-size: 0.833333rem;
-  padding: 0 3px;
+  font-size: var(--control-font-size-xs);
 }
 .roll-note.selected {
-  background: color-mix(in srgb, var(--accent) 50%, var(--panel));
+  background: color-mix(in srgb, var(--note-color, var(--accent)) 48%, var(--panel));
 }
 .roll-note.current,
 .roll-note:focus-visible {
-  outline: 1.5px solid var(--accent);
+  outline: 1.5px solid var(--note-color, var(--accent));
   outline-offset: 1px;
 }
 .roll-note.range-selected {
-  color: #10372c;
-  border-color: #c9ffe9;
-  background: #82dcb7;
-  box-shadow: 0 0 0 1px #245841;
+  border-color: var(--text);
+  outline: 1px solid var(--text);
+  background: color-mix(in srgb, var(--note-color, var(--accent)) 56%, var(--panel));
 }
+.roll-note.range-selected .note-start,
 .roll-note.range-selected .note-end { display: none; }
-.roll-note span {
+.note-label {
+  display: block;
+  min-width: 0;
+  padding: 0 5px;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: none;
 }
+.compact .note-label {
+  padding: 0 2px;
+}
+.note-vel-bar {
+  position: absolute;
+  left: 2px;
+  bottom: 1px;
+  height: 2px;
+  width: calc(var(--vel-pct, 68%) - 4px);
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--note-color, var(--accent)) 85%, var(--text));
+  opacity: 0.65;
+  pointer-events: none;
+}
+.note-start,
 .note-end {
   position: absolute;
-  width: min(7px, 38%);
-  inset: 0 0 0 auto;
+  width: min(6px, 28%);
   cursor: ew-resize;
 }
+.note-start { inset: 0 auto 0 0; }
+.note-end { inset: 0 0 0 auto; }
+.roll-note:hover .note-start,
 .roll-note:hover .note-end,
 .roll-note.current .note-end {
-  background: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: color-mix(in srgb, var(--accent) 44%, transparent);
 }
 .synth-f0-overlay {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: calc(var(--z-base) + 2);
   pointer-events: none;
 }
 .synth-f0-overlay .f0-halo {
@@ -1217,7 +1522,7 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
 .pitch-edit-layer {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: calc(var(--z-base) + 2);
   pointer-events: none;
 }
 .pitch-edit-stroke {
@@ -1233,8 +1538,8 @@ defineExpose({ showRow, centerPitch, revealTransposedNotes });
   pointer-events: none;
   position: absolute;
   inset-block: 0;
-  z-index: 4;
+  z-index: calc(var(--z-base) + 3);
   width: 2px;
-  background: var(--danger, var(--accent));
+  background: var(--danger);
 }
 </style>

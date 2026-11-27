@@ -6,8 +6,10 @@ import {
   japaneseReadingsFor,
   loadCmu,
   mappingStandards,
+  narrowJapaneseMoraIpa,
   parseCmu,
   readNumberedScore,
+  reviewKana,
   reviewText,
 } from './index.ts';
 
@@ -36,8 +38,8 @@ describe('@vocalcut/g2p pure runtime', () => {
     expect(rows[2]?.language).toBe('ja');
   });
 
-  it('parses numbered score dynamics p-fff and (1p23)ff priority', () => {
-    const parsed = readNumberedScore('1p 2fff (1p23)ff', 'C3', 120, false, 3);
+  it('parses numbered score dynamics p-fff and 《1p 2 3》ff priority', () => {
+    const parsed = readNumberedScore('《1p》 《2fff》 《1p 2 3》ff', 'C3', 120, false, 3);
     expect('score' in parsed).toBe(true);
     if ('score' in parsed) {
       const pitched = parsed.score.notes.filter((n) => n.midi !== null);
@@ -63,6 +65,66 @@ describe('@vocalcut/g2p pure runtime', () => {
     expect(sentence.moras[0].tone).toBe('H↘'); // 今日 (1型)
     expect(sentence.moras[1].tone).toBe('L');
     expect(sentence.moras[2].tone).toBe('L'); // は attaches to 今日
+    expect(sentence.moras.map((m) => m.ipa)).toEqual([
+      'kʲjo̞', 'o̞', 'ɰᵝä', 'i', 'i', 'te̞', 'ŋ̩', 'kʲi', 'de̞', 'sɯ̈ᵝ', 'ne̞',
+    ]);
+  });
+
+  it('transcribes Tokyo Japanese narrow IPA allophony, yoon glides, centralized u, devoicing, and MFA dictionary output', async () => {
+    // High-vowel devoicing: utterance-final unaccented です, inter-voiceless すき / きって, but not すすむ (fric+V+fric)
+    const desu = await analyzeJapaneseAccent('天気です。');
+    expect(desu.moras.map((m) => m.ipa)).toEqual(['te̞', 'ŋ̩', 'kʲi', 'de̞', 'sɯ̥̈ᵝ']);
+
+    const suki = await analyzeJapaneseAccent('好き');
+    expect(suki.moras.map((m) => m.ipa)).toEqual(['sɯ̥̈ᵝ', 'kʲi']);
+
+    const kitte = await analyzeJapaneseAccent('切手');
+    expect(kitte.moras.map((m) => m.ipa)).toEqual(['kʲi̥', 't̚', 'te̞']);
+
+    expect(reviewKana('すすむ').map((r) => r.ipa)).toEqual(['sɯ̈ᵝ', 'sɯ̈ᵝ', 'mɯ̈ᵝ']);
+
+    // Palatal yoon rows take /j/ glide (き/ぎ/に/ひ/び/ぴ/み/り + extended てゅ/でゅ/ふゅ/ゔゅ),
+    // labiovelar yoon rows take /ɰᵝ/ glide (くぁ/ぐぁ), while alveolopalatal sibilants (し/じ/ち) stay glide-free.
+    expect(reviewKana('きょうりゅうひゃくにょうびょうぴょんみゃく').map((r) => r.ipa)).toEqual([
+      'kʲjo̞', 'o̞', 'ɾʲjɯ̈ᵝ', 'ɯ̈ᵝ', 'çjä', 'kɯ̈ᵝ', 'ɲjo̞', 'o̞', 'bʲjo̞', 'o̞', 'pʲjo̞', 'm̩', 'mʲjä', 'kɯ̈ᵝ',
+    ]);
+    expect(reviewKana('しゃ しゅ しょ ちゃ ちゅ ちょ じゃ じゅ じょ').map((r) => r.ipa)).toEqual([
+      'ɕä', 'ɕɯ̈ᵝ', 'ɕo̞', 't͡ɕä', 't͡ɕɯ̈ᵝ', 't͡ɕo̞', 'd͡ʑä', 'd͡ʑɯ̈ᵝ', 'd͡ʑo̞',
+    ]);
+    // Unspaced ちゅちょ triggers Tokyo high-vowel devoicing between voiceless affricates
+    expect(reviewKana('ちゅちょ').map((r) => r.ipa)).toEqual(['t͡ɕɯ̥̈ᵝ', 't͡ɕo̞']);
+    expect(reviewKana('ぎょ てゅ でゅ ふゅ くぁ ぐぉ').map((r) => r.ipa)).toEqual([
+      'ɡʲjo̞', 'tʲjɯ̈ᵝ', 'dʲjɯ̈ᵝ', 'ɸʲjɯ̈ᵝ', 'kʷɰᵝä', 'ɡʷɰᵝo̞',
+    ]);
+
+    // Initial/post-nasal affricate [d͡z, d͡ʑ] vs intervocalic fricative [z, ʑ]
+    expect(reviewKana('ざっし').map((r) => r.ipa)).toEqual(['d͡zä', 'ɕ', 'ɕi']);
+    expect(reviewKana('かんじ').map((r) => r.ipa)).toEqual(['kä', 'ɲ̩', 'd͡ʑi']);
+    expect(reviewKana('かぜ').map((r) => r.ipa)).toEqual(['kä', 'ze̞']);
+    expect(reviewKana('かじ').map((r) => r.ipa)).toEqual(['kä', 'ʑi']);
+
+    // 6-way moraic nasal assimilation: m̩ / n̩ / ɲ̩ / ŋ̩ / ɰ̩̃ / ɴ̩
+    expect(reviewKana('しんぶん').map((r) => r.ipa)).toEqual(['ɕi', 'm̩', 'bɯ̈ᵝ', 'ɴ̩']);
+    expect(reviewKana('あんない').map((r) => r.ipa)).toEqual(['ä', 'n̩', 'nä', 'i']);
+    expect(reviewKana('でんわ').map((r) => r.ipa)).toEqual(['de̞', 'ɰ̩̃', 'ɰᵝä']);
+    expect(reviewKana('てんき').map((r) => r.ipa)).toEqual(['te̞', 'ŋ̩', 'kʲi']);
+
+    // MFA v3.0.0 Japanese dictionary entries are normalized to narrow Tokyo IPA & helper is idempotent
+    const ja = await japaneseReadingsFor('さくら');
+    expect(ja.get('さくら')?.[0]).toEqual(['sä', 'kɯ̈ᵝ', 'ɾä']);
+    expect(narrowJapaneseMoraIpa('co')).toBe('kʲjo̞');
+    expect(narrowJapaneseMoraIpa('ɟa')).toBe('ɡʲjä');
+    expect(narrowJapaneseMoraIpa('ɲo')).toBe('ɲjo̞');
+    expect(narrowJapaneseMoraIpa('ço')).toBe('çjo̞');
+    expect(narrowJapaneseMoraIpa('bʲɨ')).toBe('bʲjɯ̈ᵝ');
+    expect(narrowJapaneseMoraIpa('ɕo')).toBe('ɕo̞');
+    expect(narrowJapaneseMoraIpa('ɡwa')).toBe('ɡʷɰᵝä');
+    expect(narrowJapaneseMoraIpa('tsɯ̥')).toBe('t͡sɯ̥̈ᵝ');
+    expect(narrowJapaneseMoraIpa('sɨ̥')).toBe('sɯ̥̈ᵝ');
+    for (const raw of ['co', 'ci', 'ɟi', 'ɟo', 'wa', 'ɡwa', 'tsɯ̥', 'kʲo̞', 'kʲjo̞', 'ɯᵝ̥', 'ɯ̥̈ᵝ', 'ɰ̩̃', 'ɲo', 'ɕɨ̥']) {
+      const once = narrowJapaneseMoraIpa(raw);
+      expect(narrowJapaneseMoraIpa(once)).toBe(once);
+    }
   });
 
   it('transcribes narrow English aspiration on fortis stops /p, t, k/ and /t͡ʃʰ/', async () => {
@@ -104,5 +166,50 @@ describe('@vocalcut/g2p pure runtime', () => {
     expect(
       reviewText('switches pitched', 'Standard Chinese (Beijing)', miniCmu, new Map()).map((r) => r.ipa),
     ).toEqual(['ˈswɪt͡ʃʰ', 'ɪz', 'ˈpʰɪt͡ʃʰt']);
+  });
+
+  it('maps IPA [...] whitespace to 175 ms short pause and dot (. / ·) to 350 ms long pause without breaking syllable dots or plain text', () => {
+    const read = (text: string) => reviewText(text, 'Standard Chinese (Beijing)', new Map(), new Map());
+
+    // Space inside [...] -> 175 ms short pause (half of 350 ms), phraseEnd stays falsy
+    const spaced = read('[ˈnɔməl ˈvɔɪs]');
+    expect(spaced.map((r) => ({ ipa: r.ipa, pause: r.pause, phraseEnd: Boolean(r.phraseEnd) }))).toEqual([
+      { ipa: 'ˈnɔməl', pause: 175, phraseEnd: false },
+      { ipa: 'ˈvɔɪs', pause: 0, phraseEnd: false },
+    ]);
+
+    // Trailing `.`, standalone `.`, and middle dot `·` -> 350 ms long pause + phraseEnd
+    for (const sample of ['[ˈnɔməl. ˈvɔɪs]', '[ˈnɔməl . ˈvɔɪs]', '[ˈnɔməl · ˈvɔɪs]', '[ˈnɔməl·ˈvɔɪs]']) {
+      const rows = read(sample);
+      expect(rows.map((r) => ({ ipa: r.ipa, pause: r.pause, phraseEnd: Boolean(r.phraseEnd) })), sample).toEqual([
+        { ipa: 'ˈnɔməl', pause: 350, phraseEnd: true },
+        { ipa: 'ˈvɔɪs', pause: 0, phraseEnd: false },
+      ]);
+    }
+
+    // Word-internal tight `.` remains a 0 ms syllable break; `‿` remains 0 ms linked liaison
+    const tightDot = read('[ˈnɔ.məl]');
+    expect(tightDot.map((r) => ({ ipa: r.ipa, pause: r.pause, phraseEnd: Boolean(r.phraseEnd) }))).toEqual([
+      { ipa: 'ˈnɔ', pause: 0, phraseEnd: false },
+      { ipa: 'məl', pause: 0, phraseEnd: false },
+    ]);
+
+    const linked = read('[ˈnɔməl‿ˈvɔɪs]');
+    expect(linked.map((r) => ({ ipa: r.ipa, pause: r.pause, linkedToNext: Boolean(r.linkedToNext) }))).toEqual([
+      { ipa: 'ˈnɔməl', pause: 0, linkedToNext: true },
+      { ipa: 'ˈvɔɪs', pause: 0, linkedToNext: false },
+    ]);
+
+    // Comma keeps 180 ms phrase pause; orphan diacritic after space never adds a pause
+    const comma = read('[ˈnɔməl, ˈvɔɪs]');
+    expect(comma[0]).toMatchObject({ pause: 180, phraseEnd: true });
+    expect(read('[a ◌̹]')).toMatchObject([{ ipa: 'a̹', pause: 0 }]);
+
+    // Non-IPA Chinese/English spaces stay 0 ms
+    const miniCmu = parseCmu('NORMAL  N AO1 R M AH0 L\nVOICE  V OY1 S\n');
+    const enRows = reviewText('normal voice', 'Standard Chinese (Beijing)', miniCmu, new Map());
+    expect(enRows.every((r) => r.pause === 0)).toBe(true);
+    const zhRows = reviewText('你 好', 'Standard Chinese (Beijing)', miniCmu, new Map());
+    expect(zhRows.every((r) => r.pause === 0)).toBe(true);
   });
 });

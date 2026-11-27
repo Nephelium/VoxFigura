@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   FaceAppearanceCalibrator,
+  WebcamFaceTracker,
   applyAppearanceToHeadRest,
   applyDynamicExpressionToPosedHead,
   defaultAppearanceProfile,
@@ -138,5 +139,44 @@ describe('Live 3D head & vocal-tract joint reconstruction utilities', () => {
     expect(posed[4]).toBeGreaterThan(-0.5);
     expect(posed[5]).toBeGreaterThan(1.8);
     expect(posed[7]).toBeGreaterThan(4.4);
+  });
+
+  it('stops camera tracks on startup failure or mid-start cancellation', async () => {
+    const stopTrack1 = vi.fn();
+    const stopTrack2 = vi.fn();
+    let resolvePendingStream!: (stream: MediaStream) => void;
+    const getUserMedia = vi
+      .fn()
+      .mockResolvedValueOnce({ getTracks: () => [{ stop: stopTrack1 }] })
+      .mockImplementationOnce(() => new Promise<MediaStream>((resolve) => {
+        resolvePendingStream = resolve;
+      }));
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    vi.stubGlobal('document', {
+      createElement: () => ({
+        playsInline: false,
+        muted: false,
+        srcObject: null,
+        pause: vi.fn(),
+        play: vi.fn().mockRejectedValue(new Error('play failed')),
+      }),
+    });
+
+    const tracker = new WebcamFaceTracker({ onFrame: vi.fn(), onError: vi.fn() });
+    try {
+      await expect(tracker.start()).rejects.toThrow('play failed');
+      expect(stopTrack1).toHaveBeenCalledTimes(1);
+      expect(tracker.mediaStream).toBeNull();
+
+      const startPromise = tracker.start();
+      tracker.stop();
+      resolvePendingStream({ getTracks: () => [{ stop: stopTrack2 }] } as unknown as MediaStream);
+      await startPromise;
+      expect(stopTrack2).toHaveBeenCalledTimes(1);
+      expect(tracker.mediaStream).toBeNull();
+    } finally {
+      tracker.stop();
+      vi.unstubAllGlobals();
+    }
   });
 });

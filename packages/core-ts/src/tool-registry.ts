@@ -7,7 +7,7 @@
  *  - Text-model ```json proposal block extractor & validator
  */
 
-import { F0_LIMIT_HZ, PRESSURE_LIMIT_PA, SAMPLE_RATE_HZ, fail, ok, type Result } from './types';
+import { PRESSURE_LIMIT_PA, SAMPLE_RATE_HZ, VTL_F0_LIMIT_HZ, fail, ok, type Result } from './types';
 import { M27_GLOTTIS_BOUNDS, PHONATION_M27_ANCHORS, PHONATION_REGIMES } from './phonation';
 import { MANDARIN_PROM_ON_2009 } from './qta';
 import { TRACT_PARAM_LIMITS, type CommandInput } from './command-bus';
@@ -131,7 +131,7 @@ export const AI_TOOL_REGISTRY: readonly ToolDefinition[] = [
     name: 'score.validate',
     permission: 'R',
     mvp: true,
-    description: '校验结构化乐谱：小节拍数、歌词数与音高 60–600 Hz 合法性',
+    description: '校验结构化乐谱：小节拍数、歌词数与音高合法性',
     parameters: {
       type: 'object',
       properties: {
@@ -428,25 +428,6 @@ export function getToolDefinition(name: string): ToolDefinition | undefined {
   return TOOL_MAP.get(name);
 }
 
-/**
- * Generate OpenAI-compatible `tools[]` schema for Channel B execution models.
- */
-export function exportOpenAiToolsSchema(onlyMvp: boolean = false): Array<{
-  type: 'function';
-  function: { name: string; description: string; parameters: ToolDefinition['parameters'] };
-}> {
-  return AI_TOOL_REGISTRY
-    .filter((t) => (onlyMvp ? t.mvp : true))
-    .map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: `[权限:${t.permission}] ${t.description}`,
-        parameters: t.parameters,
-      },
-    }));
-}
-
 export const DIAGNOSIS_TABLE = [
   {
     symptom: '塞音太闷、不脆',
@@ -497,7 +478,7 @@ export function getRulesByTopic(topic: string): Result<Record<string, unknown>> 
     case 'units':
       return ok({
         sample_rate_hz: SAMPLE_RATE_HZ,
-        f0_hz: F0_LIMIT_HZ,
+        f0_hz: { min: 0, exclusiveMin: true, unit: 'Hz', vtl_physical_hz: VTL_F0_LIMIT_HZ },
         pressure_pa: PRESSURE_LIMIT_PA,
         tract_params: TRACT_PARAM_LIMITS,
         m27_glottis: M27_GLOTTIS_BOUNDS,

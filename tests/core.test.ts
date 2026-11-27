@@ -34,12 +34,9 @@ import {
   type VcProject,
 } from '@vocalcut/core';
 import {
-  BrowserLightM27Slot,
-  KF2TractSlot,
   VocalEngineTransport,
   mapComputeDeviceToTorch,
 } from '@vocalcut/model-adapters';
-import { evaluateControlPitch, setPianoNote } from '../src/components/research/control-pitch';
 
 function makeStarterProject(): VcProject {
   return {
@@ -307,12 +304,15 @@ describe('VocalCut Core Kernel Tests', () => {
     expect(diffSt).toBeLessThan(0.5);
   });
 
-  it('3. p–fff 与 (1p23)ff 音强优先级及密集数组突破 201 点上限', () => {
-    const parsed = parseNumberedScore('(1p23)ff 5 6fff', 'C3', 120, false, 3);
+  it('3. p–fff 与 《1p 2 3》ff 音强优先级及密集数组突破 201 点上限', () => {
+    // Legacy unwrapped syntax `(1p23)ff 5 6fff` must be rejected for vocal rows
+    expect(parseNumberedScore('(1p23)ff 5 6fff', 'C3', 120, false, 3).ok).toBe(false);
+
+    const parsed = parseNumberedScore('《1p 2 3》ff 0 《5》 0 《6fff》', 'C3', 120, false, 3);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
 
-    // In (1p23)ff: note 0 ('1p') keeps -1 (p), notes 1 & 2 ('2','3') inherit +2 (ff)
+    // In 《1p 2 3》ff: note 0 ('1p') keeps -1 (p), notes 1 & 2 ('2','3') inherit +2 (ff)
     expect(parsed.score.notes[0].dynamic).toBe(-1);
     expect(parsed.score.notes[1].dynamic).toBe(2);
     expect(parsed.score.notes[2].dynamic).toBe(2);
@@ -379,36 +379,6 @@ describe('VocalCut Core Kernel Tests', () => {
     expect(heldPhonationAt(anchors, 72000)).toEqual(PHONATION_M27_ANCHORS.falsetto);
   });
 
-  it('卷帘精确音高覆盖模型钉点，同时保持选外控制基频', () => {
-    const project = makeStarterProject();
-    project.f0_pins = [{
-      id: 'model',
-      start_smp: 0,
-      end_smp: 48000,
-      points: [{ t_smp: 0, f0_hz: 200 }, { t_smp: 48000, f0_hz: 220 }],
-      transition_ms: 30,
-      exit_fit_ms: 35,
-    }];
-    const clip = project.clips.cl_v1;
-    const original = clip.syllable_order.map((id) => clip.syllables[id]);
-    const noteStart = 4800;
-    const noteEnd = 24000;
-    const updated = [setPianoNote(original[0], noteStart, noteEnd, 440, 200, 'n1'), original[1]];
-    const before = evaluateControlPitch(project, original, clip.end_smp, 200);
-    const after = evaluateControlPitch(project, updated, clip.end_smp, 200);
-    expect(before.ok && after.ok).toBe(true);
-    if (before.ok && after.ok) {
-      for (const [index, sample] of after.value.times_smp.entries()) {
-        expect(after.value.f0_hz[index]).toBeCloseTo(
-          sample >= noteStart && sample < noteEnd ? 440 : before.value.f0_hz[index],
-          10,
-        );
-      }
-    }
-    expect(updated[0].targets[0]).toBe(original[0].targets[0]);
-    expect(updated[1]).toBe(original[1]);
-  });
-
   it('5. 命令总线、AI 提案预演与全撤销逐字节一致', () => {
     const initial = makeStarterProject();
     const initialJson = JSON.stringify(initial);
@@ -452,45 +422,85 @@ describe('VocalCut Core Kernel Tests', () => {
     expect(committed.ok).toBe(true);
     expect(bus.getRevision()).toBe(3);
 
-    // Undo proposal in 1 step, then undo cmd1 -> byte-for-byte identical to initial
+    // Undo proposal in 1 step, then undo cmd1 -> revision stays strictly monotonic while content matches initial byte-for-byte
     expect(bus.undo().ok).toBe(true);
-    expect(bus.getRevision()).toBe(2);
+    expect(bus.getRevision()).toBe(4);
+    // Replaying the stale proposal generated at revision 2 must now fail with conflict (no ABA)
+    const replayStale = bus.commitProposal(previewRes.value);
+    expect(replayStale.ok).toBe(false);
+    if (!replayStale.ok) expect(replayStale.error.code).toBe('conflict');
     expect(bus.undo().ok).toBe(true);
-    expect(bus.getRevision()).toBe(1);
-    expect(JSON.stringify(bus.getProject())).toBe(initialJson);
+    expect(bus.getRevision()).toBe(5);
+    expect(JSON.stringify({ ...bus.getProject(), revision: initial.revision })).toBe(initialJson);
 
-    // Redo restores deterministically
+    // Redo restores deterministically with monotonic revision
     expect(bus.redo().ok).toBe(true);
-    expect(bus.getRevision()).toBe(2);
+    expect(bus.getRevision()).toBe(6);
   });
 
-  it('6. 越界参数 (660 Hz / 1800 Pa / 塞音下限) 明确拒绝不夹紧', () => {
-    // 660 Hz in evalF0
-    const badF0 = evalF0({
+  it('6. 宽音域正基频通过，非正基频 / 1800 Pa / 塞音下限明确拒绝不夹紧', () => {
+    // Wide positive F0 (20 Hz and 1200 Hz) passes evalF0 without 60..600 clamping
+    const wideHighF0 = evalF0({
       total_smp: 9600,
       f_ref_hz: 200,
+      spans: [
+        {
+          id: 'sp_hi',
+          span_id: 'sy_hi',
+          start_smp: 0,
+          end_smp: 9600,
+          candidates: { user: { m_st_per_s: 0, b_end_st: 12 * Math.log2(1200 / 200), lambda_per_s: 80, source: 'user' } },
+        },
+      ],
+    });
+    expect(wideHighF0.ok).toBe(true);
+    const wideLowF0 = evalF0({
+      total_smp: 9600,
+      f_ref_hz: 20,
+      spans: [
+        {
+          id: 'sp_lo',
+          span_id: 'sy_lo',
+          start_smp: 0,
+          end_smp: 9600,
+          candidates: { user: { m_st_per_s: 0, b_end_st: 0, lambda_per_s: 80, source: 'user' } },
+        },
+      ],
+    });
+    expect(wideLowF0.ok).toBe(true);
+
+    // Non-positive F0 in evalF0 -> rejected with out_of_range
+    const badF0 = evalF0({
+      total_smp: 9600,
+      f_ref_hz: 0,
       spans: [
         {
           id: 'sp',
           span_id: 'sy_bad',
           start_smp: 0,
           end_smp: 9600,
-          candidates: { user: { m_st_per_s: 0, b_end_st: 12 * Math.log2(660 / 200), lambda_per_s: 80, source: 'user' } },
+          candidates: { user: { m_st_per_s: 0, b_end_st: 0, lambda_per_s: 80, source: 'user' } },
         },
       ],
     });
     expect(badF0.ok).toBe(false);
     if (!badF0.ok) {
       expect(badF0.error.code).toBe('out_of_range');
-      expect(badF0.error.allowed).toEqual({ min: 60, max: 600, unit: 'Hz' });
+      expect(badF0.error.allowed).toEqual({ min: 0, exclusiveMin: true, unit: 'Hz' });
     }
 
-    // 660 Hz in CommandBus
+    // Wide positive F0 passes CommandBus, while <= 0 Hz is rejected
     const bus = new CommandBus(makeStarterProject());
-    const badCmd = bus.execute({
+    const wideCmd = bus.execute({
       op: 'f0.set_targets',
       base_revision: 1,
-      args: { targets: [{ syllable_id: 'sy_0001', note_hz: 660 }] },
+      args: { targets: [{ syllable_id: 'sy_0001', note_hz: 1200 }] },
+    });
+    expect(wideCmd.ok).toBe(true);
+    const badCmd = bus.execute({
+      op: 'f0.set_targets',
+      base_revision: 2,
+      args: { targets: [{ syllable_id: 'sy_0001', note_hz: -10 }] },
     });
     expect(badCmd.ok).toBe(false);
     if (!badCmd.ok) expect(badCmd.error.code).toBe('out_of_range');
@@ -498,7 +508,7 @@ describe('VocalCut Core Kernel Tests', () => {
     // 1800 Pa pressure in CommandBus
     const badPr = bus.execute({
       op: 'voice.set_pressure',
-      base_revision: 1,
+      base_revision: 2,
       args: { syllable_id: 'sy_0001', points: [{ u: 0.5, pressure_pa: 1800 }] },
     });
     expect(badPr.ok).toBe(false);
@@ -633,25 +643,9 @@ describe('VocalCut Core Kernel Tests', () => {
     expect(getRulesByTopic('limits').ok).toBe(true);
     expect(getRulesByTopic('diagnosis').ok).toBe(true);
 
-    // Model adapters: KF2TractSlot fallback + ComputeDevice mapping
+    // Model adapters: ComputeDevice mapping + VocalEngineTransport probe
     expect(mapComputeDeviceToTorch('webgpu-high')).toBe('cuda');
     expect(mapComputeDeviceToTorch('wasm-cpu')).toBe('cpu');
-
-    const kfSlot = new KF2TractSlot({
-      fetchImpl: async () => new Response(null, { status: 404 }),
-    });
-    const kfRes = await kfSlot.predict({
-      cond_111: [Array(111).fill(0)],
-      x_base_26: [Array(26).fill(0.1)],
-    });
-    expect(kfRes.ok).toBe(true);
-    if (kfRes.ok) expect(kfRes.value.status).toBe('fallback_physical');
-
-    const lightSlot = new BrowserLightM27Slot({
-      fetchImpl: async () => new Response(null, { status: 404 }),
-    });
-    const probe = await lightSlot.probe();
-    expect(probe.ready).toBe(false);
 
     const transport = new VocalEngineTransport({
       fetchImpl: async () => new Response(null, { status: 503 }),

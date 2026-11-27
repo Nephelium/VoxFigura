@@ -47,6 +47,8 @@ export interface ActiveVoqsState {
 export interface VoqsSegmentChunk {
   text: string;
   state: ActiveVoqsState | null;
+  /** True for parser-inserted separator spaces (not written by the user). */
+  syntheticSpace?: boolean;
 }
 
 export interface VoqsParseResult {
@@ -275,11 +277,11 @@ export function parseVoqsScopedText(source: string): VoqsParseResult {
       if (body) {
         // Insert space boundaries around braced span if surrounded by phonetic tokens
         if (chunks.length > 0 && !/[\s\[［]$/u.test(chunks[chunks.length - 1].text)) {
-          chunks.push({ text: ' ', state: activeState });
+          chunks.push({ text: ' ', state: activeState, syntheticSpace: true });
         }
         walk(body, childState, tagged || effectiveTags.length > 0);
-        if (closeIdx + 1 < segment.length && !/^[\s\]］,.;:!?，。；：！？]/u.test(segment.slice(closeIdx + 1))) {
-          chunks.push({ text: ' ', state: activeState });
+        if (closeIdx + 1 < segment.length && !/^[\s\]］,.;:!?，。；：！？·]/u.test(segment.slice(closeIdx + 1))) {
+          chunks.push({ text: ' ', state: activeState, syntheticSpace: true });
         }
       }
       cursor = closeIdx + 1;

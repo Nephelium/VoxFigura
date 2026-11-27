@@ -1,4 +1,5 @@
-/** Offline, lazily loaded pure-kana subset of Japanese MFA dictionary v3.0.0. */
+/** Offline, lazily loaded pure-kana subset of Japanese MFA dictionary v3.0.0 (normalized to narrow Tokyo IPA). */
+import {narrowJapaneseMoraIpa} from './kana-readings.ts';
 export type JapaneseEntry={word:string;readings:string[];moras:string[][];probabilities:(number|null)[]};
 const DIR='/vocal-tract/assets/ja-mfa-v3/';
 const cache=new Map<number,Promise<Map<string,string>>>();
@@ -55,7 +56,9 @@ function entry(word:string,record:string):JapaneseEntry{
   const fields=record.split('\t'),readings:string[]=[],moras:string[][]=[],probabilities:(number|null)[]=[];
   for(let i=0;i<fields.length;i+=3){
     probabilities.push(fields[i]===''?null:Number(fields[i]));
-    readings.push(fields[i+1]);moras.push(fields[i+2].split(' '));
+    const narrowMoras=fields[i+2].split(' ').map(narrowJapaneseMoraIpa);
+    readings.push(narrowMoras.join(' '));
+    moras.push(narrowMoras);
   }
   return {word,readings,moras,probabilities};
 }

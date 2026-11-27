@@ -309,3 +309,44 @@ class IpaArticulationTest(unittest.TestCase):
         self.assertEqual(apart_ipa, ["ə", "pʰ", "ɑ", "ɹ", "t"])
         self.assertEqual(tsunami_ipa, ["t", "s", "u", "n", "ɑ", "m", "i"])
 
+    def test_mixed_auto_payload_applies_custom_targets_only_to_ipa_spans(self):
+        recorded_a = next(entry["params"] for entry in poses() if entry["symbol"] == "a")
+        n = 90
+        base_spans = [
+            {"start_frame": 0, "end_frame": 30, "ipa": "a", "phase": "normal"},
+            {"start_frame": 30, "end_frame": 60, "ipa": "sil", "phase": "silence", "voiced": False},
+            {"start_frame": 60, "end_frame": 90, "ipa": "a", "phase": "normal"},
+        ]
+        payload = {
+            "step_hz": 200, "speaker": "JD2", "synth_mode": "neural",
+            "f0_hz": [130] * n, "pressure_pa": [620] * 30 + [0] * 30 + [620] * 30,
+            "tract_frames": [recorded_a] * n,
+            "glottis_frames": [[0.04, 0.04, 0.04, 1.2, 0, 0.4, 0, 0]] * n,
+            "articulation_spans": base_spans,
+        }
+        model_baseline, _, _ = apply_annotation_trajectory(payload)
+        mixed_auto, _, _ = apply_annotation_trajectory({
+            **payload,
+            "pose_source": "custom",
+            "articulation_spans": [
+                base_spans[0],  # plain-text span: no pose_target_19 -> stays on model default
+                base_spans[1],
+                {**base_spans[2], "pose_target_19": recorded_a},  # [IPA] span: tracks custom pose
+            ],
+        })
+        primary = [3, 4, 5, 7, 8, 9]
+        desired = np.asarray(recorded_a)[primary]
+        base_tr = np.asarray(model_baseline["tract_frames"])
+        mixed_tr = np.asarray(mixed_auto["tract_frames"])
+
+        # Span 0 (plain text without pose_target_19) stays on the model trajectory instead of snapping to recorded_a.
+        text_drift = float(np.linalg.norm(mixed_tr[14, primary] - base_tr[14, primary]))
+        model_gap = float(np.linalg.norm(base_tr[14, primary] - desired))
+        self.assertLess(text_drift, 0.15 * model_gap)
+
+        # Span 2 ([IPA] with pose_target_19) tracks the custom recorded_a target closely.
+        ipa_err = float(np.linalg.norm(mixed_tr[74, primary] - desired))
+        ipa_base_err = float(np.linalg.norm(base_tr[74, primary] - desired))
+        self.assertLess(ipa_err, 0.4 * ipa_base_err)
+
+

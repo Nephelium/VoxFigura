@@ -7,6 +7,7 @@ type VisualFrame = {
   f0?: number;
   ja?: number;
   jx?: number;
+  ghosts?: Array<{ parts: Record<string, [number, number][]>; age: number }>;
 };
 type Theme = Record<string, string>;
 export type GlottisVisualFrame = Pick<VisualFrame, 'f0'> & {
@@ -19,7 +20,7 @@ export function readThemePalette(el: Element): Theme;
 export function interpM27AnimState(anim: M27TrajectoryAnim | null, seconds: number): (VisualFrame & GlottisVisualFrame) | null;
 export type TractViewBox = { x: number; y: number; w: number; h: number };
 export function renderM27TractSvg(svg: SVGSVGElement, anim: object, frame: VisualFrame,
-  options: { showGhost: boolean; showLabels: boolean; showHead?: boolean; showControls?: boolean; viewBox?: TractViewBox; theme: Theme }): void;
+  options: { showGhost: boolean; showLabels: boolean; showHead?: boolean; bustBase?: boolean; showControls?: boolean; viewBox?: TractViewBox; theme: Theme }): void;
 export function getM27GlottisVisHz(state: GlottisVisualFrame, mode: VibrationMode): number;
 export function drawM27GlottisCanvas(canvas: HTMLCanvasElement, state: GlottisVisualFrame, phase: number,
   options: { vibMode: VibrationMode; showLabels: boolean; theme: Theme }): void;

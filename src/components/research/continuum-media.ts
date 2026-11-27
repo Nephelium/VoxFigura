@@ -1,4 +1,4 @@
-import { SAMPLE_RATE_HZ, type Clip, type SegmentAnchor, type Syllable } from '@vocalcut/core';
+import { SAMPLE_RATE_HZ, assertValidF0Hz, type Clip, type Result, type SegmentAnchor, type Syllable, type TractParamName } from '@vocalcut/core';
 import { audioBufferFile, type WorkspaceAudio } from '@/data/workspace-transfer';
 import { shallowReactive } from 'vue';
 import { M27Adapter, type M27TrajectoryAnim } from '@vocalcut/model-adapters';
@@ -11,11 +11,93 @@ import { blobToBase64 } from './research-utils';
 import { phoneTraits } from '@/data/ipa-segments';
 import { applyPeakAudioGain } from '@/data/voice-renderer';
 import { waveSampleRate } from './annotation-edit';
+import { strToU8, zipSync } from 'fflate';
+import type { TractViewBox } from '@/vendor/m27-tract-studio/tract-renderer.js';
 
 export const received = shallowReactive<Record<'A' | 'B', WorkspaceAudio | null>>({ A: null, B: null });
 export const originalEndpointAudio = new WeakMap<File, WorkspaceAudio>();
 export type ContinuumEndpointSource = 'preset' | 'phoneme' | 'm27' | 'audio';
+export type ContinuumAxisKind = 'mix' | 'f0' | 'phonation' | 'duration' | 'pressure' | TractParamName;
+export type ContinuumSpeakerRefMode = 'endpoint_a' | 'endpoint_b' | 'builtin';
+export type ContinuumGhostMode = 'both' | 'A' | 'B' | 'off';
+
 export const endpointSelections: Record<'A' | 'B', ContinuumEndpointSource> = { A: 'preset', B: 'preset' };
+
+export interface ContinuumAxisRangeSetting {
+  values: number[];
+  min: number;
+  max: number;
+  unit: string;
+  step?: number;
+}
+
+export interface ContinuumPersistedState {
+  presetA: string;
+  phonemeA: string;
+  presetB: string;
+  phonemeB: string;
+  horizontal: ContinuumAxisKind;
+  vertical: ContinuumAxisKind;
+  dualAxis: boolean;
+  sequenceSteps: number;
+  matrixColumns: number;
+  matrixRows: number;
+  baseMix: number;
+  synthesis: 'vtl' | 'neural';
+  speakerRefMode: ContinuumSpeakerRefMode;
+  regimeA: string;
+  regimeB: string;
+  axisSettings: Record<string, ContinuumAxisRangeSetting> | null;
+  lockLips: boolean;
+  lockTongueBody: boolean;
+  lockTongueTip: boolean;
+  lockVelum: boolean;
+  lockJaw: boolean;
+  equalizeDuration: boolean;
+  selectedCellKey: string;
+  sidebarWidth: number;
+  showInspector: boolean;
+  ghostMode: ContinuumGhostMode;
+  renderedCacheKey: string;
+  rendered: Map<string, Promise<RenderedCell>>;
+  renderedWavMeta: Record<string, WavHeaderSummary & { filename: string }>;
+  lastSequenceAudio: AudioBuffer | null;
+  lastSequenceParts: Array<{ key: string; start_s: number; end_s: number }> | undefined;
+}
+
+export const continuumPersisted: ContinuumPersistedState = {
+  presetA: 'i_high',
+  phonemeA: 'i',
+  presetB: 'u_back',
+  phonemeB: 'u',
+  horizontal: 'mix',
+  vertical: 'f0',
+  dualAxis: false,
+  sequenceSteps: 5,
+  matrixColumns: 5,
+  matrixRows: 4,
+  baseMix: 50,
+  synthesis: 'vtl',
+  speakerRefMode: 'endpoint_a',
+  regimeA: 'V',
+  regimeB: 'V̤',
+  axisSettings: null,
+  lockLips: false,
+  lockTongueBody: false,
+  lockTongueTip: false,
+  lockVelum: false,
+  lockJaw: false,
+  equalizeDuration: true,
+  selectedCellKey: '1-1',
+  sidebarWidth: 276,
+  showInspector: true,
+  ghostMode: 'both',
+  renderedCacheKey: '',
+  rendered: new Map(),
+  renderedWavMeta: {},
+  lastSequenceAudio: null,
+  lastSequenceParts: undefined,
+};
 
 type Trajectory = NonNullable<WorkspaceAudio['frames']>;
 type TimingSpan = { start: number; end: number };
@@ -58,18 +140,23 @@ function getEndpointTiming(clip?: Clip): EndpointTiming | null {
   return { syllables, boundaries, pattern: anchors.map(t => boundaries.indexOf(t)) };
 }
 
-export function alignEndpointTimings(a: WorkspaceAudio | null, b: WorkspaceAudio | null): EndpointAlignment {
+export function alignEndpointTimings(
+  a: WorkspaceAudio | null,
+  b: WorkspaceAudio | null,
+  equalizeDuration = true,
+): EndpointAlignment {
   const first = getEndpointTiming(a?.clip);
   const second = getEndpointTiming(b?.clip);
   const same = first && second && first.syllables.length === second.syllables.length &&
     first.syllables.every(({ phones }, i) => phones.length === second.syllables[i].phones.length) &&
     first.pattern.length === second.pattern.length && first.pattern.every((v, i) => v === second.pattern[i]);
+  const durationNote = equalizeDuration ? '输出时长按较长端点等时长对齐' : '输出时长随插值比例变化';
   const message = same
-    ? '音节和音素边界逐段对齐，输出时长随插值变化，标签沿用较近端点。'
+    ? `音节和音素边界逐段对齐，${durationNote}，标签沿用较近端点。`
     : first && second
-      ? '两端标注结构或间隔位置不兼容。中间格按总时长比例混合，交接时携带音频和构型轨迹。'
+      ? `两端标注结构或间隔位置不兼容。中间格按总时长比例混合，${durationNote}，交接时携带音频和构型轨迹。`
       : first || second
-        ? '目前只有一端有有效标注。中间格按总时长比例混合，交接时携带音频和构型轨迹。'
+        ? `目前只有一端有有效标注。中间格按总时长比例混合，${durationNote}，交接时携带音频和构型轨迹。`
         : '当前端点无可对齐的标注。交接时携带音频和构型轨迹。';
   return { a: first, b: second, compatible: !!same, message };
 }
@@ -163,14 +250,28 @@ export function needsContinuumAnalysis(source: WorkspaceAudio): boolean {
   return hasLegacyContinuumTrack(source) || !sourceTrajectory(source).length;
 }
 
-export function resolveContinuumSource(source: WorkspaceAudio, device: ComputeDevice): Promise<WorkspaceAudio> {
+export function resolveContinuumSource(
+  source: WorkspaceAudio,
+  device: ComputeDevice,
+  signal?: AbortSignal,
+): Promise<WorkspaceAudio> {
   if (!needsContinuumAnalysis(source)) return Promise.resolve(source);
   let result = analyses.get(source.file);
   if (!result) {
     result = (async () => {
       const input = source.analysisFile ?? source.file;
-      const response = await adapter.reconstruct({ wav_base64: await blobToBase64(input), filename: input.name,
-        synth_mode: 'animation', compute_device: device, fps: 25 });
+      const guideText = source.alignmentText?.trim() || undefined;
+      const response = await adapter.reconstruct({
+        wav_base64: await blobToBase64(input),
+        filename: input.name,
+        text: guideText,
+        alignment_mode: guideText ? 'guided' : undefined,
+        synth_mode: 'animation',
+        compute_device: device,
+        fps: 25,
+        signal,
+      });
+      if (signal?.aborted) throw new DOMException('已取消端点分析', 'AbortError');
       if (!response.ok) throw new Error(response.error.hint);
       const { alignment, m27_50hz_pa: rows } = response.value;
       if (hasLegacyContinuumTrack({ ...source, m27RowsPa: rows, frames: undefined })) {
@@ -184,6 +285,19 @@ export function resolveContinuumSource(source: WorkspaceAudio, device: ComputeDe
     analyses.set(source.file, result);
   }
   return result;
+}
+
+export function endpointEffectiveDuration(source: WorkspaceAudio | null, wholeSeconds: number): number {
+  const clip = source?.clip;
+  if (
+    clip &&
+    clip.start_smp >= 0 &&
+    clip.end_smp > clip.start_smp &&
+    clip.end_smp <= wholeSeconds * SAMPLE_RATE_HZ + 960
+  ) {
+    return (clip.end_smp - clip.start_smp) / SAMPLE_RATE_HZ;
+  }
+  return wholeSeconds;
 }
 
 export function sourceControls(source: WorkspaceAudio | null, wholeSeconds: number, u: number): number[] | undefined {
@@ -227,6 +341,47 @@ export function endpointDuration(source: WorkspaceAudio | null): Promise<number>
 }
 
 export const CONTINUUM_GAP_S = 0.22;
+
+/**
+ * Resolve frame F0 for continuum synthesis without silent clamping or silent fallback
+ * replacement. Out-of-range source F0 values are rejected with standard `out_of_range`.
+ */
+export function resolveContinuumFramePitch(params: {
+  leftF0Hz?: number;
+  rightF0Hz?: number;
+  leftEndpointF0Hz: number;
+  rightEndpointF0Hz: number;
+  alpha: number;
+  axisOverrideHz: number | null;
+  frameIndex?: number;
+}): Result<number> {
+  const frameTag = params.frameIndex !== undefined ? `第 ${params.frameIndex + 1} 帧` : '控制轨';
+  if (params.axisOverrideHz !== null) {
+    return assertValidF0Hz(
+      'continuum.axis.f0_hz',
+      params.axisOverrideHz,
+      `连续统 F0 轴目标值 (${params.axisOverrideHz} Hz) 须为正有限值 (> 0 Hz)`,
+    );
+  }
+  const pitchAVal = params.leftF0Hz !== undefined ? params.leftF0Hz : params.leftEndpointF0Hz;
+  const pitchAChk = assertValidF0Hz(
+    'continuum.sourceA.f0_hz',
+    pitchAVal,
+    `端点 A ${frameTag}基频 (${pitchAVal} Hz) 须为正有限值 (> 0 Hz)；请修正源控制轨或通过 F0 轴显式指定基频`,
+  );
+  if (!pitchAChk.ok) return pitchAChk;
+
+  const pitchBVal = params.rightF0Hz !== undefined ? params.rightF0Hz : params.rightEndpointF0Hz;
+  const pitchBChk = assertValidF0Hz(
+    'continuum.sourceB.f0_hz',
+    pitchBVal,
+    `端点 B ${frameTag}基频 (${pitchBVal} Hz) 须为正有限值 (> 0 Hz)；请修正源控制轨或通过 F0 轴显式指定基频`,
+  );
+  if (!pitchBChk.ok) return pitchBChk;
+
+  const mixed = pitchAChk.value + (pitchBChk.value - pitchAChk.value) * params.alpha;
+  return assertValidF0Hz('continuum.f0_hz', mixed);
+}
 
 export function joinContinuumAudio(context: AudioContext, buffers: AudioBuffer[]): AudioBuffer {
   if (buffers.length === 1) return buffers[0];
@@ -336,7 +491,10 @@ export interface RenderedCell {
   duration: number;
   clip?: Clip;
 }
-export async function cellMovie(cell: RenderedCell): Promise<Blob> {
+export async function cellMovie(
+  cell: RenderedCell,
+  options?: { background?: string; viewBox?: TractViewBox },
+): Promise<Blob> {
   const width = 720, height = 480;
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -345,6 +503,9 @@ export async function cellMovie(cell: RenderedCell): Promise<Blob> {
   const mime = typeof MediaRecorder === 'undefined' ? undefined
     : ['video/webm;codecs=vp8,opus', 'video/webm'].find(type => MediaRecorder.isTypeSupported(type));
   if (!ctx || !canvas.captureStream || !mime) throw new Error('当前浏览器无法编码带音频的 WebM 声道视频。');
+  const resolvedPanelBg = options?.background
+    || (typeof document !== 'undefined' ? getComputedStyle(document.documentElement).getPropertyValue('--panel').trim() : '')
+    || 'Canvas';
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   const images: ImageBitmap[] = [];
   const audio = studioAudioContext();
@@ -354,9 +515,11 @@ export async function cellMovie(cell: RenderedCell): Promise<Blob> {
   const source = audio.createBufferSource();
   const stream = canvas.captureStream(25);
   let timer: number | undefined;
+  let rafId = 0;
+  let stopped = false;
   try {
     for (const frame of cell.frames) {
-      paintReferenceFrame(svg, frame, { background: '#f8f8f4' });
+      paintReferenceFrame(svg, frame, { background: resolvedPanelBg, viewBox: options?.viewBox });
       svg.setAttribute('width', String(width));
       svg.setAttribute('height', String(height));
       const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
@@ -377,7 +540,7 @@ export async function cellMovie(cell: RenderedCell): Promise<Blob> {
       const sample = Math.round(t * SAMPLE_RATE_HZ);
       const label = labels.find(item => item.start_smp <= sample && sample < item.end_smp);
       const phone = label?.segments.find(item => item.start_smp <= sample && sample < item.end_smp);
-      ctx.fillStyle = '#f8f8f4';
+      ctx.fillStyle = resolvedPanelBg;
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(images[index], 0, 0, width, height);
       if (!label || (!label.text && !phone?.ipa)) return;
@@ -400,17 +563,80 @@ export async function cellMovie(cell: RenderedCell): Promise<Blob> {
       recorder.onstop = () => chunks.length ? resolve(new Blob(chunks, { type: recorder.mimeType })) : reject(new Error('没有可下载的视频帧。'));
       recorder.onerror = () => reject(new Error('视频编码失败。'));
     });
-    source.onended = () => { if (recorder.state !== 'inactive') recorder.stop(); };
+    source.onended = () => {
+      stopped = true;
+      if (recorder.state !== 'inactive') recorder.stop();
+    };
     const start = audio.currentTime;
     recorder.start();
     source.start();
-    timer = window.setInterval(() => draw(audio.currentTime - start), 40);
+    const tick = () => {
+      if (stopped) return;
+      draw(Math.max(0, audio.currentTime - start));
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    timer = window.setInterval(() => {
+      if (!stopped) draw(Math.max(0, audio.currentTime - start));
+    }, 80);
     return await done;
   } finally {
+    stopped = true;
+    cancelAnimationFrame(rafId);
     window.clearInterval(timer);
     images.forEach(image => image.close());
     stream.getTracks().forEach(track => track.stop());
     source.disconnect();
     mix.disconnect();
   }
+}
+
+export interface StimulusCsvRow {
+  step_a: number;
+  step_b: number;
+  filename: string;
+  sample_rate_hz: number;
+  num_samples?: number;
+  f0_hz: number;
+  duration_ms?: number;
+  pressure_pa?: number;
+  f1_hz?: number;
+  f2_hz?: number;
+  f3_hz?: number;
+  amin_cm2?: number;
+}
+
+export function buildStimulusCsv(rows: readonly StimulusCsvRow[]): string {
+  const headers = [
+    'step_a', 'step_b', 'filename', 'sample_rate_hz', 'num_samples',
+    'f0_hz', 'duration_ms', 'pressure_pa', 'f1_hz', 'f2_hz', 'f3_hz', 'amin_cm2',
+  ] as const;
+  const esc = (v: unknown) => {
+    if (v === undefined || v === null) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((k) => esc(row[k])).join(','));
+  }
+  return `\uFEFF${lines.join('\r\n')}\r\n`;
+}
+
+export async function buildStimulusZip(params: {
+  bundleJson: string;
+  csvText: string;
+  wavFiles: ReadonlyArray<{ filename: string; wav: File }>;
+}): Promise<Blob> {
+  const entries: Record<string, Uint8Array> = {
+    'manifest.json': strToU8(params.bundleJson),
+    'acoustic_table.csv': strToU8(params.csvText),
+  };
+  for (const item of params.wavFiles) {
+    entries[`wav/${item.filename}`] = new Uint8Array(await item.wav.arrayBuffer());
+  }
+  const zipped = zipSync(entries, { level: 0 });
+  const copy = new Uint8Array(zipped.byteLength);
+  copy.set(zipped);
+  return new Blob([copy], { type: 'application/zip' });
 }

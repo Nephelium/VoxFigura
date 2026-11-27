@@ -799,7 +799,7 @@ export default {
   "platform.this_audio_permission_request_has_expired_click_authorize_and": "本次音频权限请求已失效，请重新点击授权并刷新设备。",
   "platform.this_media_permission_request_has_expired_click_start_capture": "本次媒体权限请求已失效，请重新点击开始采集。",
   "platform.no_output_folder_was_selected_managed_results_are_retained": "未选择输出目录，受管结果仍保留，可重试导出。",
-  "platform.jing_shaozi": "井韶子",
+  "platform.jing_shaozi": "井立文",
   "platform.this_feedback_operation_is_unavailable": "此反馈操作不可用。",
   "platform.your_login_has_expired_log_in_again": "登录已过期，请重新登录。",
   "platform.the_account_has_changed_reopen_feedback": "账号已切换，请重新打开反馈。",

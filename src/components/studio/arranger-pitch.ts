@@ -1,5 +1,5 @@
 import {
-  F0_LIMIT_HZ, assertInRange, hzToSt, interpolateF0PinHz, msToSamples, ok, outOfRange, samplesToMs,
+  assertValidF0Hz, hzToSt, interpolateF0PinHz, msToSamples, ok, outOfRange, samplesToMs,
   type AnnotationControls, type Clip, type F0PinPoint, type F0PinSegment, type QtaTargetSpan, type Result,
 } from '@vocalcut/core';
 import { ARRANGED_PORTAMENTO_RULE } from './arranger-score';
@@ -67,7 +67,7 @@ export function arrangementPitchTargets(notes: readonly PitchedNote[], reference
 }
 
 export function validArrangerF0(hz: number) {
-  return assertInRange('f0_hz', hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz', '手绘基频须在 60–600 Hz 之间');
+  return assertValidF0Hz('f0_hz', hz, '手绘基频须为有限正数 (> 0 Hz)');
 }
 
 export function cropArrangerPitchPin(pin: F0PinSegment, startSmp: number, endSmp: number): F0PinSegment | undefined {

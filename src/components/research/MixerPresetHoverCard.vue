@@ -31,9 +31,13 @@ const disabledNotice = computed(() => getDisabledMixerPresetNotice(props.preset)
 const snapshot = computed(() =>
   props.preset?.builtin && !disabledNotice.value ? VOQS_PRESET_CURVES[props.preset.id] ?? null : null,
 );
+const recordingRef = computed(() => {
+  if (!props.preset?.builtin || disabledNotice.value || !snapshot.value) return null;
+  return { recordingId: snapshot.value.recordingId, recordingTitle: snapshot.value.recordingTitle };
+});
 
 watch(
-  () => snapshot.value?.recordingId,
+  () => recordingRef.value?.recordingId,
   (recId, _, onCleanup) => {
     liveTrack.value = null;
     if (!recId || disabledNotice.value) return;
@@ -48,7 +52,7 @@ watch(
     void loadVoqsTrack(recId, AbortSignal.any([ctrl.signal, AbortSignal.timeout(4000)]))
       .then((res) => {
         liveCache.set(recId, res);
-        if (!ctrl.signal.aborted && snapshot.value?.recordingId === recId) liveTrack.value = res;
+        if (!ctrl.signal.aborted && recordingRef.value?.recordingId === recId) liveTrack.value = res;
       })
       .catch(() => {
         liveFailed.add(recId);
@@ -58,14 +62,14 @@ watch(
 );
 
 const title = computed(() => parsePresetTitle(props.preset?.label ?? ''));
-const specs = computed(() => formatGlottis9Specs(props.preset?.source9_phys));
+const specs = computed(() => formatGlottis9Specs(props.preset?.source9_phys_pa));
 
 const popoverStyle = computed(() => {
   const rect = props.anchorRect;
   if (!rect || typeof window === 'undefined') return {};
   const isDisabled = Boolean(disabledNotice.value);
   const cardW = isDisabled ? 344 : 408;
-  const estH = isDisabled ? 168 : snapshot.value ? 392 : 292;
+  const estH = isDisabled ? 168 : 392;
   const gap = 10;
   let left = rect.right + gap;
   if (left + cardW > window.innerWidth - 12) {
@@ -94,13 +98,39 @@ function fmtNum(v: number, key: string): string {
   return v.toFixed(2);
 }
 
+function buildSynthesizedMorphSeries(baseVal: number, targetVal: number, count = 48): number[] {
+  const pts: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const u = i / Math.max(1, count - 1);
+    let w = 1;
+    if (u < 0.25) {
+      const s = u / 0.25;
+      w = s * s * (3 - 2 * s);
+    } else if (u > 0.75) {
+      const s = (1 - u) / 0.25;
+      w = s * s * (3 - 2 * s);
+    }
+    pts.push(baseVal + (targetVal - baseVal) * w);
+  }
+  return pts;
+}
+
+const isRealVoqsCurve = computed(() => {
+  const live = liveTrack.value;
+  return Boolean(snapshot.value || (live && live.rows.length >= 10));
+});
+
 const glottisCurves = computed<MiniCurve[]>(() => {
   const snap = snapshot.value;
-  if (!snap) return [];
-  const source9 = props.preset?.source9_phys;
   const live = liveTrack.value;
+  const source9 = props.preset?.source9_phys_pa;
+  const hasReal = Boolean(snap || (live && live.rows.length >= 10));
+  if (!hasReal && (!source9 || source9.length < 9)) return [];
 
-  // Prefer live 50 Hz track when engine is up to date; fall back instantaneously to extracted real VoQS snapshot.
+  const modal = VOQS_BUILTIN_PRESET_DEFAULTS.modal.source9_phys_pa;
+
+  // Prefer live 50 Hz track when engine is up to date; fall back instantaneously to pre-extracted VoQS snapshot;
+  // for presets without a standalone VoQS recording (e.g. voiceless / custom), render a unified 0->100% morph curve.
   let seriesList: Array<Array<number | null>>;
   if (live && live.rows.length >= 10) {
     const activeIdx: number[] = [];
@@ -118,8 +148,12 @@ const glottisCurves = computed<MiniCurve[]>(() => {
       for (let i = 0; i < slice.length; i += step) pts.push(slice[i][col] ?? null);
       return pts;
     });
-  } else {
+  } else if (snap) {
     seriesList = snap.glottis8;
+  } else {
+    seriesList = VOQS_GLOTTIS8_META.map((_, idx) =>
+      buildSynthesizedMorphSeries(modal[idx + 1], source9![idx + 1]),
+    );
   }
 
   return VOQS_GLOTTIS8_META.map((meta, idx) => {
@@ -127,6 +161,9 @@ const glottisCurves = computed<MiniCurve[]>(() => {
     const targetVal = source9 && source9.length >= 9 ? source9[idx + 1] : null;
     const valid = pts.filter((v): v is number => v !== null && Number.isFinite(v));
     if (targetVal !== null && Number.isFinite(targetVal)) valid.push(targetVal);
+    if (!hasReal) {
+      valid.push(meta.min, meta.max);
+    }
     const min = valid.length ? Math.min(...valid) : meta.min;
     const max = valid.length ? Math.max(...valid) : meta.max;
     const span = Math.max(1e-6, max - min);
@@ -160,31 +197,13 @@ const glottisCurves = computed<MiniCurve[]>(() => {
       name: meta.name,
       unit: meta.unit,
       targetText: targetVal !== null ? `${fmtNum(targetVal, meta.key)}${meta.unit ? ` ${meta.unit}` : ''}` : '—',
-      rangeText:
-        rawMin !== null && rawMax !== null
+      rangeText: !hasReal
+        ? `基准 ${fmtNum(modal[idx + 1], meta.key)}`
+        : rawMin !== null && rawMax !== null
           ? `${fmtNum(rawMin, meta.key)}–${fmtNum(rawMax, meta.key)}${meta.unit ? ` ${meta.unit}` : ''}`
           : '',
       path: dParts.join(' '),
       targetY,
-    };
-  });
-});
-
-const barComparison = computed(() => {
-  const s = props.preset?.source9_phys;
-  if (!s || s.length < 9) return [];
-  const modal = VOQS_BUILTIN_PRESET_DEFAULTS.modal.source9_phys;
-  return VOQS_GLOTTIS8_META.map((meta, idx) => {
-    const val = s[idx + 1];
-    const base = modal[idx + 1];
-    const norm = Math.max(0, Math.min(100, ((val - meta.min) / (meta.max - meta.min)) * 100));
-    const baseNorm = Math.max(0, Math.min(100, ((base - meta.min) / (meta.max - meta.min)) * 100));
-    return {
-      key: meta.key,
-      name: meta.name,
-      valueText: `${fmtNum(val, meta.key)}${meta.unit ? ` ${meta.unit}` : ''}`,
-      norm,
-      baseNorm,
     };
   });
 });
@@ -213,12 +232,20 @@ const barComparison = computed(() => {
               {{
                 !preset.builtin
                   ? '自定义'
-                  : preset.default_f0_coupling
-                    ? `${formatSemitoneShift(preset.f0_shift_semitones)} 自动升调`
-                    : formatSemitoneShift(preset.f0_shift_semitones)
+                  : preset.f0_target_hz
+                    ? `${preset.default_f0_coupling ? '自动' : '目标'}约 ${preset.f0_target_hz} Hz`
+                    : preset.default_f0_coupling
+                      ? `${formatSemitoneShift(preset.f0_shift_semitones)} ${preset.f0_shift_semitones < 0 ? '自动降调' : '自动升调'}`
+                      : formatSemitoneShift(preset.f0_shift_semitones)
               }}
             </span>
-            <span v-if="snapshot" class="mx-hc-ref mono">{{ snapshot.recordingId }}</span>
+            <span v-if="preset.larynx_hy_delta_cm" class="mx-hc-pill mono">
+              HY {{ preset.larynx_hy_delta_cm > 0 ? '+' : '' }}{{ preset.larynx_hy_delta_cm.toFixed(2) }} cm
+            </span>
+            <span v-if="preset.supports_diplophonia" class="mx-hc-pill mono">
+              双声源 · f₂/f₁ {{ (preset.default_diplophonia_ratio ?? 0.73).toFixed(2) }}×
+            </span>
+            <span v-if="recordingRef" class="mx-hc-ref mono">{{ recordingRef.recordingId }}</span>
           </template>
         </div>
       </header>
@@ -241,8 +268,14 @@ const barComparison = computed(() => {
 
         <div v-if="glottisCurves.length" class="mx-hc-curves-wrap">
           <div class="mx-hc-sec-head">
-            <span>VoQS 实录 8 维声门曲线（{{ snapshot?.recordingTitle }}）</span>
-            <span class="muted mono">阴影=稳定参考段 · 虚线=目标值</span>
+            <span>
+              {{
+                isRealVoqsCurve
+                  ? `VoQS 实录 8 维声门曲线（${recordingRef?.recordingTitle}）`
+                  : '8 维声门目标调制曲线（常态浊声 → 目标值）'
+              }}
+            </span>
+            <span class="muted mono">{{ isRealVoqsCurve ? '阴影=稳定参考段 · 虚线=目标值' : '阴影=100%目标段 · 虚线=目标值' }}</span>
           </div>
           <div class="mx-hc-curve-grid">
             <div v-for="(curve, idx) in glottisCurves" :key="curve.key" class="mx-hc-curve-item">
@@ -262,22 +295,6 @@ const barComparison = computed(() => {
             </div>
           </div>
         </div>
-
-        <div v-else-if="barComparison.length" class="mx-hc-bars-wrap">
-          <div class="mx-hc-sec-head">
-            <span>8 维声门目标分布（竖标为常态浊声基准）</span>
-          </div>
-          <div class="mx-hc-bar-grid">
-            <div v-for="row in barComparison" :key="row.key" class="mx-hc-bar-row">
-              <span class="mx-hc-bar-k">{{ row.key }}</span>
-              <div class="mx-hc-bar-track">
-                <div class="mx-hc-bar-fill" :style="{ width: `${row.norm.toFixed(1)}%` }" />
-                <div class="mx-hc-bar-base" :style="{ left: `${row.baseNorm.toFixed(1)}%` }" />
-              </div>
-              <span class="mx-hc-bar-v mono">{{ row.valueText }}</span>
-            </div>
-          </div>
-        </div>
       </template>
     </aside>
   </Teleport>
@@ -286,7 +303,7 @@ const barComparison = computed(() => {
 <style scoped>
 .mx-hover-card {
   position: fixed;
-  z-index: 960;
+  z-index: var(--z-popover);
   width: 408px;
   max-width: calc(100vw - 24px);
   padding: 9px 10px;
@@ -294,9 +311,9 @@ const barComparison = computed(() => {
   flex-direction: column;
   gap: 7px;
   pointer-events: none;
-  background: var(--popover-bg, var(--panel));
+  background: var(--popover-bg);
   border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--panel-border));
-  box-shadow: var(--popover-shadow, 0 12px 32px rgba(0, 0, 0, 0.34));
+  box-shadow: var(--popover-shadow);
   backdrop-filter: blur(12px);
 }
 
@@ -446,8 +463,7 @@ const barComparison = computed(() => {
   color: var(--muted);
 }
 
-.mx-hc-curves-wrap,
-.mx-hc-bars-wrap {
+.mx-hc-curves-wrap {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -543,52 +559,5 @@ const barComparison = computed(() => {
 
 .hc-line.alt {
   stroke: var(--teal, var(--accent));
-}
-
-.mx-hc-bar-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 10px;
-}
-
-.mx-hc-bar-row {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 48px;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.72rem;
-}
-
-.mx-hc-bar-k {
-  font-weight: 700;
-  color: var(--muted);
-}
-
-.mx-hc-bar-track {
-  position: relative;
-  height: 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-border) 55%, transparent);
-  overflow: visible;
-}
-
-.mx-hc-bar-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent);
-}
-
-.mx-hc-bar-base {
-  position: absolute;
-  top: -2px;
-  width: 1.5px;
-  height: 10px;
-  background: var(--warning);
-}
-
-.mx-hc-bar-v {
-  text-align: right;
-  color: var(--text);
-  font-size: 0.7rem;
 }
 </style>

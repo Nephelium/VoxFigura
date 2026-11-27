@@ -198,7 +198,7 @@ export class M27Adapter {
 
   constructor(config?: { apiBaseUrl?: string; fetchImpl?: typeof fetch }) {
     this.apiBaseUrl = config?.apiBaseUrl ?? '/api/m27';
-    this.fetchFn = config?.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.fetchFn = config?.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async reconstruct(params: {
@@ -307,4 +307,189 @@ export class M27Adapter {
       });
     }
   }
+
+  async reconstructRaw<T extends object = Record<string, unknown>>(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<{ status: number; data: T | null; result: Result<T> }> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/reconstruct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildRequestSignal(options?.signal, options?.timeoutMs ?? 180_000),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as (T & { ok?: boolean; error?: Partial<CoreErrorDetail> }) | null;
+      if (!res.ok || !data || data.ok === false) {
+        return {
+          status: res.status,
+          data,
+          result: fail(normalizeAdapterError(data?.error, 'm27.reconstruct', `M27 声道重建失败: HTTP ${res.status}`)),
+        };
+      }
+      return { status: res.status, data, result: ok(data) };
+    } catch (err) {
+      return {
+        status: 0,
+        data: null,
+        result: fail({ code: 'not_found', field: 'm27.reconstruct', hint: `无法连接本地 M27 神经反演服务: ${String(err)}` }),
+      };
+    }
+  }
+
+  async prepareRealtimeSpeaker(
+    wavBase64: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<{ speaker_key: string; extract_ms: number; median_f0_hz: number | null }>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/realtime-speaker`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: options?.timeoutMs ? buildRequestSignal(options.signal, options.timeoutMs) : options?.signal,
+        body: JSON.stringify({ speaker_wav_base64: wavBase64 }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        speaker_key?: string;
+        extract_ms?: number;
+        median_f0_hz?: number | null;
+        error?: Partial<CoreErrorDetail>;
+        hint?: string;
+      } | null;
+      if (!res.ok || !json?.ok || !json.speaker_key) {
+        const rawErr = json?.error ?? (json?.hint ? { hint: json.hint } : undefined);
+        return fail(normalizeAdapterError(rawErr, 'm27.realtime-speaker', '参考音色提取失败'));
+      }
+      const medianF0 =
+        typeof json.median_f0_hz === 'number' && Number.isFinite(json.median_f0_hz) && json.median_f0_hz > 0
+          ? json.median_f0_hz
+          : null;
+      return ok({ speaker_key: json.speaker_key, extract_ms: json.extract_ms ?? 0, median_f0_hz: medianF0 });
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'm27.realtime-speaker', hint: `参考音色提取连接异常: ${String(err)}` });
+    }
+  }
+
+  async realtimeStep<T extends object = Record<string, unknown>>(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<T>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/realtime-step`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: options?.timeoutMs ? buildRequestSignal(options.signal, options.timeoutMs) : options?.signal,
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json().catch(() => null)) as (T & { ok?: boolean; error?: Partial<CoreErrorDetail>; hint?: string }) | null;
+      if (!res.ok || !json?.ok) {
+        const rawErr = json?.error ?? (json?.hint ? { hint: json.hint } : undefined);
+        return fail(normalizeAdapterError(rawErr, 'm27.realtime-step', `实时声道推理请求失败（HTTP ${res.status}）`));
+      }
+      return ok(json);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      return fail({
+        code: 'not_found',
+        field: 'm27.realtime-step',
+        hint: err instanceof Error ? err.message : '实时连接中断',
+      });
+    }
+  }
+
+  async holdPreview(
+    body: { controls: number[]; frames: number; audio_gain?: SynthesisGainMode },
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<{ wav_base64: string; device?: string; model_ms?: number }>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/hold-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildRequestSignal(options?.signal, options?.timeoutMs ?? 6500),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        wav_base64?: string;
+        device?: string;
+        model_ms?: number;
+        error?: Partial<CoreErrorDetail>;
+      } | null;
+      if (!res.ok || !data?.wav_base64) {
+        return fail(normalizeAdapterError(data?.error, 'm27.hold-preview', 'Tract2Vox-Lite 未返回试听音频'));
+      }
+      return ok({ wav_base64: data.wav_base64, device: data.device, model_ms: data.model_ms });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      return fail({ code: 'not_found', field: 'm27.hold-preview', hint: `Tract2Vox-Lite 试听失败: ${String(err)}` });
+    }
+  }
+
+  async transcribe(
+    body: { wav_base64: string; lang?: string; model?: string },
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<{ text: string; lang: string }>> {
+    const timeout = AbortSignal.timeout(options?.timeoutMs ?? 125_000);
+    const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/transcribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal,
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        text?: string;
+        lang?: string;
+        hint?: string;
+        error?: Partial<CoreErrorDetail>;
+      } | null;
+      if (!res.ok || data?.ok !== true) {
+        const rawErr = data?.error ?? (data?.hint ? { hint: data.hint } : undefined);
+        return fail(normalizeAdapterError(rawErr, 'm27.transcribe', `本地引擎未能转写录音（HTTP ${res.status}）`));
+      }
+      const text = typeof data.text === 'string' ? data.text.trim() : '';
+      const detectedLang = typeof data.lang === 'string' && data.lang.trim() ? data.lang.trim() : 'zh';
+      if (!text) {
+        return fail({ code: 'validation_error', field: 'm27.transcribe', hint: '本地引擎返回的转写结果不完整' });
+      }
+      return ok({ text, lang: detectedLang });
+    } catch (err) {
+      if (timeout.aborted) {
+        return fail({ code: 'not_found', field: 'm27.transcribe', hint: '本地语音识别超时，请缩短录音后重试' });
+      }
+      if (options?.signal?.aborted) throw err;
+      return fail({ code: 'not_found', field: 'm27.transcribe', hint: `无法连接本地语音识别服务: ${String(err)}` });
+    }
+  }
+
+  async asrInstall<T extends object = Record<string, unknown>>(
+    method: 'GET' | 'POST',
+    model: string | null,
+    options?: { signal?: AbortSignal; timeoutMs?: number; action?: 'install' | 'remove' },
+  ): Promise<Result<T>> {
+    const query = method === 'GET' && model ? '?model=' + encodeURIComponent(model) : '';
+    try {
+      const bodyPayload: Record<string, unknown> = { model };
+      if (options?.action) bodyPayload.action = options.action;
+      const res = await this.fetchFn(`${this.apiBaseUrl}/asr-install${query}`, {
+        method,
+        ...(method === 'POST' ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyPayload) } : {}),
+        cache: 'no-store',
+        signal: buildRequestSignal(options?.signal, options?.timeoutMs ?? 5000),
+      });
+      const data = (await res.json().catch(() => null)) as (T & { error?: Partial<CoreErrorDetail>; hint?: string }) | null;
+      if (!res.ok || !data) {
+        const rawErr = data?.error ?? (data?.hint ? { hint: data.hint } : undefined);
+        return fail(normalizeAdapterError(rawErr, 'm27.asr-install', '无法连接本地语音识别服务，请检查本地引擎是否已启动'));
+      }
+      return ok(data);
+    } catch (err) {
+      if (options?.signal?.aborted) throw err;
+      return fail({ code: 'not_found', field: 'm27.asr-install', hint: `无法连接本地语音识别服务: ${String(err)}` });
+    }
+  }
 }
+
+export const defaultM27Adapter = new M27Adapter();

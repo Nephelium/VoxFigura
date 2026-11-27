@@ -10,7 +10,7 @@ import {
 import { DIALECT_PACKS } from '@/data/dialect-packs';
 import { readTimeline } from '@/components/studio/nle-timeline';
 import type { CardBox } from '../layout-tree';
-import type { CardResolvedTheme } from '../card-themes';
+import { parseColorRgb, type CardResolvedTheme } from '../card-themes';
 import { layoutContinuumGrid, type ContinuumGridLayout } from '../continuum-grid';
 import { paintGlottisModelIntoRect, type RasterCardImage, type SubPaneDirection } from './acoustic-blocks';
 import type { ResolvedContinuumAsset, ResolvedIpaRichAsset } from '../real-module-assets';
@@ -23,6 +23,10 @@ import {
   fitTextEllipsis,
   roundRectPath,
 } from '../draw-primitives';
+
+function clampForDisplay(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
 export interface SynthTimelineTrackFlags {
   syllables: boolean;
@@ -139,6 +143,50 @@ function wrapTextLines(ctx: CanvasRenderingContext2D, text: string, maxW: number
     out[maxLines - 1] = fitTextEllipsis(ctx, out[maxLines - 1] + line, maxW);
   }
   return out;
+}
+
+const themedSpecCache = new WeakMap<Uint8Array, Map<string, HTMLCanvasElement>>();
+
+function getThemedSpectrogramCanvas(
+  analysis: NonNullable<ResolvedIpaRichAsset['analysis']>,
+  bgColor: string,
+  inkColor: string,
+): HTMLCanvasElement | null {
+  if (typeof document === 'undefined' || analysis.columns <= 0 || analysis.rows <= 0) return null;
+  const key = `${bgColor}|${inkColor}`;
+  let map = themedSpecCache.get(analysis.spectrum);
+  const hit = map?.get(key);
+  if (hit) return hit;
+
+  const bg = parseColorRgb(bgColor) ?? [255, 255, 255];
+  const ink = parseColorRgb(inkColor) ?? [20, 20, 24];
+  const c = document.createElement('canvas');
+  c.width = analysis.columns;
+  c.height = analysis.rows;
+  const ctx = c.getContext('2d');
+  if (!ctx) return null;
+  const img = ctx.createImageData(analysis.columns, analysis.rows);
+  const data = img.data;
+  const spec = analysis.spectrum;
+  for (let i = 0; i < spec.length; i++) {
+    const t = Math.pow(spec[i] / 255, 0.92);
+    const p = i * 4;
+    data[p] = Math.round(bg[0] + (ink[0] - bg[0]) * t);
+    data[p + 1] = Math.round(bg[1] + (ink[1] - bg[1]) * t);
+    data[p + 2] = Math.round(bg[2] + (ink[2] - bg[2]) * t);
+    data[p + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  if (!map) {
+    map = new Map();
+    themedSpecCache.set(analysis.spectrum, map);
+  }
+  if (map.size >= 8) {
+    const oldest = map.keys().next().value;
+    if (oldest) map.delete(oldest);
+  }
+  map.set(key, c);
+  return c;
 }
 
 /**
@@ -350,17 +398,16 @@ export function drawIpaWaveSpecBlock(w: WorkbenchBlockContext): void {
   ctx.fillText(`${Math.round(maxKHz / 2)}k`, specPlot.x - 4 * u, specPlot.y + specPlot.h / 2);
   ctx.fillText('0Hz', specPlot.x - 4 * u, specPlot.y + specPlot.h - 4 * u);
 
-  if (asset?.spectrogramImage) {
+  const specCanvas = analysis
+    ? getThemedSpectrogramCanvas(analysis, theme.cardSurface, theme.text)
+    : asset?.spectrogramImage ?? null;
+  if (specCanvas) {
     ctx.save();
     ctx.beginPath();
     ctx.rect(specPlot.x, specPlot.y, specPlot.w, specPlot.h);
     ctx.clip();
-    if (!theme.isDark) {
-      // Invert luminance on light paper cards for crisp dark-ink academic spectrogram
-      ctx.filter = 'invert(92%) contrast(112%)';
-    }
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(asset.spectrogramImage, specPlot.x, specPlot.y, specPlot.w, specPlot.h);
+    ctx.drawImage(specCanvas, specPlot.x, specPlot.y, specPlot.w, specPlot.h);
     ctx.restore();
   } else {
     ctx.fillStyle = theme.moduleHeaderBg;
@@ -729,7 +776,14 @@ export function drawSynthTimelineBlock(w: WorkbenchBlockContext): void {
   if (synthTracks.f0) enabledLanes.push({ kind: 'f0', weight: 1.55, tag: '基频' });
   if (synthTracks.pressure) enabledLanes.push({ kind: 'pressure', weight: 1.25, tag: '肺压' });
   if (enabledLanes.length === 0) {
-    enabledLanes.push({ kind: 'syllables', weight: 0.9, tag: '词条' }, { kind: 'f0', weight: 1.6, tag: '基频' });
+    ctx.save();
+    ctx.font = `500 ${Math.max(10, 11.5 * u * textScale)}px ${fontFamily}`;
+    ctx.fillStyle = theme.muted;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('请在右侧「模块细节」至少勾选 1 条展示轨道', inner.x + inner.w / 2, inner.y + inner.h / 2);
+    ctx.restore();
+    return;
   }
 
   const labelGutterW = inner.w > 240 * u ? Math.max(32 * u, 30 * u * textScale) : 0;
@@ -915,9 +969,9 @@ export function drawSynthTimelineBlock(w: WorkbenchBlockContext): void {
       const f0Res = clip && syllables.length > 0 ? evaluateControlPitch(project, syllables, clip.end_smp, refHz) : null;
       if (f0Res?.ok && f0Res.value.f0_hz.length >= 2) {
         const { f0_hz, times_smp } = f0Res.value;
-        const vals = f0_hz.filter((v) => Number.isFinite(v) && v > 40);
-        const minF0 = Math.max(55, Math.min(...vals) - 25);
-        const maxF0 = Math.min(600, Math.max(minF0 + 60, Math.max(...vals) + 25));
+        const vals = f0_hz.filter((v) => Number.isFinite(v) && v > 0);
+        const minF0 = vals.length ? Math.max(5, Math.min(...vals) - 20) : 60;
+        const maxF0 = vals.length ? Math.max(minF0 + 40, Math.max(...vals) + 20) : 320;
         const fy = (hz: number) => lBox.y + lBox.h - ((hz - minF0) / (maxF0 - minF0)) * (lBox.h - 12 * u) - 6 * u;
 
         ctx.beginPath();
@@ -962,7 +1016,7 @@ export function drawSynthTimelineBlock(w: WorkbenchBlockContext): void {
       if (rowsPa?.length) {
         rowsPa.forEach((r, idx) => {
           const smp = startSmp + (idx / Math.max(1, rowsPa.length - 1)) * totalSmp;
-          pts.push([smp, Math.max(0, Math.min(1600, r[18] ?? w.glottis.pr_pa))]);
+          pts.push([smp, clampForDisplay(r[18] ?? w.glottis.pr_pa, 0, 1600)]);
         });
       } else if (syllables.length > 0) {
         const nominalPa = Math.max(200, w.glottis.pr_pa || 780);
@@ -1230,11 +1284,14 @@ export function drawM27ReconstructBlock(w: WorkbenchBlockContext): void {
 
     paintGlottisModelIntoRect(ctx, gBox, w.glottis, w.time_s, theme, w.glottisDirection);
 
-    ctx.font = `600 ${Math.max(7.5, 8.8 * u * Math.min(1.15, textScale * 0.88))}px ${fontFamily}`;
-    ctx.fillStyle = theme.muted;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillText('声门与声带', gBox.x + 6 * u, gBox.y + 4 * u);
+    // Only draw compact fallback label when glottis canvas is too narrow for its built-in labels
+    if (gBox.w < 190 * u) {
+      ctx.font = `600 ${Math.max(7.5, 8.6 * u * Math.min(1.15, textScale * 0.85))}px ${fontFamily}`;
+      ctx.fillStyle = theme.muted;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(fitTextEllipsis(ctx, '声门与声带', gBox.w - 12 * u), gBox.x + 6 * u, gBox.y + 4 * u);
+    }
     ctx.restore();
   }
 }
@@ -1248,7 +1305,7 @@ export function drawVoiceMixerBlock(w: WorkbenchBlockContext): void {
   const titleLabel = mode === 'dual' ? '双人声音属性混合' : (mix?.presetLabel ?? fallbackPreset.label);
   const inner = drawModuleShell(ctx, box, '发声调音台 · 发声态时变调制', titleLabel, theme, u, fontFamily, textScale);
 
-  const specs = formatGlottis9Specs(mix?.source9Phys ?? fallbackPreset.source9_phys).slice(0, 5);
+  const specs = formatGlottis9Specs(mix?.source9Phys ?? fallbackPreset.source9_phys_pa).slice(0, 5);
   const footH = specs.length ? Math.min(38 * u, inner.h * 0.25) : 0;
   const plotBox: CardBox = {
     x: inner.x,
@@ -1413,8 +1470,10 @@ export function drawVoiceMixerBlock(w: WorkbenchBlockContext): void {
   if (footH > 0) {
     const fy = plotBox.y + plotBox.h + 6 * u;
     const gap = 5 * u;
-    const cw = (inner.w - gap * (specs.length - 1)) / specs.length;
-    specs.forEach((sp, i) => {
+    const maxCards = Math.max(2, Math.min(specs.length, Math.floor((inner.w + gap) / (58 * u))));
+    const shownSpecs = specs.slice(0, maxCards);
+    const cw = (inner.w - gap * (shownSpecs.length - 1)) / shownSpecs.length;
+    shownSpecs.forEach((sp, i) => {
       const sx = inner.x + i * (cw + gap);
       roundRectPath(ctx, sx, fy, cw, footH, 4 * u);
       ctx.fillStyle = theme.cardSurface;
@@ -1422,16 +1481,22 @@ export function drawVoiceMixerBlock(w: WorkbenchBlockContext): void {
       ctx.strokeStyle = theme.border;
       ctx.stroke();
 
+      ctx.save();
+      roundRectPath(ctx, sx + 1, fy + 1, Math.max(2, cw - 2), Math.max(2, footH - 2), 3 * u);
+      ctx.clip();
+      const maxTxtW = Math.max(12, cw - 8 * u);
       ctx.font = `500 ${Math.max(7.5, 8.6 * u * Math.min(1.15, textScale * 0.85))}px ${fontFamily}`;
       ctx.fillStyle = theme.muted;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText(sp.key, sx + cw / 2, fy + 3 * u);
+      ctx.fillText(fitTextEllipsis(ctx, sp.key, maxTxtW), sx + cw / 2, fy + 3 * u);
 
       ctx.font = `700 ${Math.max(8.5, 9.6 * u * Math.min(1.15, textScale * 0.85))}px ${MONO_TYPEFACE}`;
       ctx.fillStyle = theme.text;
       ctx.textBaseline = 'bottom';
-      ctx.fillText(`${sp.value}${sp.unit ? ' ' + sp.unit : ''}`, sx + cw / 2, fy + footH - 3 * u);
+      const valStr = `${sp.value}${sp.unit ? ' ' + sp.unit : ''}`;
+      ctx.fillText(fitTextEllipsis(ctx, valStr, maxTxtW), sx + cw / 2, fy + footH - 3 * u);
+      ctx.restore();
     });
   }
 }

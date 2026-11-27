@@ -207,7 +207,7 @@ export function tongueEnvelope(state,{surface=true}={}){
   // A material station in the mandible frame. Tongue controls cannot select
   // another floor point; jaw translation/rotation still moves the attachment.
   const anchor=state.tongue_floor_rib??10;
-  const end=floor[anchor],vertices=native.vertices.slice(0,D*P*3),triangles=[];
+  const end=floor[anchor];
   // Mutual non-penetration yielding:
   // (a) Posterior pharyngeal wall (>=0.08 cm gap) + epiglottis anterior wall + lower anterior pharyngeal wall on ribs 0..16
   // (b) Lifted soft-palate / uvula lower border ceiling on posterior dorsal ribs so high-back tongue + lowered velum never overlap
@@ -249,9 +249,7 @@ export function tongueEnvelope(state,{surface=true}={}){
     }
     return ceil;
   };
-  for(let r=0;r<D;r++)for(let j=0;j<P;j++){
-    const idx=(r*P+j)*3;
-    let x=vertices[idx],y=vertices[idx+1],z=vertices[idx+2];
+  const yieldDorsal=(r,x,y,z)=>{
     if(r<=16&&Math.abs(z)<1.35){
       x=Math.max(x,pharWallAtY(y)+.08);
       if(r<=10&&Math.abs(z)<.95){
@@ -266,14 +264,63 @@ export function tongueEnvelope(state,{surface=true}={}){
       const vc=velumCeilAtX(x);
       if(Number.isFinite(vc))y=Math.min(y,vc-.012+lateralAllowance);
     }
-    vertices[idx]=x;vertices[idx+1]=y;
+    return [x,y,z];
+  };
+  const shape=state.tongue_shape??[0,0,0,0];
+  const floorMesh=state.meshes.find(m=>m.name==='lower_cover');
+  const lowerTeeth=state.meshes.find(m=>m.name==='lower_teeth');
+
+  // Fast sagittal-only path: computes the exact midline column without building off-midline 3D ribs or triangles.
+  if(!surface){
+    const midJ=Math.floor(P/2);
+    const cells=floorCells(floorMesh,lowerTeeth,{midline:true});
+    const middle=[];
+    for(let r=0;r<D;r++){
+      const idx=(r*P+midJ)*3;
+      const pt=yieldDorsal(r,native.vertices[idx],native.vertices[idx+1],native.vertices[idx+2]);
+      middle.push([pt[0],pt[1],0]);
+    }
+    const a=native.vertices.slice(((D-1)*P+midJ)*3,((D-1)*P+midJ)*3+3);
+    const zPos=midJ/(P-1)*(floorMesh.points-1),lo=Math.floor(zPos),hi=Math.ceil(zPos),f=zPos-lo;
+    const b=[0,1,2].map(k=>floorMesh.vertices[(anchor*floorMesh.points+lo)*3+k]*(1-f)+floorMesh.vertices[(anchor*floorMesh.points+hi)*3+k]*f);
+    let front=-Infinity;
+    for(let r=0;r<D;r++){const vx=native.vertices[(r*P+midJ)*3];if(vx>front)front=vx;}
+    const prev=native.vertices.slice(((D-2)*P+midJ)*3,((D-2)*P+midJ)*3+3),length=Math.hypot(a[0]-prev[0],a[1]-prev[1])||1;
+    const cx=a[0]+.14,dx=Math.max(b[0]+.12,front+.2);
+    const c=[cx+curl*(a[0]+.38*(a[0]-prev[0])/length-cx),a[1]-.36+curl*(.36+.38*(a[1]-prev[1])/length),a[2]],d=[dx+curl*(Math.max(dx,front+.45)-dx),b[1]+.08,b[2]];
+    for(let r=1;r<=Q;r++){
+      const t=r/Q,u=1-t;
+      const raw=[0,1,2].map(k=>u*u*u*a[k]+3*u*u*t*c[k]+3*u*t*t*d[k]+t*t*t*b[k]);
+      const pt=constrainVentralLine([raw],floorMesh,lowerTeeth,cells)[0];
+      if(shape[2]||shape[3]){
+        const weight=16*t*t*u*u,baseY=pt[1];pt[0]+=weight*shape[2];pt[1]+=weight*shape[3];
+        let ceiling=Infinity;
+        for(let rib=1;rib<D;rib++){
+          const v=(rib*P+midJ)*3,w=((rib-1)*P+midJ)*3,x0=native.vertices[w],x1=native.vertices[v];
+          if(pt[0]<Math.min(x0,x1)||pt[0]>Math.max(x0,x1)||Math.abs(x1-x0)<1e-9)continue;
+          const ff=(pt[0]-x0)/(x1-x0),y=native.vertices[w+1]+ff*(native.vertices[v+1]-native.vertices[w+1]);
+          if(y>baseY+.01)ceiling=Math.min(ceiling,y-.02);
+        }
+        pt[1]=Math.min(pt[1],ceiling);
+      }
+      middle.push([pt[0],pt[1],0]);
+    }
+    const contour=[...middle.slice(0,D-1),...constrainVentralLine(middle.slice(D-1),floorMesh,lowerTeeth,cells)].map(p=>p.slice(0,2));
+    const belly=constrainVentralLine([middle[D-1+Q/2]],floorMesh,lowerTeeth,cells)[0].slice(0,2);
+    return {mesh:null,belly,outline:[...contour,...floor.slice(4,anchor).toReversed()],contour,
+      dorsal:contour.slice(0,D),anchor,end};
+  }
+
+  const vertices=native.vertices.slice(0,D*P*3),triangles=[];
+  for(let r=0;r<D;r++)for(let j=0;j<P;j++){
+    const idx=(r*P+j)*3;
+    const pt=yieldDorsal(r,vertices[idx],vertices[idx+1],vertices[idx+2]);
+    vertices[idx]=pt[0];vertices[idx+1]=pt[1];
   }
   // Retain the native diagonals too: flipping a non-planar quad's diagonal
   // changes the contact surface even when all four vertices are unchanged.
   for(let i=0;i<native.triangles.length;i+=3){const face=native.triangles.slice(i,i+3);if(face.every(j=>j<D*P))triangles.push(...face);}
-  const shape=state.tongue_shape??[0,0,0,0];
-  const floorMesh=state.meshes.find(m=>m.name==='lower_cover');
-  const lowerTeeth=state.meshes.find(m=>m.name==='lower_teeth'),cells=floorCells(floorMesh,lowerTeeth);
+  const cells=floorCells(floorMesh,lowerTeeth);
   const ventralRays=Array.from({length:P},(_,j)=>{
     const a=native.vertices.slice(((D-1)*P+j)*3,((D-1)*P+j)*3+3);
     const z=j/(P-1)*(floorMesh.points-1),lo=Math.floor(z),hi=Math.ceil(z),f=z-lo;

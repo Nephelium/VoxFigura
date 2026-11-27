@@ -6,28 +6,34 @@ const dot=(a,b)=>a.reduce((s,v,k)=>s+v*b[k],0);
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
 const box=points=>[0,1,2].map(k=>[Math.min(...points.map(p=>p[k])),Math.max(...points.map(p=>p[k]))]);
 const overlaps=(a,b)=>a.every((v,k)=>v[1]>=b[k][0]-EPS&&b[k][1]>=v[0]-EPS);
-let cachedKey='',cachedSolids=[];
-export function dentalSolids(meshes){
-  const teeth=meshes.filter(m=>m.name.endsWith('_teeth'));
-  const key=JSON.stringify(teeth.map(m=>[m.name,m.ribs,m.points,m.vertices]));
-  if(key===cachedKey)return cachedSolids;
+const meshSolidCache=new Map();
+function buildToothMeshSolids(mesh){
+  const key=JSON.stringify([mesh.ribs,mesh.points,mesh.vertices]);
+  const prev=meshSolidCache.get(mesh.name);
+  if(prev&&prev.key===key)return prev.solids;
   const solids=[];
-  for(const mesh of teeth){
-    for(let r=1;r<mesh.ribs;r++){
-      const points=[];
-      for(const rib of [r-1,r])for(let j=0;j<mesh.points-1;j++)points.push(mesh.vertices.slice((rib*mesh.points+j)*3,(rib*mesh.points+j)*3+3));
-      const planes=[];
-      for(let a=0;a<points.length;a++)for(let b=a+1;b<points.length;b++)for(let c=b+1;c<points.length;c++){
-        let n=cross(sub(points[b],points[a]),sub(points[c],points[a])),length=Math.hypot(...n);if(length<EPS)continue;
-        n=n.map(v=>v/length);let d=dot(n,points[a]),dist=points.map(p=>dot(n,p)-d);
-        if(Math.min(...dist)<-EPS&&Math.max(...dist)>EPS)continue;
-        if(Math.max(...dist)>EPS){n=n.map(v=>-v);d=-d;}
-        if(!planes.some(p=>Math.abs(p.d-d)<EPS&&Math.hypot(...sub(p.n,n))<EPS))planes.push({n,d});
-      }
-      if(planes.length>=4)solids.push({planes,box:box(points),name:mesh.name,rib:r});
+  for(let r=1;r<mesh.ribs;r++){
+    const points=[];
+    for(const rib of [r-1,r])for(let j=0;j<mesh.points-1;j++)points.push(mesh.vertices.slice((rib*mesh.points+j)*3,(rib*mesh.points+j)*3+3));
+    const planes=[];
+    for(let a=0;a<points.length;a++)for(let b=a+1;b<points.length;b++)for(let c=b+1;c<points.length;c++){
+      let n=cross(sub(points[b],points[a]),sub(points[c],points[a])),length=Math.hypot(...n);if(length<EPS)continue;
+      n=n.map(v=>v/length);let d=dot(n,points[a]),dist=points.map(p=>dot(n,p)-d);
+      if(Math.min(...dist)<-EPS&&Math.max(...dist)>EPS)continue;
+      if(Math.max(...dist)>EPS){n=n.map(v=>-v);d=-d;}
+      if(!planes.some(p=>Math.abs(p.d-d)<EPS&&Math.hypot(...sub(p.n,n))<EPS))planes.push({n,d});
     }
+    if(planes.length>=4)solids.push({planes,box:box(points),name:mesh.name,rib:r});
   }
-  cachedKey=key;cachedSolids=solids;return solids;
+  meshSolidCache.set(mesh.name,{key,solids});
+  return solids;
+}
+export function dentalSolids(meshes){
+  const solids=[];
+  for(const mesh of meshes){
+    if(mesh.name.endsWith('_teeth'))solids.push(...buildToothMeshSolids(mesh));
+  }
+  return solids;
 }
 export function splitPolygon(poly,plane,epsilon=EPS){
   const inside=[],outside=[];

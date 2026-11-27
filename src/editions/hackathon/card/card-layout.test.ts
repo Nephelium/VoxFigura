@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CARD_MODULE_MAP,
   adaptTreeToAspect,
   assignModuleToLeaf,
   buildAutoLayoutTree,
@@ -8,16 +9,23 @@ import {
   dockModuleInTree,
   equalizeLayoutTreeRatios,
   extractRowGrid,
+  findLeafSplitContext,
+  hasAnyEmptyLeaf,
   insertModuleIntoTree,
+  isNestedLayoutTree,
   listTreeModules,
+  removeLeafFromTree,
   removeModuleFromTree,
   resizeSplitAtGutter,
   setGridCellWidthRatio,
   setGridRowColCount,
   setGridRowCount,
   setGridRowHeightRatio,
+  setSplitChildRatio,
+  splitLeafInTree,
   stripEmptyLeaves,
 } from '@/components/phonetic-card/card/layout-tree';
+import { parseColorRgb } from '@/components/phonetic-card/card/card-themes';
 import {
   formattedZhihuSignature,
   showZhihuSignature,
@@ -29,7 +37,13 @@ import {
   CARD_VTL_LIVE_ORAL_VIEWBOX,
 } from '@/components/phonetic-card/card-renderer';
 import { DEFAULT_JD2_VOWEL_REFS } from '@/components/phonetic-card/card/vowel-ref-data';
-import { resolveAutoPlaybackSource } from '@/components/phonetic-card/card/playback-sources';
+import {
+  evaluateDynamicCardState,
+  hasAnyRealExperimentData,
+  resolveAutoPlaybackSource,
+} from '@/components/phonetic-card/card/playback-sources';
+import { panelSnapshots } from '@/data/panel-snapshots';
+import { defaultTractParams, DEFAULT_TRACT_EXTRAS } from '@/stores/workbench';
 import { KANSHAN_STICKER_CATALOG } from './kanshan-sticker';
 import { CARD_FONT_OPTIONS, resolveCardFontFamily } from '@/components/phonetic-card/card/draw-primitives';
 import { layoutContinuumGrid } from '@/components/phonetic-card/card/continuum-grid';
@@ -296,5 +310,114 @@ describe('Zhihu Pronunciation Card Split-Tree & Author Credit', () => {
     expect(CARD_FONT_OPTIONS.some((f) => f.value === 'kaiti')).toBe(true);
     expect(resolveCardFontFamily('kaiti')).toContain('KaiTi');
     expect(resolveCardFontFamily('noto-serif')).toContain('VC Noto Serif SC');
+  });
+
+  it('preserves nested split layouts during module assignment, ratio adjustment, leaf split and empty-slot deletion', () => {
+    // 16:9 3-box layout builds nested [left: tract-profile | right: col(transfer-fn, vowel-space)]
+    let tree = buildAutoLayoutTree(['tract-profile', 'transfer-fn', 'vowel-space'], 16 / 9, 0);
+    expect(isNestedLayoutTree(tree)).toBe(true);
+
+    const initialBoxes = computeLayoutBoxesAndGutters(tree, { x: 0, y: 0, w: 1200, h: 600 }, 10).boxes;
+    const rightBottom = initialBoxes.find((b) => b.moduleId === 'vowel-space');
+    expect(rightBottom).toBeDefined();
+
+    // Reassigning a module in-place must NOT flatten the nested split tree
+    tree = assignModuleToLeaf(tree, rightBottom!.leafId, 'area-fn');
+    expect(isNestedLayoutTree(tree)).toBe(true);
+    expect(listTreeModules(tree)).toEqual(['tract-profile', 'transfer-fn', 'area-fn']);
+
+    // Query real rowSplit & colSplit ancestors and adjust both without flattening
+    const ctx = findLeafSplitContext(tree, rightBottom!.leafId);
+    expect(ctx?.rowSplit?.siblingCount).toBe(2);
+    expect(ctx?.colSplit?.siblingCount).toBe(2);
+
+    tree = setSplitChildRatio(tree, ctx!.rowSplit!.splitId, ctx!.rowSplit!.childIndex, 0.62);
+    tree = setSplitChildRatio(tree, ctx!.colSplit!.splitId, ctx!.colSplit!.childIndex, 0.68);
+    expect(isNestedLayoutTree(tree)).toBe(true);
+
+    const updatedCtx = findLeafSplitContext(tree, rightBottom!.leafId);
+    expect(updatedCtx?.rowSplit?.ratio).toBeCloseTo(0.62, 2);
+    expect(updatedCtx?.colSplit?.ratio).toBeCloseTo(0.68, 2);
+
+    // Splitting a leaf creates a WYSIWYG whitespace empty slot; removing by leafId cleans it up
+    const splitRes = splitLeafInTree(tree, rightBottom!.leafId, 'row');
+    expect(splitRes.newLeafId).toBeTruthy();
+    expect(hasAnyEmptyLeaf(splitRes.tree)).toBe(true);
+
+    const cleaned = removeLeafFromTree(splitRes.tree, splitRes.newLeafId!);
+    expect(hasAnyEmptyLeaf(cleaned)).toBe(false);
+    expect(isNestedLayoutTree(cleaned)).toBe(true);
+  });
+
+  it('parses 3-digit hex, 6-digit hex, 8-digit hex and rgb/rgba strings accurately and has clean module copy', () => {
+    expect(parseColorRgb('#fff')).toEqual([255, 255, 255]);
+    expect(parseColorRgb('#0969da')).toEqual([9, 105, 218]);
+    expect(parseColorRgb('#0969da80')).toEqual([9, 105, 218]);
+    expect(parseColorRgb('rgb(18, 34, 56)')).toEqual([18, 34, 56]);
+    expect(parseColorRgb('rgba(10, 20, 30, 0.5)')).toEqual([10, 20, 30]);
+    expect(CARD_MODULE_MAP.get('voice-mixer')?.desc).not.toContain('怔忡');
+  });
+
+  it('detects empty home state as demo-only and turns live once an experiment snapshot exists', () => {
+    const emptyWb = {
+      activeWorkspace: { value: 'home' },
+      activeClipId: { value: 'clip_1' },
+      annotationAudioBuffer: { value: null },
+      project: {
+        value: {
+          clips: { clip_1: { id: 'clip_1', syllable_order: [] } },
+          tracks: {},
+          layers: {},
+        },
+      },
+    };
+    const prevIpa = panelSnapshots.ipa.value;
+    try {
+      panelSnapshots.ipa.value = null;
+      expect(hasAnyRealExperimentData(emptyWb as never, 'home')).toBe(false);
+
+      panelSnapshots.ipa.value = {
+        symbol: 'i',
+        system: 'ipa',
+        nameZh: '闭前不圆唇元音',
+        nameEn: 'Close front unrounded vowel',
+        section: 'vowels',
+        descriptionZh: '测试',
+        params: defaultTractParams(),
+        extras: DEFAULT_TRACT_EXTRAS,
+      };
+      expect(hasAnyRealExperimentData(emptyWb as never, 'home')).toBe(true);
+    } finally {
+      panelSnapshots.ipa.value = prevIpa;
+    }
+  });
+
+  it('keeps glottis parameters in sync with voice-mixer modulation curve across time', () => {
+    const mockWb = {
+      activeVoiceId: { value: 'v1' },
+      activeClipId: { value: 'c1' },
+      project: { value: { voices: { v1: { speaker: 'JD2' } }, clips: {} } },
+      currentTractParams: { value: defaultTractParams() },
+      currentTractExtras: { value: DEFAULT_TRACT_EXTRAS },
+      currentGlottisParams: {
+        value: { f0_hz: 135, pr_pa: 800, xb_cm: 0.04, xt_cm: 0.04, ca_cm2: 0.01, lag_rad: 1.35, ra: 0.82, ps: 0.45, fl: 20, shim: 8 },
+      },
+    };
+    const startFrame = evaluateDynamicCardState({
+      source: 'mixer',
+      localTime_s: 0,
+      rangeStart_s: 0,
+      rangeDuration_s: 2.5,
+      store: mockWb as never,
+    });
+    const peakFrame = evaluateDynamicCardState({
+      source: 'mixer',
+      localTime_s: 1.25,
+      rangeStart_s: 0,
+      rangeDuration_s: 2.5,
+      store: mockWb as never,
+    });
+    // At mid-curve (blend=0.85 breathy), glottal chink CA must increase significantly vs t=0 (blend=0.05)
+    expect(peakFrame.glottis.ca_cm2).toBeGreaterThan(startFrame.glottis.ca_cm2);
   });
 });

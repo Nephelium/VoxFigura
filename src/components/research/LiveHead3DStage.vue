@@ -158,6 +158,7 @@ function buildFallbackClosedLipState() {
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { defaultVtlTransport } from '@vocalcut/model-adapters';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { getM27GlottisVisHz, type GlottisVisualFrame, type VibrationMode } from '@/vendor/m27-tract-studio/tract-renderer.js';
@@ -184,6 +185,7 @@ import {
   OUTER_LIP_INDICES,
 } from './face-mesh-topology';
 import { FACE_SURFACE_LANDMARKS, FaceSurfaceTransfer, parseCanonicalFace } from './face-surface-transfer';
+import CustomSelect from '@/components/common/CustomSelect.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 
 const props = defineProps<{
@@ -334,6 +336,16 @@ let lastFallbackPoseKey = '';
 
 let renderFrameTimes: number[] = [];
 let faceTracker: WebcamFaceTracker | null = null;
+let cameraSyncGen = 0;
+
+const vfLigCol = new THREE.Color('#fffbeb');
+const vfBodyCol = new THREE.Color('#ec4899');
+const vfTmpCol = new THREE.Color();
+
+const cameraSelectOptions = computed(() => [
+  { value: '', label: '默认摄像头' },
+  ...cameraList.value.map((cam) => ({ value: cam.deviceId, label: cam.label })),
+]);
 
 function isDarkTheme(): boolean {
   const dt = document.documentElement.dataset.theme;
@@ -351,25 +363,26 @@ function isDarkTheme(): boolean {
 function readSceneColors() {
   const dark = isDarkTheme();
   const cs = getComputedStyle(document.documentElement);
-  const panel = cs.getPropertyValue('--anatomy-bg').trim() || cs.getPropertyValue('--panel').trim() || (dark ? '#111923' : '#f4f7fa');
+  const tok = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+  const panel = tok('--anatomy-bg', tok('--panel', dark ? '#111923' : '#f4f7fa'));
   return {
     dark,
     bg: panel,
-    skinOuter: dark ? '#8eb8d8' : '#7b9ab8',
-    skinInner: dark ? '#4d6f8e' : '#9ab2c9',
-    wireHint: dark ? '#5eead4' : '#0f766e',
-    featureHighlight: dark ? '#34d399' : '#047857',
-    pointColor: dark ? '#a7f3d0' : '#065f46',
-    tongue: dark ? '#e57f8e' : '#d66b7a',
-    tongueCut: dark ? '#fda4af' : '#be123c',
-    mucosa: dark ? '#b9887d' : '#c69a8b',
-    teeth: '#f7f1e3',
-    lip: dark ? '#de7282' : '#c56472',
-    velum: dark ? '#cf7d8e' : '#b86b7b',
-    epiglottis: dark ? '#cca08e' : '#b98b78',
-    noseLine: dark ? '#5eead4' : '#0d9488',
+    skinOuter: tok('--anatomy-skin', dark ? '#8eb8d8' : '#7b9ab8'),
+    skinInner: tok('--anatomy-lining', dark ? '#4d6f8e' : '#9ab2c9'),
+    wireHint: tok('--anatomy-air', dark ? '#5eead4' : '#0f766e'),
+    featureHighlight: tok('--teal', dark ? '#34d399' : '#047857'),
+    pointColor: tok('--accent', dark ? '#a7f3d0' : '#065f46'),
+    tongue: tok('--anatomy-tongue', dark ? '#e57f8e' : '#d66b7a'),
+    tongueCut: tok('--anatomy-tongue-edge', dark ? '#fda4af' : '#be123c'),
+    mucosa: tok('--anatomy-mucosa', dark ? '#b9887d' : '#c69a8b'),
+    teeth: tok('--anatomy-tooth', '#f7f1e3'),
+    lip: tok('--anatomy-lip', dark ? '#de7282' : '#c56472'),
+    velum: tok('--anatomy-velum', dark ? '#cf7d8e' : '#b86b7b'),
+    epiglottis: tok('--anatomy-epiglottis', dark ? '#cca08e' : '#b98b78'),
+    noseLine: tok('--anatomy-air', dark ? '#5eead4' : '#0d9488'),
     arytenoid: dark ? '#fbcfe8' : '#f9a8d4',
-    cartilageRing: dark ? '#38bdf8' : '#0284c7',
+    cartilageRing: tok('--accent', dark ? '#38bdf8' : '#0284c7'),
   };
 }
 
@@ -410,11 +423,8 @@ async function requestFallbackPose19(params19: number[]): Promise<void> {
   if (sig === lastFallbackPoseKey && nextTractFrame) return;
   fallbackPoseBusy = true;
   try {
-    const resp = await fetch('/api/vtl/pose', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(4500),
-      body: JSON.stringify({
+    const res = await defaultVtlTransport.requestPoseRaw(
+      {
         speaker: 'JD2',
         section_count: 65,
         params: params19,
@@ -423,11 +433,11 @@ async function requestFallbackPose19(params19: number[]): Promise<void> {
         manual_root: false,
         tongue_shape: [0, 0, 0, 0],
         lip_shape: [0, 0, 0, 0],
-      }),
-    });
-    if (!resp.ok || disposed) return;
-    const json = (await resp.json().catch(() => null)) as Record<string, any> | null;
-    if (!json || json.ok === false || disposed) return;
+      },
+      { timeoutMs: 4500 },
+    );
+    if (!res.ok || disposed) return;
+    const json = res.value as Record<string, any>;
     const parsed = parsePoseSnapshotToFrame(json);
     if (parsed && !props.tract3d) {
       lastFallbackPoseKey = sig;
@@ -603,9 +613,6 @@ function updateVocalFolds3D(nowMs: number): void {
   const postAbductCm = Math.min(0.28, Math.max(0.012, xb * 1.05 + Math.sqrt(ca) * 0.32));
   const vibAmpCm = activeVib ? Math.min(0.15, (0.032 + 0.10 * Math.min(1, prPa / 750)) * Math.max(0.2, ra)) : 0;
 
-  const ligCol = new THREE.Color('#fffbeb');
-  const bodyCol = new THREE.Color('#ec4899');
-
   const writeFold = (mesh: THREE.Mesh, signZ: 1 | -1) => {
     const pos = (mesh.geometry.getAttribute('position') as THREE.BufferAttribute).array as Float32Array;
     const col = (mesh.geometry.getAttribute('color') as THREE.BufferAttribute).array as Float32Array;
@@ -640,10 +647,10 @@ function updateVocalFolds3D(nowMs: number): void {
         pos[idx] = px;
         pos[idx + 1] = py;
         pos[idx + 2] = pz;
-        const c = ligCol.clone().lerp(bodyCol, bodyMix);
-        col[idx] = c.r;
-        col[idx + 1] = c.g;
-        col[idx + 2] = c.b;
+        vfTmpCol.copy(vfLigCol).lerp(vfBodyCol, bodyMix);
+        col[idx] = vfTmpCol.r;
+        col[idx + 1] = vfTmpCol.g;
+        col[idx + 2] = vfTmpCol.b;
       }
     }
 
@@ -1465,7 +1472,7 @@ async function initThreeStage(): Promise<void> {
   themeObserver = new MutationObserver(() => syncMaterialsAndTheme());
   themeObserver.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ['data-theme', 'data-skin', 'style', 'class'],
+    attributeFilter: ['data-theme', 'data-style', 'data-anatomy-palette', 'style', 'class'],
   });
 
   startRenderLoop();
@@ -1555,6 +1562,7 @@ async function loadFaceTransfer(): Promise<void> {
 
 async function syncCameraCapture(): Promise<void> {
   if (disposed) return;
+  const gen = ++cameraSyncGen;
   if (!props.active || !props.cameraEnabled) {
     faceTracker?.stop();
     faceTransferAbort?.abort();
@@ -1614,18 +1622,21 @@ async function syncCameraCapture(): Promise<void> {
   cameraNotice.value = '';
   try {
     await tracker.start(props.selectedCameraId);
-    if (disposed) {
-      tracker.stop();
+    if (disposed || gen !== cameraSyncGen) {
+      if (disposed) tracker.stop();
       return;
     }
     cameraList.value = await listCameraDevices();
+    if (disposed || gen !== cameraSyncGen) return;
     if (showCameraPip.value && pipVideoEl.value && tracker.mediaStream) {
       pipVideoEl.value.srcObject = tracker.mediaStream;
       void pipVideoEl.value.play().catch(() => undefined);
     }
   } catch (err) {
-    if (disposed) {
+    if (disposed || gen === cameraSyncGen) {
       tracker.stop();
+    }
+    if (disposed || gen !== cameraSyncGen) {
       return;
     }
     cameraStatus.value = 'fallback';
@@ -1633,6 +1644,7 @@ async function syncCameraCapture(): Promise<void> {
       err instanceof Error
         ? `摄像头未开启（${err.message}），已自动切换为纯声学三维人头重建`
         : '摄像头未开启，已自动切换为纯声学三维人头重建';
+    reportReady();
   }
 }
 
@@ -1807,18 +1819,15 @@ onBeforeUnmount(() => {
           <span>摄像头面部驱动</span>
         </label>
 
-        <select
+        <CustomSelect
           v-if="cameraEnabled && cameraList.length > 1"
-          class="cam-select"
-          :value="selectedCameraId"
+          size="xs"
+          class="cam-select-wrap"
           aria-label="选择摄像头设备"
-          @change="emit('update:selectedCameraId', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">默认摄像头</option>
-          <option v-for="cam in cameraList" :key="cam.deviceId" :value="cam.deviceId">
-            {{ cam.label }}
-          </option>
-        </select>
+          :model-value="selectedCameraId"
+          :options="cameraSelectOptions"
+          @update:model-value="(v) => emit('update:selectedCameraId', String(v))"
+        />
 
         <template v-if="cameraEnabled">
           <label class="mini-check" title="显示绑定在头模与上下唇表面的 MediaPipe 468 点网格">
@@ -1916,7 +1925,7 @@ onBeforeUnmount(() => {
   padding: 5px 9px;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-2, var(--selected)) 76%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 76%, var(--panel));
 }
 
 .head3d-telemetry,
@@ -1934,7 +1943,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 5px;
   font-weight: 700;
-  color: var(--danger, #e11d48);
+  color: var(--danger);
 }
 
 .live-dot-badge::before {
@@ -2002,15 +2011,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.cam-select {
-  height: 23px;
+.cam-select-wrap {
   max-width: 150px;
-  padding: 0 6px;
-  border-radius: var(--r-ctrl);
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  font-size: 0.78rem;
 }
 
 .appearance-tag {
@@ -2144,7 +2146,7 @@ onBeforeUnmount(() => {
   padding: 5px 9px;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-2, var(--selected)) 62%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 62%, var(--panel));
   font-size: 0.78rem;
 }
 

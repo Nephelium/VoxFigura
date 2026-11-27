@@ -11,7 +11,8 @@ import {
   readThemePalette,
   renderM27TractSvg,
 } from '@/vendor/m27-tract-studio/tract-renderer.js';
-import CustomSelect from '@/components/common/CustomSelect.vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
+import CompactSlider from '@/components/common/CompactSlider.vue';
 import { getActiveSplitterValue } from '@/data/splitter-layout';
 import VoiceRenderSelect from '@/components/common/VoiceRenderSelect.vue';
 import { applyPeakAudioGain, normalizeAudioFile, synthesisGainMode, voiceRenderLabels, voiceRenderMode } from '@/data/voice-renderer';
@@ -26,6 +27,7 @@ import { isDeepSeekApiBase } from '@/data/deepseek';
 import ReconstructionAlignment from './ReconstructionAlignment.vue';
 import ReconstructionMicControl from './ReconstructionMicControl.vue';
 import ReconstructionTranscriptionActions from './ReconstructionTranscriptionActions.vue';
+import AudioRecordPrepModal, { type AudioRecordPrepResult } from './AudioRecordPrepModal.vue';
 import { fallbackAlignmentGrid } from './alignment-boundaries';
 import {
   prepareReconstructionCut,
@@ -49,6 +51,15 @@ import {
   type RealtimeStepPayload,
 } from './m27-realtime';
 import LiveHead3DStage from './LiveHead3DStage.vue';
+import {
+  VOQS_BUILTIN_PRESET_DEFAULTS,
+  isCreakyMixerPreset,
+  isMixerPresetExperimental,
+  mixerRequest,
+  normalizeMixerPreset,
+  type MixerMeta,
+  type MixerPreset,
+} from './voice-mixer';
 import {
   loadReconstructionVoices,
   reconstructionVoices,
@@ -153,14 +164,35 @@ const rightAnatomyShare = ref(getActiveSplitterValue('m27Cols.anatomySplit', 52)
 // Local transient UI states
 const cleaningSource = ref(false);
 const cleaningSpeaker = ref(false);
+const normalizingSource = ref(false);
 const aligning = ref(false);
 const transcribing = ref(false);
 const savingVoice = ref(false);
 const working = ref(false);
+const workingAction = ref<'reconstruct' | 'resynthesize' | 'arranger' | null>(null);
 const acquiringMic = ref(false);
 const recording = ref(false);
 const micMonitor = useReconstructionMicMonitor();
 const { elapsed: micElapsed, bars: micBars, quiet: micQuiet } = micMonitor;
+
+// Reference speaker recording + unified post-record prep modal
+const acquiringSpeakerMic = ref(false);
+const recordingSpeaker = ref(false);
+const speakerMicMonitor = useReconstructionMicMonitor();
+const { elapsed: speakerMicElapsed, bars: speakerMicBars, quiet: speakerMicQuiet } = speakerMicMonitor;
+let speakerRecorder: MediaRecorder | null = null;
+let speakerMicGen = 0;
+
+interface M27RecordPrepDraft {
+  target: 'source' | 'speaker';
+  file: File;
+  originalFile: File;
+  text: string;
+  lang: 'auto' | 'zh' | 'en';
+  grid: TextGridDocument | null;
+  fromExisting: boolean;
+}
+const recordPrepDraft = shallowRef<M27RecordPrepDraft | null>(null);
 const playing = ref(false);
 const auditioningWindow = ref(false);
 const cutting = ref(false);
@@ -186,7 +218,42 @@ function readLiveDelayTarget(): RealtimeDelayTargetMs {
 const liveDelayTargetMs = ref(readLiveDelayTarget());
 const liveKeepRecording = ref(false);
 const liveSpeakerKey = ref('');
+const liveSpeakerMedianF0Hz = ref<number | null>(null);
+const liveSpeakerPitchMatch = ref(true);
+const livePreparingSpeaker = ref(false);
+const liveStaleEngineWarning = ref(false);
 const liveError = ref('');
+
+const DEFAULT_CREAK_IRREG_BY_ID: Readonly<Record<string, number>> = {
+  creaky: 0.30,
+  creak: 0.30,
+  whispery_creaky: 0.30,
+  creaky_falsetto: 0.30,
+  whispery_creaky_falsetto: 0.30,
+};
+
+function buildFallbackPhonationPresets(): MixerPreset[] {
+  return Object.entries(VOQS_BUILTIN_PRESET_DEFAULTS).map(([id, item]) => ({
+    id,
+    label: item.label,
+    desc: item.desc,
+    f0_shift_semitones: item.f0_shift_semitones,
+    default_f0_coupling: item.default_f0_coupling,
+    is_voiceless_target: id === 'whisper' || id === 'voiceless',
+    supports_creak_irregularity: isCreakyMixerPreset({ id }),
+    default_creak_irregularity: DEFAULT_CREAK_IRREG_BY_ID[id] ?? null,
+    experimental: isMixerPresetExperimental({ id, builtin: true }),
+    builtin: true,
+    source9_phys_pa: item.source9_phys_pa,
+  }));
+}
+
+const livePhonationPresets = shallowRef<MixerPreset[]>(buildFallbackPhonationPresets());
+const livePhonationPresetId = ref<string>('none');
+const livePhonationStrengthPct = ref<number>(85);
+const livePhonationF0Coupling = ref<boolean>(false);
+const livePhonationCreakIrregPct = ref<number>(30);
+
 const liveMetrics = ref<RealtimeMetrics>({
   computeMs: 0,
   roundTripMs: 0,
@@ -198,10 +265,18 @@ const liveMetrics = ref<RealtimeMetrics>({
   voiced: false,
   silent: true,
   timbreStatus: 'idle',
+  phonationPreset: 'none',
+  engineSupportsPhonation: true,
+  speakerF0Ratio: 1,
+  speakerTargetF0Hz: null,
   levelRms: 0,
   elapsedSec: 0,
 });
 const liveMonitorCanvas = ref<HTMLCanvasElement | null>(null);
+const liveMonitorPlotWrap = ref<HTMLElement | null>(null);
+const liveMinF0 = ref(40);
+const liveMaxF0 = ref(320);
+const liveMaxPR = ref(1200);
 const liveStateSnapshot = shallowRef<ReturnType<typeof interpM27AnimState>>(null);
 const liveAnimSnapshot = shallowRef<M27TrajectoryAnim | null>(null);
 const liveTract3DSnapshot = shallowRef<DecodedTract3DFrame | null>(null);
@@ -216,6 +291,7 @@ let liveSpeakerPrepToken = 0;
 
 const liveTimbreStatusText = computed(() => {
   if (!liveUseTimbreModel.value) return '默认讲解声纹（未加载音色模型）';
+  if (livePreparingSpeaker.value) return '正在提取参考声纹…';
   const st = liveMetrics.value.timbreStatus;
   if (st === 'reference-cached') return `目标参考声纹 · ${speakerLabel.value}`;
   if (st === 'live-input-locked') return '已锁定输入说话人声纹';
@@ -224,9 +300,120 @@ const liveTimbreStatusText = computed(() => {
   return speakerFile.value ? `目标参考声纹 · ${speakerLabel.value}` : '待采集声纹';
 });
 
+const activeLivePhonationPreset = computed<MixerPreset | null>(() =>
+  livePhonationPresetId.value === 'none'
+    ? null
+    : livePhonationPresets.value.find((item) => item.id === livePhonationPresetId.value) ?? null,
+);
+
+function formatLivePhonationOption(preset: MixerPreset, group: string): SelectOption<string> {
+  const badgeMatch = preset.label.match(/\s*·\s*([^)）]+)[)）]\s*$/);
+  const badge = badgeMatch?.[1]?.trim() || (!preset.builtin ? '自定' : preset.id === 'voiceless' ? '清' : undefined);
+  const compactLabel = badgeMatch
+    ? preset.label.replace(/\s*·\s*[^)）]+([)）])\s*$/, '$1').trim()
+    : preset.label;
+  return {
+    value: preset.id,
+    label: compactLabel,
+    badge,
+    group,
+  };
+}
+
+const livePhonationOptions = computed<SelectOption<string>[]>(() => {
+  const core: SelectOption<string>[] = [];
+  const experimental: SelectOption<string>[] = [];
+  const custom: SelectOption<string>[] = [];
+  for (const preset of livePhonationPresets.value) {
+    if (preset.supports_diplophonia || preset.id === 'diplophonia') continue;
+    if (!preset.builtin) {
+      custom.push(formatLivePhonationOption(preset, '自定义发声预设'));
+    } else if (isMixerPresetExperimental(preset)) {
+      experimental.push(formatLivePhonationOption(preset, '扩展 VoQS（实验）'));
+    } else {
+      core.push(formatLivePhonationOption(preset, '核心发声类型'));
+    }
+  }
+  return [
+    { value: 'none', label: '沿用原声发声', badge: '默认' },
+    ...core,
+    ...experimental,
+    ...custom,
+  ];
+});
+
+const activeLivePhonationShortLabel = computed(() => {
+  const preset = activeLivePhonationPreset.value;
+  if (!preset) return '原声';
+  const shortName = preset.label.replace(/\s*[（(][^()（）]*[）)]\s*$/, '').trim() || preset.label;
+  return `${shortName} ${Math.round(livePhonationStrengthPct.value)}%`;
+});
+
+const livePhonationIsCreaky = computed(() => isCreakyMixerPreset(activeLivePhonationPreset.value));
+
+const livePhonationHasF0Option = computed(() => {
+  const preset = activeLivePhonationPreset.value;
+  if (!preset) return false;
+  return Boolean(
+    preset.default_f0_coupling ||
+    (typeof preset.f0_target_hz === 'number' && preset.f0_target_hz > 0) ||
+    Math.abs(preset.f0_shift_semitones) > 0.05,
+  );
+});
+
+const livePhonationDefaultIrregPct = computed(() => {
+  const preset = activeLivePhonationPreset.value;
+  if (!preset) return 30;
+  const raw = preset.default_creak_irregularity ?? DEFAULT_CREAK_IRREG_BY_ID[preset.id] ?? 0.30;
+  return Math.round(Math.max(0, Math.min(1, raw)) * 100);
+});
+
+const showLiveSpeakerPitchMatch = computed(() =>
+  !liveUseTimbreModel.value || getLiveSpeakerMode() !== 'input',
+);
+
+const liveTargetSpeakerF0Display = computed<number | null>(() => {
+  if (!showLiveSpeakerPitchMatch.value) return null;
+  if (!liveUseTimbreModel.value || getLiveSpeakerMode() === 'lecture') return 165;
+  return liveSpeakerMedianF0Hz.value ?? liveMetrics.value.speakerTargetF0Hz;
+});
+
+function selectLivePhonationPreset(value: string | number) {
+  const id = String(value);
+  livePhonationPresetId.value = id;
+  if (id === 'none') {
+    livePhonationF0Coupling.value = false;
+    liveStaleEngineWarning.value = false;
+    return;
+  }
+  const preset = livePhonationPresets.value.find((item) => item.id === id);
+  livePhonationF0Coupling.value = Boolean(preset?.default_f0_coupling);
+  const rawIrreg = preset?.default_creak_irregularity ?? DEFAULT_CREAK_IRREG_BY_ID[id];
+  if (typeof rawIrreg === 'number' && Number.isFinite(rawIrreg)) {
+    livePhonationCreakIrregPct.value = Math.round(Math.max(0, Math.min(1, rawIrreg)) * 100);
+  } else {
+    livePhonationCreakIrregPct.value = 30;
+  }
+}
+
+function selectLiveSpeaker(key: string | number) {
+  if (!liveUseTimbreModel.value) {
+    liveUseTimbreModel.value = true;
+  }
+  chooseSpeakerReference(key);
+}
+
+function triggerLiveSpeakerUpload() {
+  if (!liveUseTimbreModel.value) {
+    liveUseTimbreModel.value = true;
+  }
+  speakerInput.value?.click();
+}
+
 const audioEditBlocked = computed(() =>
   working.value || aligning.value || transcribing.value || cleaningSource.value ||
-  cleaningSpeaker.value || acquiringMic.value || recording.value || liveActive.value || liveStarting.value,
+  cleaningSpeaker.value || normalizingSource.value || acquiringMic.value || recording.value ||
+  liveActive.value || liveStarting.value,
 );
 const canEditAudio = computed(() => !!sourceFile.value && !cutting.value && !audioEditBlocked.value);
 const CUT_UNDO_LIMIT = 8;
@@ -246,20 +433,49 @@ let unmounted = false;
 
 const lectureVoice = 'jingjing-lecture';
 const inputVoice = 'input';
+const uploadedVoice = '__uploaded__';
 const lectureLabel = '井井讲解音色';
 
+const alignLangOptions = [
+  { value: 'auto', label: '自动识别语种' },
+  { value: 'zh', label: '普通话' },
+  { value: 'en', label: '英语' },
+] as const;
+
+const liveDelayOptions = REALTIME_DELAY_TARGETS_MS.map((delay) => ({
+  value: delay,
+  label: `${(delay / 1000).toFixed(1)} 秒`,
+}));
+
+const auditionWindowOptions = M27_WINDOW_MS_OPTIONS.map((ms) => ({
+  value: ms,
+  label: `±${ms} ms`,
+}));
+
 // T-11: 'input' ("沿用输入音色") is strictly the first & default choice
-const speakerOptions = computed(() => [
-  { value: inputVoice, label: '沿用输入音色' },
-  { value: lectureVoice, label: lectureLabel },
-  ...reconstructionVoices.value.map((item) => ({ value: item.id, label: item.name })),
-]);
+const speakerOptions = computed(() => {
+  const saved = reconstructionVoices.value.map((item) => ({ value: item.id, label: item.name }));
+  const hasSavedChoice = saved.some((item) => item.value === speakerChoice.value);
+  const uploaded = speakerFile.value && !hasSavedChoice
+    ? [{ value: uploadedVoice, label: `临时参考音 · ${speakerFile.value.name}` }]
+    : [];
+  return [
+    { value: inputVoice, label: '沿用输入音色' },
+    { value: lectureVoice, label: lectureLabel },
+    ...saved,
+    ...uploaded,
+  ];
+});
 
 const speakerLabel = computed(() => {
   if (speakerFile.value) return speakerFile.value.name;
   if (speakerChoice.value === lectureVoice) return lectureLabel;
   return '沿用输入音色';
 });
+
+const voiceRenderHint = computed(
+  () => `适用于声道重建与轨迹重合成。神经重合成将使用上方所选目标音色「${speakerLabel.value}」。`,
+);
 
 const fixedTextGrid = computed(
   () => !!sourceTextGrid.value && !sourceTextGridName.value.startsWith('模型对齐'),
@@ -296,6 +512,18 @@ const activeRow = computed(() =>
     ? rows.value[Math.max(0, Math.min(rows.value.length - 1, Math.floor(playheadSec.value * 50)))]
     : undefined,
 );
+const interpolatedActiveRow = computed(() => {
+  const list = rows.value;
+  if (!list.length) return undefined;
+  const pos = Math.max(0, Math.min(list.length - 1, playheadSec.value * 50));
+  const lo = Math.floor(pos);
+  const hi = Math.min(list.length - 1, lo + 1);
+  const alpha = pos - lo;
+  if (lo === hi || alpha < 1e-6) return list[lo];
+  const r0 = list[lo];
+  const r1 = list[hi];
+  return r0.map((v, i) => v + ((r1[i] ?? v) - v) * alpha);
+});
 
 const phoneBoundaries = computed(() => {
   if (sourceTextGrid.value) {
@@ -317,8 +545,16 @@ const phoneBoundaries = computed(() => {
 
 const currentPhoneAtPlayhead = computed(() => {
   const t = playheadSec.value;
-  const hit = phoneBoundaries.value.find((iv) => t >= iv.xmin && t <= iv.xmax && iv.text.trim() && iv.text.trim() !== 'sil');
-  return hit?.text.trim() ?? '';
+  const list = phoneBoundaries.value;
+  const halfOpenHit = list.find(
+    (iv) => t >= iv.xmin && t < iv.xmax && iv.text.trim() && iv.text.trim() !== 'sil',
+  );
+  if (halfOpenHit) return halfOpenHit.text.trim();
+  const last = list.at(-1);
+  if (last && Math.abs(t - last.xmax) <= 1e-6 && last.text.trim() && last.text.trim() !== 'sil') {
+    return last.text.trim();
+  }
+  return '';
 });
 
 const uniqueAlignedPhones = computed(() => {
@@ -334,17 +570,20 @@ const uniqueAlignedPhones = computed(() => {
   return list.slice(0, 18);
 });
 
-// Parameter lanes definition with physical units & explicit top/bottom scale bounds (T-53)
+// Full 27-dim parameter lanes (5 tract lanes = 17D, 4 glottis lanes = 10D) directly backed by 50 Hz `rows` (T-53)
+type ChartColorToken = 'teal' | 'accent' | 'violet' | 'warning' | 'danger' | 'success';
+
 interface ParamSeriesSpec {
   label: string;
-  color: string;
+  col: number;
+  colorToken: ChartColorToken;
   min: number;
   max: number;
   dec: number;
   unit: string;
   dash?: number[];
-  fill?: string;
-  read: (frame: M27AnimFrame | Record<string, unknown>) => number;
+  fillToken?: 'violet-bg' | 'teal-bg';
+  fallback?: number;
 }
 
 interface ParamLaneSpec {
@@ -354,69 +593,114 @@ interface ParamLaneSpec {
   unitLabel: string;
   topTick: string;
   botTick: string;
+  hint: string;
   zeroVal?: number;
   zeroRange?: [number, number];
   series: ParamSeriesSpec[];
 }
 
-const LANE_HEIGHT_PX = 54;
+const LANE_HEIGHT_PX = 50;
 
-const paramLanes = computed<ParamLaneSpec[]>(() => {
-  const frames = anim.value?.frames ?? [];
-  let maxF0 = 320;
-  let maxPR = 1200;
-  for (let i = 0; i < frames.length; i++) {
-    if (frames[i].f0 > maxF0) maxF0 = frames[i].f0;
-    if (frames[i].pr_pa > maxPR) maxPR = frames[i].pr_pa;
-  }
-  maxF0 = Math.min(600, Math.ceil(maxF0 / 50) * 50);
-  maxPR = Math.min(1600, Math.ceil(maxPR / 200) * 200);
-
-  const num = (v: unknown, fb = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : fb);
-  const lm = (f: M27AnimFrame | Record<string, unknown>, idx: number, fb = 0) => {
-    const arr = (f as M27AnimFrame).lm;
-    return Array.isArray(arr) && Number.isFinite(arr[idx]) ? arr[idx] : fb;
+function readSemanticChartColors(el: HTMLElement): Record<ChartColorToken | 'violet-bg' | 'teal-bg' | 'playhead', string> {
+  const cs = getComputedStyle(el);
+  const pick = (name: string) => cs.getPropertyValue(name).trim();
+  const text = pick('--text');
+  return {
+    teal: pick('--teal') || text,
+    accent: pick('--accent') || text,
+    violet: pick('--violet') || text,
+    warning: pick('--warning') || text,
+    danger: pick('--danger') || text,
+    success: pick('--success') || text,
+    'violet-bg': pick('--violet-bg') || 'transparent',
+    'teal-bg': pick('--teal-bg') || 'transparent',
+    playhead: pick('--danger') || pick('--accent') || text,
   };
+}
 
+function buildParamLanes(
+  minF0: number,
+  maxF0: number,
+  maxPR: number,
+  mode: typeof curveMode.value,
+): ParamLaneSpec[] {
   const all: ParamLaneSpec[] = [
     {
-      id: 'jaw-lip',
+      id: 'hyoid-jaw',
       group: 'tract',
-      name: 'JA / LD',
-      unitLabel: '° · cm',
-      topTick: '0° / 2.5',
-      botTick: '-7° / -0.5',
+      name: '喉颌',
+      unitLabel: '%',
+      topTick: '100%',
+      botTick: '0%',
+      hint: '按各参数合法物理上下限归一化：HY (-6.0..-3.5 cm) · HX (0..1) · JA (-7..0°) · JX (-0.5..0 cm)',
       series: [
-        { label: 'JA', color: '#0f766e', min: -7.0, max: 0.0, dec: 2, unit: '°', read: (f) => num((f as M27AnimFrame).ja) },
-        { label: 'LD', color: '#1d63b8', min: -0.5, max: 2.5, dec: 2, unit: 'cm', read: (f) => num((f as M27AnimFrame).ld) },
-        { label: 'LP', color: '#7c3aed', min: -1.0, max: 1.0, dec: 2, unit: 'cm', read: (f) => num((f as M27AnimFrame).lp) },
+        { label: 'HY', col: 1, colorToken: 'teal', min: -6.0, max: -3.5, dec: 2, unit: 'cm', fallback: -4.75 },
+        { label: 'HX', col: 0, colorToken: 'success', min: 0.0, max: 1.0, dec: 2, unit: '', dash: [4, 2], fallback: 0.55 },
+        { label: 'JA', col: 3, colorToken: 'accent', min: -7.0, max: 0.0, dec: 2, unit: '°', fallback: -2.0 },
+        { label: 'JX', col: 2, colorToken: 'violet', min: -0.5, max: 0.0, dec: 2, unit: 'cm', dash: [4, 2], fallback: -0.1 },
+      ],
+    },
+    {
+      id: 'lip-velum',
+      group: 'tract',
+      name: '唇腭',
+      unitLabel: '%',
+      topTick: '100%',
+      botTick: '0%',
+      hint: '按各参数合法物理上下限归一化：LD (-2..4 cm) · LP (-1..1) · VO (-0.1..1.5) · VS (0..1)',
+      series: [
+        { label: 'LD', col: 5, colorToken: 'accent', min: -2.0, max: 4.0, dec: 2, unit: 'cm', fallback: 0.55 },
+        { label: 'LP', col: 4, colorToken: 'violet', min: -1.0, max: 1.0, dec: 2, unit: '', dash: [4, 2], fallback: 0 },
+        { label: 'VO', col: 7, colorToken: 'teal', min: -0.1, max: 1.5, dec: 2, unit: '', fallback: -0.1 },
+        { label: 'VS', col: 6, colorToken: 'warning', min: 0.0, max: 1.0, dec: 2, unit: '', dash: [4, 2], fallback: 0.5 },
       ],
     },
     {
       id: 'tongue-body',
       group: 'tract',
-      name: 'TC / TB',
+      name: 'TC/TB',
       unitLabel: 'cm',
-      topTick: '+4.5',
+      topTick: '+6.5',
       botTick: '-3.0',
+      hint: '舌体与舌叶坐标共享物理刻度 (-3.0..+6.5 cm)：TCX · TCY · TBX · TBY',
+      zeroVal: 0,
+      zeroRange: [-3.0, 6.5],
       series: [
-        { label: 'TCX', color: '#b45309', min: -2.5, max: 3.5, dec: 2, unit: 'cm', read: (f) => lm(f, 0) },
-        { label: 'TCY', color: '#c93b4b', min: -3.0, max: 1.0, dec: 2, unit: 'cm', read: (f) => lm(f, 1) },
-        { label: 'TBX', color: '#15803d', min: -2.0, max: 5.0, dec: 2, unit: 'cm', read: (f) => lm(f, 4) },
-        { label: 'TBY', color: '#0369a1', min: -3.0, max: 4.5, dec: 2, unit: 'cm', read: (f) => lm(f, 5) },
+        { label: 'TCX', col: 8, colorToken: 'warning', min: -3.0, max: 6.5, dec: 2, unit: 'cm' },
+        { label: 'TCY', col: 9, colorToken: 'danger', min: -3.0, max: 6.5, dec: 2, unit: 'cm' },
+        { label: 'TBX', col: 12, colorToken: 'success', min: -3.0, max: 6.5, dec: 2, unit: 'cm', dash: [4, 2] },
+        { label: 'TBY', col: 13, colorToken: 'accent', min: -3.0, max: 6.5, dec: 2, unit: 'cm', dash: [4, 2] },
       ],
     },
     {
-      id: 'tongue-tip-velum',
+      id: 'tongue-tip',
       group: 'tract',
-      name: 'TT / VO',
+      name: '舌尖',
       unitLabel: 'cm',
-      topTick: '+6.0',
+      topTick: '+7.5',
       botTick: '-3.0',
+      hint: '舌尖前后与高低共享物理刻度 (-3.0..+7.5 cm)：TTX · TTY',
+      zeroVal: 0,
+      zeroRange: [-3.0, 7.5],
       series: [
-        { label: 'TTX', color: '#be185d', min: 1.5, max: 6.0, dec: 2, unit: 'cm', read: (f) => lm(f, 2, 3.5) },
-        { label: 'TTY', color: '#6d4aff', min: -3.0, max: 2.5, dec: 2, unit: 'cm', read: (f) => lm(f, 3) },
-        { label: 'VO', color: '#237768', min: -0.1, max: 1.5, dec: 2, unit: '', dash: [4, 3], read: (f) => num((f as M27AnimFrame).vo, -0.1) },
+        { label: 'TTX', col: 10, colorToken: 'danger', min: -3.0, max: 7.5, dec: 2, unit: 'cm', fallback: 3.5 },
+        { label: 'TTY', col: 11, colorToken: 'violet', min: -3.0, max: 7.5, dec: 2, unit: 'cm' },
+      ],
+    },
+    {
+      id: 'tongue-side',
+      group: 'tract',
+      name: '舌侧',
+      unitLabel: '比',
+      topTick: '+1.0',
+      botTick: '-1.0',
+      hint: '三段舌侧形变共享比值刻度 (-1.0..+1.0)：TS1 (0..1) · TS2 (0..1) · TS3 (-1..1)',
+      zeroVal: 0,
+      zeroRange: [-1.0, 1.0],
+      series: [
+        { label: 'TS1', col: 14, colorToken: 'teal', min: -1.0, max: 1.0, dec: 2, unit: '' },
+        { label: 'TS2', col: 15, colorToken: 'accent', min: -1.0, max: 1.0, dec: 2, unit: '', dash: [4, 2] },
+        { label: 'TS3', col: 16, colorToken: 'warning', min: -1.0, max: 1.0, dec: 2, unit: '' },
       ],
     },
     {
@@ -425,9 +709,10 @@ const paramLanes = computed<ParamLaneSpec[]>(() => {
       name: 'F0',
       unitLabel: 'Hz',
       topTick: `${maxF0}`,
-      botTick: '60',
+      botTick: `${minF0}`,
+      hint: `基频真实刻度 (${minF0}..${maxF0} Hz)`,
       series: [
-        { label: 'F0', color: '#b45309', min: 60, max: maxF0, dec: 0, unit: 'Hz', read: (f) => num((f as M27AnimFrame).f0, 120) },
+        { label: 'F0', col: 17, colorToken: 'warning', min: minF0, max: maxF0, dec: 0, unit: 'Hz', fallback: 120 },
       ],
     },
     {
@@ -437,55 +722,69 @@ const paramLanes = computed<ParamLaneSpec[]>(() => {
       unitLabel: 'Pa',
       topTick: `${maxPR}`,
       botTick: '0',
+      hint: `声门下肺压真实刻度 (0..${maxPR} Pa)`,
       series: [
-        {
-          label: 'PR',
-          color: '#c93b4b',
-          min: 0,
-          max: maxPR,
-          dec: 0,
-          unit: 'Pa',
-          fill: 'rgba(201, 59, 75, 0.13)',
-          read: (f) => num((f as M27AnimFrame).pr_pa, 0),
-        },
+        { label: 'PR', col: 18, colorToken: 'violet', min: 0, max: maxPR, dec: 0, unit: 'Pa', fillToken: 'violet-bg', fallback: 0 },
       ],
     },
     {
       id: 'glottis-geom',
       group: 'glottis',
-      name: 'XB / XT',
-      unitLabel: 'cm',
-      topTick: '0.30',
-      botTick: '-0.05',
-      zeroVal: 0,
-      zeroRange: [-0.05, 0.3],
+      name: '声门',
+      unitLabel: '%',
+      topTick: '100%',
+      botTick: '0%',
+      hint: '按各参数合法物理上下限归一化：XB (-0.05..0.30 cm) · XT (-0.05..0.30 cm) · CA (-0.25..0.25 cm²) · LAG (0..3.14 rad)',
       series: [
-        { label: 'XB', color: '#15803d', min: -0.05, max: 0.3, dec: 3, unit: 'cm', read: (f) => num((f as M27AnimFrame).xb) },
-        { label: 'XT', color: '#1d63b8', min: -0.05, max: 0.3, dec: 3, unit: 'cm', read: (f) => num((f as M27AnimFrame).xt) },
-        { label: 'CA', color: '#7c3aed', min: -0.05, max: 0.3, dec: 3, unit: '', read: (f) => num((f as M27AnimFrame).ca) },
+        { label: 'XB', col: 19, colorToken: 'success', min: -0.05, max: 0.3, dec: 3, unit: 'cm' },
+        { label: 'XT', col: 20, colorToken: 'accent', min: -0.05, max: 0.3, dec: 3, unit: 'cm' },
+        { label: 'CA', col: 21, colorToken: 'violet', min: -0.25, max: 0.25, dec: 3, unit: 'cm²', dash: [4, 2] },
+        { label: 'LAG', col: 22, colorToken: 'warning', min: 0.0, max: 3.1415, dec: 2, unit: 'rad', dash: [4, 2], fallback: 1.22 },
       ],
     },
     {
       id: 'glottis-dyn',
       group: 'glottis',
-      name: 'RA / PS',
-      unitLabel: '动力',
-      topTick: '+1.0',
-      botTick: '-1.0',
-      zeroVal: 0,
-      zeroRange: [-1.0, 1.0],
+      name: '激励',
+      unitLabel: '%',
+      topTick: '100%',
+      botTick: '0%',
+      hint: '按各参数合法物理上下限归一化：RA (-1..1) · PS (-1..1) · FL (0..100%) · SHIM (0..100%)',
       series: [
-        { label: 'RA', color: '#be185d', min: -1.0, max: 1.0, dec: 2, unit: '', read: (f) => num((f as M27AnimFrame).ra) },
-        { label: 'PS', color: '#0f766e', min: -1.0, max: 1.0, dec: 2, unit: '', read: (f) => num((f as M27AnimFrame).ps) },
-        { label: 'LAG', color: '#0369a1', min: 0.0, max: 3.1416, dec: 2, unit: 'rad', read: (f) => num((f as M27AnimFrame).lag, 1.22) },
+        { label: 'RA', col: 23, colorToken: 'danger', min: -1.0, max: 1.0, dec: 2, unit: '' },
+        { label: 'PS', col: 24, colorToken: 'teal', min: -1.0, max: 1.0, dec: 2, unit: '' },
+        { label: 'FL', col: 25, colorToken: 'accent', min: 0.0, max: 100.0, dec: 0, unit: '%', dash: [4, 2], fallback: 25 },
+        { label: 'SHIM', col: 26, colorToken: 'violet', min: 0.0, max: 100.0, dec: 0, unit: '%', dash: [4, 2], fallback: 0 },
       ],
     },
   ];
 
-  if (curveMode.value === 'tract') return all.filter((l) => l.group === 'tract');
-  if (curveMode.value === 'glottis') return all.filter((l) => l.group === 'glottis');
+  if (mode === 'tract') return all.filter((l) => l.group === 'tract');
+  if (mode === 'glottis') return all.filter((l) => l.group === 'glottis');
   return all;
+}
+
+const paramLanes = computed<ParamLaneSpec[]>(() => {
+  const dataRows = rows.value;
+  let minF0 = 40;
+  let maxF0 = 320;
+  let maxPR = 1200;
+  for (let i = 0; i < dataRows.length; i++) {
+    const f0 = dataRows[i][17];
+    const pr = dataRows[i][18];
+    if (Number.isFinite(f0) && f0 > 0 && f0 < minF0) minF0 = f0;
+    if (Number.isFinite(f0) && f0 > maxF0) maxF0 = f0;
+    if (Number.isFinite(pr) && pr > maxPR) maxPR = pr;
+  }
+  minF0 = minF0 < 40 ? Math.max(0, Math.floor(minF0 / 10) * 10) : 40;
+  maxF0 = Math.ceil(maxF0 / 50) * 50;
+  maxPR = Math.min(1600, Math.ceil(maxPR / 200) * 200);
+  return buildParamLanes(minF0, maxF0, maxPR, curveMode.value);
 });
+
+const liveParamLanes = computed<ParamLaneSpec[]>(() =>
+  buildParamLanes(liveMinF0.value, liveMaxF0.value, liveMaxPR.value, curveMode.value),
+);
 
 let alignmentRun = 0;
 let speakerGeneration = 0;
@@ -493,6 +792,9 @@ let sourceGeneration = 0;
 let requestGeneration = 0;
 let captureGeneration = 0;
 let cutGeneration = 0;
+let auditionGeneration = 0;
+let switchingVersionSeek: number | null = null;
+let pendingSourceNormalization: Promise<void> | null = null;
 let recorder: MediaRecorder | null = null;
 let speechRec: { stop: () => void } | null = null;
 let transcriptionRequest: AbortController | null = null;
@@ -506,7 +808,18 @@ const decodedBlobCache = new WeakMap<Blob, Promise<AudioBuffer>>();
 
 const safeReason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+async function waitForSourceNormalization(): Promise<void> {
+  if (pendingSourceNormalization) {
+    try {
+      await pendingSourceNormalization;
+    } catch {
+      // ignore normalization errors
+    }
+  }
+}
+
 function stopAuditionWindow() {
+  auditionGeneration++;
   if (auditionNode) {
     try {
       auditionNode.onended = null;
@@ -530,6 +843,7 @@ function stopPlayback() {
 function clearOutputsLocal() {
   requestGeneration++;
   working.value = false;
+  workingAction.value = null;
   stopPlayback();
   clearM27Outputs();
 }
@@ -562,6 +876,9 @@ function discardCapture() {
 function resetSource(name: string) {
   discardCapture();
   stopPlayback();
+  switchingVersionSeek = null;
+  pendingSourceNormalization = null;
+  normalizingSource.value = false;
   alignmentRun++;
   aligning.value = false;
   cancelTranscription();
@@ -586,6 +903,7 @@ function rememberSource(newEntry = false) {
     speaker: speakerFile.value,
     originalSpeaker: originalSpeaker.value,
     speakerProfile: speakerChoice.value === lectureVoice ? lectureVoice : undefined,
+    speakerChoiceId: speakerChoice.value,
     reference: sourceReference.value,
     textGrid: sourceTextGrid.value,
     textGridName: sourceTextGridName.value,
@@ -620,7 +938,14 @@ function openHistory(id: string) {
   sourceTextGridName.value = item.textGridName;
   alignmentText.value = item.alignmentText ?? '';
   alignmentLang.value = item.alignmentLang ?? 'auto';
-  setSpeaker(item.speaker, item.speakerProfile ?? (item.speaker ? '' : inputVoice));
+  const savedVoice = item.speakerChoiceId
+    ? reconstructionVoices.value.find((voice) => voice.id === item.speakerChoiceId)
+    : undefined;
+  const restoredChoice =
+    item.speakerProfile ??
+    (savedVoice ? savedVoice.id : item.speaker ? uploadedVoice : inputVoice);
+  setSpeaker(item.speaker, restoredChoice);
+  if (savedVoice) voiceName.value = savedVoice.name;
   originalSpeaker.value = item.originalSpeaker;
   const restored = updateLegacyReconstructionRest(item.rows, item.animation);
   rows.value = restored.rows;
@@ -640,22 +965,42 @@ function chooseFile(file: File, normalizedAlready = false) {
   replaceM27Url('source', URL.createObjectURL(file));
   rememberSource();
   if (!normalizedAlready && synthesisGainMode.value === 'peak') {
-    void normalizeAudioFile(file, file.name, 'peak').then((normalized) => {
-      if (
-        unmounted
-        || token !== sourceGeneration
-        || working.value
-        || cleaningSource.value
-        || cutting.value
-        || normalized === file
-      ) {
-        return;
-      }
-      originalSource.value = sourceFile.value = normalized;
-      replaceM27Url('source', URL.createObjectURL(normalized));
-      m27Session.decodedBuffer.value = null;
-      rememberSource();
-    });
+    normalizingSource.value = true;
+    const task = normalizeAudioFile(file, file.name, 'peak')
+      .then((normalized) => {
+        if (
+          unmounted
+          || token !== sourceGeneration
+          || working.value
+          || cleaningSource.value
+          || cutting.value
+          || aligning.value
+          || transcribing.value
+          || playing.value
+          || auditioningWindow.value
+          || normalized === file
+        ) {
+          return;
+        }
+        originalSource.value = sourceFile.value = normalized;
+        replaceM27Url('source', URL.createObjectURL(normalized));
+        m27Session.decodedBuffer.value = null;
+        m27Session.spectrogramCache.value = {
+          sourceBlob: null,
+          durationSec: 0,
+          pcm: null,
+          sampleRate: 16000,
+          bitmap: null,
+        };
+        rememberSource();
+      })
+      .finally(() => {
+        if (token === sourceGeneration) {
+          normalizingSource.value = false;
+          if (pendingSourceNormalization === task) pendingSourceNormalization = null;
+        }
+      });
+    pendingSourceNormalization = task;
   }
 }
 
@@ -712,11 +1057,12 @@ function saveEditedAlignment(rawGrid: TextGridDocument) {
 }
 
 // T-11: Default fallback choice is strictly `inputVoice` ('input')
-function setSpeaker(file: File | null, choice = file ? '' : inputVoice) {
+function setSpeaker(file: File | null, choice = file ? uploadedVoice : inputVoice) {
   speakerGeneration++;
   cleaningSpeaker.value = false;
   requestGeneration++;
   working.value = false;
+  workingAction.value = null;
   if (version.value === 'neural') {
     stopPlayback();
     version.value = 'source';
@@ -726,10 +1072,26 @@ function setSpeaker(file: File | null, choice = file ? '' : inputVoice) {
   voiceName.value = '';
   replaceM27Url('neural');
   outputs.value = { ...outputs.value, neural: null };
-  status.value = '';
+  if (!liveActive.value) status.value = '';
+}
+
+function clearSourceAudioCaches() {
+  decodedDur.value = 0;
+  mediaDuration.value = 0;
+  playheadSec.value = 0;
+  selectionSec.value = null;
+  m27Session.decodedBuffer.value = null;
+  m27Session.spectrogramCache.value = {
+    sourceBlob: null,
+    durationSec: 0,
+    pcm: null,
+    sampleRate: 16000,
+    bitmap: null,
+  };
 }
 
 async function processSource() {
+  await waitForSourceNormalization();
   const original = originalSource.value;
   const token = sourceGeneration;
   if (!original || working.value || transcribing.value || cleaningSource.value || cutting.value) return;
@@ -738,11 +1100,11 @@ async function processSource() {
     const result = await denoiseFile(original, sourceName.value);
     if (token !== sourceGeneration) return;
     clearOutputsLocal();
+    clearSourceAudioCaches();
     sourceFile.value = result;
     replaceM27Url('source', URL.createObjectURL(result));
-    mediaDuration.value = playheadSec.value = 0;
     status.value = '已切换到降噪输入';
-    rememberSource(true);
+    rememberSource(false);
   } catch (error) {
     if (token === sourceGeneration) status.value = safeReason(error);
   } finally {
@@ -758,11 +1120,11 @@ function restoreSourceAudio() {
     alignmentMessage.value = '';
   }
   clearOutputsLocal();
+  clearSourceAudioCaches();
   sourceFile.value = original;
-  mediaDuration.value = playheadSec.value = 0;
-  replaceM27Url('source', originalSourceUrl.value || URL.createObjectURL(original));
+  replaceM27Url('source', URL.createObjectURL(original));
   status.value = '已恢复原音';
-  rememberSource(true);
+  rememberSource(false);
 }
 
 function applyCutMedia(
@@ -794,6 +1156,7 @@ function applyCutMedia(
 }
 
 async function cutSourceAudio(mode: 'silence' | 'selection') {
+  await waitForSourceNormalization();
   const source = sourceFile.value;
   const selection = mode === 'selection' ? selectionSec.value : null;
   if (!canEditAudio.value || !source || (mode === 'selection' && !selection)) return;
@@ -871,6 +1234,7 @@ function applySpeakerAudio(file: File) {
   outputs.value = { ...outputs.value, neural: null };
   requestGeneration++;
   working.value = false;
+  workingAction.value = null;
 }
 
 async function processSpeaker() {
@@ -898,6 +1262,7 @@ function restoreSpeakerAudio() {
 
 function chooseSpeakerReference(key: string | number) {
   const choice = String(key);
+  if (choice === uploadedVoice) return;
   if (choice === lectureVoice || choice === inputVoice) {
     setSpeaker(null, choice);
     return;
@@ -928,7 +1293,7 @@ async function saveVoice() {
   }
 }
 
-function tryStartMicSpeechRecognition() {
+function tryStartMicSpeechRecognition(onTranscript: (text: string) => void) {
   const win = window as unknown as {
     SpeechRecognition?: new () => {
       lang: string;
@@ -962,8 +1327,7 @@ function tryStartMicSpeechRecognition() {
         transcript += ev.results[i][0]?.transcript ?? '';
       }
       if (transcript.trim()) {
-        alignmentText.value = transcript.trim();
-        alignmentMessage.value = '已实时识别录音文本，可按需微调';
+        onTranscript(transcript.trim());
       }
     };
     rec.onerror = () => undefined;
@@ -997,7 +1361,9 @@ async function toggleRecording() {
       stream.getTracks().forEach((t) => t.stop());
       return;
     }
-    const capturedTextBeforeStop = () => alignmentText.value;
+    const presetText = alignmentText.value.trim();
+    const presetLang = alignmentLang.value;
+    let liveRecognizedText = '';
     const mic = new MediaRecorder(stream);
     const chunks: Blob[] = [];
     recorder = mic;
@@ -1012,7 +1378,7 @@ async function toggleRecording() {
     mic.onstop = async () => {
       stopSpeechRecognition();
       micMonitor.stop();
-      const recognizedDuringMic = capturedTextBeforeStop();
+      const recognizedDuringMic = liveRecognizedText;
       mic.stream.getTracks().forEach((t) => t.stop());
       recording.value = false;
       recorder = null;
@@ -1027,12 +1393,17 @@ async function toggleRecording() {
           (c) => c.charCodeAt(0),
         );
         if (generation === captureGeneration) {
-          chooseFile(new File([bytes], '录音.wav', { type: 'audio/wav' }), true);
-          if (recognizedDuringMic.trim()) {
-            alignmentText.value = recognizedDuringMic.trim();
-            alignmentMessage.value = '已自动填入录音期间识别的参考文本';
-            rememberSource();
-          }
+          const recordedFile = new File([bytes], '录音.wav', { type: 'audio/wav' });
+          const nextText = presetText || recognizedDuringMic.trim();
+          recordPrepDraft.value = {
+            target: 'source',
+            file: recordedFile,
+            originalFile: recordedFile,
+            text: nextText,
+            lang: presetLang,
+            grid: null,
+            fromExisting: false,
+          };
         }
       } catch (e) {
         if (generation === captureGeneration) status.value = '录音解码失败 · ' + safeReason(e);
@@ -1041,10 +1412,15 @@ async function toggleRecording() {
       }
     };
     stopPlayback();
-    alignmentText.value = '';
     mic.start();
     micMonitor.start(stream);
-    tryStartMicSpeechRecognition();
+    if (!presetText) {
+      tryStartMicSpeechRecognition((text) => {
+        liveRecognizedText = text;
+        alignmentText.value = text;
+        alignmentMessage.value = '已实时识别录音文本，可按需微调';
+      });
+    }
     recording.value = true;
   } catch {
     if (generation === captureGeneration) {
@@ -1055,6 +1431,168 @@ async function toggleRecording() {
   } finally {
     if (generation === captureGeneration) acquiringMic.value = false;
   }
+}
+
+function discardSpeakerCapture() {
+  speakerMicGen++;
+  acquiringSpeakerMic.value = false;
+  recordingSpeaker.value = false;
+  speakerMicMonitor.stop();
+  if (speakerRecorder) {
+    const mic = speakerRecorder;
+    speakerRecorder = null;
+    mic.onstop = null;
+    mic.onerror = null;
+    try {
+      if (mic.state !== 'inactive') mic.stop();
+    } catch {
+      // ignore
+    }
+    mic.stream.getTracks().forEach((t) => t.stop());
+  }
+}
+
+async function toggleSpeakerRecording() {
+  if (speakerRecorder?.state === 'recording') {
+    speakerRecorder.stop();
+    speakerMicMonitor.stop();
+    return;
+  }
+  if (speakerRecorder || acquiringSpeakerMic.value || recording.value || acquiringMic.value || working.value) return;
+  stopPlayback();
+  const gen = ++speakerMicGen;
+  acquiringSpeakerMic.value = true;
+  let stream: MediaStream | undefined;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, noiseSuppression: false, echoCancellation: false, autoGainControl: false },
+    });
+    if (gen !== speakerMicGen) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const mic = new MediaRecorder(stream);
+    const chunks: Blob[] = [];
+    speakerRecorder = mic;
+    mic.ondataavailable = (ev) => {
+      if (ev.data.size) chunks.push(ev.data);
+    };
+    mic.onerror = () => {
+      if (gen !== speakerMicGen) return;
+      discardSpeakerCapture();
+      status.value = '参考音录制中断，请检查麦克风输入';
+    };
+    mic.onstop = async () => {
+      speakerMicMonitor.stop();
+      mic.stream.getTracks().forEach((t) => t.stop());
+      recordingSpeaker.value = false;
+      speakerRecorder = null;
+      let ctx: AudioContext | undefined;
+      try {
+        const recorded = new Blob(chunks, { type: mic.mimeType });
+        ctx = new AudioContext({ sampleRate: 16000 });
+        const decoded = await ctx.decodeAudioData(await recorded.arrayBuffer());
+        if (synthesisGainMode.value === 'peak') applyPeakAudioGain(decoded);
+        const bytes = Uint8Array.from(
+          atob(encodeMonoWavBase64(decoded.getChannelData(0), decoded.sampleRate)),
+          (c) => c.charCodeAt(0),
+        );
+        if (gen !== speakerMicGen) return;
+        const file = new File([bytes], '参考音色录音.wav', { type: 'audio/wav' });
+        recordPrepDraft.value = {
+          target: 'speaker',
+          file,
+          originalFile: file,
+          text: '',
+          lang: 'auto',
+          grid: null,
+          fromExisting: false,
+        };
+      } catch (err) {
+        if (gen === speakerMicGen) status.value = '参考音解码失败 · ' + safeReason(err);
+      } finally {
+        if (ctx) void ctx.close();
+      }
+    };
+    mic.start();
+    speakerMicMonitor.start(stream);
+    recordingSpeaker.value = true;
+  } catch {
+    if (gen === speakerMicGen) {
+      discardSpeakerCapture();
+      status.value = '麦克风不可用，请检查浏览器录音权限';
+    }
+    stream?.getTracks().forEach((t) => t.stop());
+  } finally {
+    if (gen === speakerMicGen) acquiringSpeakerMic.value = false;
+  }
+}
+
+function ensureAudioFile(blob: Blob, fallbackName: string): File {
+  return blob instanceof File ? blob : new File([blob], fallbackName || '录音.wav', { type: blob.type || 'audio/wav' });
+}
+
+function openSourceAudioEditor() {
+  if (!sourceFile.value || audioEditBlocked.value) return;
+  const curFile = ensureAudioFile(sourceFile.value, sourceName.value || '录音.wav');
+  const origFile = originalSource.value ? ensureAudioFile(originalSource.value, sourceName.value || '录音.wav') : curFile;
+  recordPrepDraft.value = {
+    target: 'source',
+    file: curFile,
+    originalFile: origFile,
+    text: alignmentText.value,
+    lang: alignmentLang.value,
+    grid: sourceTextGrid.value,
+    fromExisting: true,
+  };
+}
+
+function openSpeakerAudioEditor() {
+  if (!speakerFile.value || working.value || cleaningSpeaker.value) return;
+  recordPrepDraft.value = {
+    target: 'speaker',
+    file: speakerFile.value,
+    originalFile: originalSpeaker.value ?? speakerFile.value,
+    text: '',
+    lang: 'auto',
+    grid: null,
+    fromExisting: true,
+  };
+}
+
+function confirmRecordPrep(result: AudioRecordPrepResult) {
+  const draft = recordPrepDraft.value;
+  if (!draft) return;
+  recordPrepDraft.value = null;
+
+  if (draft.target === 'speaker') {
+    setSpeaker(result.file, uploadedVoice);
+    if (result.denoised) {
+      originalSpeaker.value = result.originalFile;
+    }
+    rememberSource();
+    status.value = result.denoised ? '已载入降噪后的参考音色录音' : '已载入自定义参考音色录音';
+    return;
+  }
+
+  const keepExistingMedia = draft.fromExisting && !result.audioChanged && sourceFile.value === result.file;
+  if (!keepExistingMedia) {
+    chooseFile(result.file, true);
+    if (result.denoised) {
+      originalSource.value = result.originalFile;
+    }
+  }
+  alignmentLang.value = result.lang;
+  alignmentText.value = result.text;
+  if (result.grid) {
+    sourceTextGrid.value = result.grid;
+    sourceTextGridName.value = '';
+    alignmentMessage.value = '已应用录音编辑弹窗中的 Vox2Align-Lite v2 音素边界对齐';
+  } else if (result.text) {
+    alignmentMessage.value = '已填入参考文本，点击「按原文对齐」或「开始声道重建」生效';
+  }
+  rememberSource();
+  status.value = result.denoised ? '已载入裁剪/降噪后的录音' : '已载入录音，可直接试听或开始声道重建';
 }
 
 function wavBlob(data?: string) {
@@ -1131,47 +1669,63 @@ const transcriptionBlocked = computed(() =>
 );
 const deepSeekAsrKey = computed(() => store.deepSeekAsrEnabled.value && isDeepSeekApiBase(store.aiToolsBaseUrl.value)
   ? store.aiToolsApiKey.value : '');
+const transcribingMode = ref<'local' | 'cloud' | null>(null);
 const localAsr = useLocalAsrSetup(
-  computed(() => !!sourceFile.value && !deepSeekAsrKey.value),
+  computed(() => !!sourceFile.value),
   store.localWhisperModel, store.setLocalWhisperModel,
 );
 const { status: localAsrStatus, message: localAsrMessage, pendingModel: localAsrPending } = localAsr;
 watch(deepSeekAsrKey, () => {
-  if (!transcribing.value) return;
+  if (!transcribing.value || transcribingMode.value !== 'cloud') return;
   cancelTranscription();
   alignmentMessage.value = '';
 });
 
-async function transcribeReferenceText() {
+function formatTranscribedLang(lang?: string): string {
+  const labels: Record<string, string> = { zh: '普通话', en: '英语', ja: '日语', ko: '韩语', yue: '粤语' };
+  return (lang && labels[lang]) || '语音';
+}
+
+async function transcribeReferenceText(mode: 'local' | 'cloud' = 'local') {
+  await waitForSourceNormalization();
   const file = sourceFile.value;
   if (!file || transcriptionBlocked.value) return;
-  const key = deepSeekAsrKey.value;
+  const key = mode === 'cloud' ? deepSeekAsrKey.value : '';
   const request = new AbortController();
   transcriptionRequest = request;
   transcribing.value = true;
-  alignmentMessage.value = key ? '正在使用 DeepSeek 识别录音…' : '正在使用本地模型识别录音…';
+  transcribingMode.value = mode;
+  alignmentMessage.value = mode === 'cloud' ? '正在使用 DeepSeek API 识别录音…' : '正在使用本地 SenseVoice-Small 识别录音…';
 
   try {
     const result = await requestTranscription(file, alignmentLang.value, request.signal, {
-      deepSeekKey: key, model: store.localWhisperModel.value,
+      mode,
+      deepSeekKey: key,
+      model: store.localWhisperModel.value,
     });
     if (transcriptionRequest !== request || sourceFile.value !== file) return;
     if (alignmentText.value.trim() !== result.text) invalidateModelGrid();
     alignmentText.value = result.text;
-    const source = key ? 'DeepSeek 已转写录音' : `已转写${result.lang === 'zh' ? '普通话' : '英语'}录音`;
+    const source = mode === 'cloud'
+      ? 'DeepSeek API 已转写录音'
+      : `SenseVoice-Small 已转写${formatTranscribedLang(result.lang)}录音`;
     alignmentMessage.value = `${source}，可校对文本后按原文对齐或开始重建`;
     rememberSource();
   } catch (error) {
     if (transcriptionRequest === request && sourceFile.value === file) {
       alignmentMessage.value = '自动识别未完成：' + safeReason(error);
-      if (!key) void localAsr.refresh();
+      if (mode === 'local') void localAsr.refresh();
     }
   } finally {
-    if (transcriptionRequest === request) cancelTranscription();
+    if (transcriptionRequest === request) {
+      transcribingMode.value = null;
+      cancelTranscription();
+    }
   }
 }
 
 async function alignTranscript() {
+  await waitForSourceNormalization();
   const file = sourceFile.value;
   const text = alignmentText.value.trim();
   if (!file || !text || aligning.value || transcribing.value || working.value || cutting.value || fixedTextGrid.value) return;
@@ -1201,7 +1755,8 @@ async function alignTranscript() {
   }
 }
 
-async function run(action: 'reconstruct' | 'resynthesize') {
+async function run(action: 'reconstruct' | 'resynthesize', trigger: 'reconstruct' | 'resynthesize' | 'arranger' = action) {
+  await waitForSourceNormalization();
   if (
     working.value ||
     aligning.value ||
@@ -1231,6 +1786,7 @@ async function run(action: 'reconstruct' | 'resynthesize') {
     speakerChoice.value === lectureVoice ? lectureVoice : undefined;
 
   working.value = true;
+  workingAction.value = trigger;
   status.value = action === 'reconstruct' ? '正在执行 Vox2Tract-Lite 声道重建…' : '正在重合成音频…';
 
   try {
@@ -1344,7 +1900,10 @@ async function run(action: 'reconstruct' | 'resynthesize') {
   } catch (e) {
     if (token === requestGeneration) status.value = safeReason(e);
   } finally {
-    if (token === requestGeneration) working.value = false;
+    if (token === requestGeneration) {
+      working.value = false;
+      workingAction.value = null;
+    }
   }
 }
 
@@ -1370,6 +1929,7 @@ function decodeBlobCached(blob: Blob): Promise<AudioBuffer> {
 }
 
 async function auditionWindowAtPlayhead() {
+  if (liveActive.value || liveStarting.value || recording.value) return;
   const blob = activeBlobForAudition();
   if (!blob) return;
   if (auditioningWindow.value) {
@@ -1377,9 +1937,11 @@ async function auditionWindowAtPlayhead() {
     return;
   }
   stopPlayback();
+  const gen = ++auditionGeneration;
   auditioningWindow.value = true;
   try {
     const decoded = await decodeBlobCached(blob);
+    if (unmounted || gen !== auditionGeneration) return;
     const halfSec = auditionWindowMs.value / 1000;
     const center = Math.max(0, Math.min(decoded.duration, playheadSec.value));
     const t0 = Math.max(0, center - halfSec);
@@ -1391,6 +1953,7 @@ async function auditionWindowAtPlayhead() {
 
     const ctx = (auditionCtx ??= new AudioContext());
     if (ctx.state === 'suspended') await ctx.resume();
+    if (unmounted || gen !== auditionGeneration) return;
 
     const windowed = ctx.createBuffer(decoded.numberOfChannels, frameLen, sr);
     const fadeSamples = Math.min(Math.floor(frameLen / 2), Math.max(1, Math.round(0.012 * sr)));
@@ -1423,8 +1986,10 @@ async function auditionWindowAtPlayhead() {
     };
     node.start();
   } catch (err) {
-    auditioningWindow.value = false;
-    status.value = '局部窗口试听失败 · ' + safeReason(err);
+    if (gen === auditionGeneration) {
+      auditioningWindow.value = false;
+      status.value = '局部窗口试听失败 · ' + safeReason(err);
+    }
   }
 }
 
@@ -1456,7 +2021,7 @@ async function createWritableSchemeInline() {
 }
 
 function confirmAssignIpa() {
-  const row = activeRow.value;
+  const row = interpolatedActiveRow.value ?? activeRow.value;
   const sym = assignSymbol.value.trim();
   if (!row || !sym) return;
   if (assignSetId.value === RECORDED_IPA_SET_ID) {
@@ -1524,11 +2089,15 @@ function paintAnatomy() {
 
 function paintLiveMonitor() {
   const canvas = liveMonitorCanvas.value;
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const w = Math.max(240, Math.round(rect.width));
-  const h = Math.max(180, Math.round(rect.height));
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const wrap = liveMonitorPlotWrap.value ?? canvas?.parentElement;
+  const lanes = liveParamLanes.value;
+  if (!canvas || !wrap || !lanes.length) return;
+
+  const w = Math.max(160, Math.round(wrap.clientWidth));
+  const h = Math.round(wrap.clientHeight);
+  if (!h) return;
+  const laneHeight = h / lanes.length;
+  const dpr = Math.min(2.25, window.devicePixelRatio || 1);
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
@@ -1538,62 +2107,138 @@ function paintLiveMonitor() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const pal = readThemePalette(canvas);
-  ctx.fillStyle = pal.curvesBg || '#0f1722';
+  const sem = readSemanticChartColors(canvas);
+  ctx.fillStyle = pal.curvesBg;
   ctx.fillRect(0, 0, w, h);
 
-  const traces: Array<{ label: string; col: number; min: number; max: number; color: string; unit: string }> = [
-    { label: '基频 F0', col: 17, min: 60, max: 450, color: '#60a5fa', unit: 'Hz' },
-    { label: '声门下压 PR', col: 18, min: 0, max: 1400, color: '#f59e0b', unit: 'Pa' },
-    { label: '舌背高度 TCY', col: 9, min: -3.0, max: 1.0, color: '#34d399', unit: 'cm' },
-    { label: '舌尖高度 TTY', col: 11, min: -3.0, max: 2.5, color: '#a78bfa', unit: 'cm' },
-    { label: '唇距 LD', col: 5, min: -1.0, max: 3.0, color: '#f472b6', unit: 'cm' },
-  ];
-
-  const rowH = h / traces.length;
   const maxPts = 250; // 5 s @ 50 Hz
   const hist = liveTraceHistory;
+  const latestRow = hist.length ? hist[hist.length - 1] : null;
+  const readCell = (row: readonly number[] | null, col: number, fallback = 0) => {
+    const v = row?.[col];
+    return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  };
 
-  traces.forEach((tr, idx) => {
-    const top = idx * rowH;
-    const bot = top + rowH;
-    const plotT = top + 16;
-    const plotB = bot - 6;
+  // Subtle 1-second vertical gridlines across the 5 s rolling window
+  ctx.save();
+  ctx.globalAlpha = 0.42;
+  ctx.strokeStyle = pal.zeroLine;
+  ctx.lineWidth = 1;
+  for (let sec = 1; sec < 5; sec++) {
+    const gx = (sec / 5) * w;
+    ctx.beginPath();
+    ctx.moveTo(gx, 0);
+    ctx.lineTo(gx, h);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  const offset = maxPts - hist.length;
+  const xAtIdx = (i: number) => ((offset + i) / (maxPts - 1)) * w;
+
+  lanes.forEach((lane, li) => {
+    const top = li * laneHeight;
+    const bot = top + laneHeight;
+    const plotT = top + 14;
+    const plotB = bot - 4;
     const plotH = Math.max(12, plotB - plotT);
-    if (idx % 2 === 1) {
-      ctx.fillStyle = pal.laneBg || 'rgba(148, 163, 184, 0.05)';
-      ctx.fillRect(0, top, w, rowH);
+
+    if (li % 2 === 1) {
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = pal.laneBg;
+      ctx.fillRect(0, top, w, laneHeight);
+      ctx.restore();
     }
-    ctx.strokeStyle = pal.laneBorder || 'rgba(148, 163, 184, 0.22)';
+    ctx.strokeStyle = pal.laneBorder;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, bot - 0.5);
     ctx.lineTo(w, bot - 0.5);
     ctx.stroke();
 
-    if (hist.length > 1) {
+    const yAt = (val: number, vmin: number, vmax: number) => {
+      const u = Math.max(0, Math.min(1, (val - vmin) / Math.max(1e-6, vmax - vmin)));
+      return plotB - u * plotH;
+    };
+
+    if (lane.zeroVal !== undefined && lane.zeroRange) {
+      const zy = yAt(lane.zeroVal, lane.zeroRange[0], lane.zeroRange[1]);
       ctx.save();
-      ctx.strokeStyle = tr.color;
-      ctx.lineWidth = 1.7;
+      ctx.setLineDash([3, 3]);
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = pal.zeroLine;
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
-      const offset = maxPts - hist.length;
-      for (let i = 0; i < hist.length; i++) {
-        const val = hist[i][tr.col] ?? 0;
-        const x = ((offset + i) / (maxPts - 1)) * w;
-        const u = Math.max(0, Math.min(1, (val - tr.min) / Math.max(1e-6, tr.max - tr.min)));
-        const y = plotB - u * plotH;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
+      ctx.moveTo(0, zy);
+      ctx.lineTo(w, zy);
       ctx.stroke();
       ctx.restore();
     }
 
-    const latest = hist.length ? (hist[hist.length - 1][tr.col] ?? 0) : 0;
-    ctx.font = '600 10.5px "JetBrains Mono", Consolas, monospace';
-    ctx.fillStyle = tr.color;
+    for (const ser of lane.series) {
+      const serColor = sem[ser.colorToken];
+      const serFill = ser.fillToken ? sem[ser.fillToken] : '';
+      if (serFill && hist.length > 1) {
+        ctx.save();
+        ctx.beginPath();
+        const firstX = xAtIdx(0);
+        ctx.moveTo(firstX, plotB);
+        let lastX = firstX;
+        for (let i = 0; i < hist.length; i++) {
+          const x = xAtIdx(i);
+          const y = yAt(readCell(hist[i], ser.col, ser.fallback), ser.min, ser.max);
+          ctx.lineTo(x, y);
+          lastX = x;
+        }
+        ctx.lineTo(lastX, plotB);
+        ctx.closePath();
+        ctx.fillStyle = serFill;
+        ctx.fill();
+        ctx.restore();
+      }
+
+      if (hist.length > 1) {
+        ctx.save();
+        if (ser.dash) ctx.setLineDash(ser.dash);
+        ctx.strokeStyle = serColor;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let i = 0; i < hist.length; i++) {
+          const x = xAtIdx(i);
+          const y = yAt(readCell(hist[i], ser.col, ser.fallback), ser.min, ser.max);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    let rx = 8;
+    ctx.font = '600 9.5px "JetBrains Mono", Consolas, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`${tr.label}  ${latest.toFixed(tr.col >= 17 ? 1 : 2)} ${tr.unit}`, 10, top + 9);
+
+    for (const ser of lane.series) {
+      const serColor = sem[ser.colorToken];
+      const curVal = readCell(latestRow, ser.col, ser.fallback);
+      if (latestRow) {
+        const cy = yAt(curVal, ser.min, ser.max);
+        ctx.fillStyle = serColor;
+        ctx.beginPath();
+        ctx.arc(Math.max(3, w - 3), cy, 2.7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = pal.dotStroke;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      const suffix = ser.unit ? (ser.unit === '°' || ser.unit === '%' ? ser.unit : ` ${ser.unit}`) : '';
+      const txt = latestRow ? `${ser.label} ${curVal.toFixed(ser.dec)}${suffix}` : `${ser.label} —`;
+      ctx.fillStyle = serColor;
+      ctx.fillText(txt, rx, top + 8);
+      rx += ctx.measureText(txt).width + 10;
+    }
   });
 }
 
@@ -1606,21 +2251,29 @@ function getLiveSpeakerMode(): 'input' | 'lecture' | 'reference' {
 async function syncLiveSpeakerReference(): Promise<string> {
   const token = ++liveSpeakerPrepToken;
   if (!liveUseTimbreModel.value || !speakerFile.value) {
+    livePreparingSpeaker.value = false;
     liveSpeakerKey.value = '';
+    liveSpeakerMedianF0Hz.value = !liveUseTimbreModel.value || speakerChoice.value === lectureVoice ? 165 : null;
     return '';
   }
+  livePreparingSpeaker.value = true;
   try {
     const b64 = await blobToBase64(speakerFile.value);
     if (token !== liveSpeakerPrepToken) return liveSpeakerKey.value;
     const res = await prepareRealtimeSpeakerReference(b64);
     if (token !== liveSpeakerPrepToken) return liveSpeakerKey.value;
     liveSpeakerKey.value = res.speakerKey;
+    liveSpeakerMedianF0Hz.value = res.medianF0Hz ?? null;
     return res.speakerKey;
   } catch (err) {
     if (token === liveSpeakerPrepToken) {
       liveError.value = err instanceof Error ? err.message : '参考音色准备失败';
     }
     return '';
+  } finally {
+    if (token === liveSpeakerPrepToken) {
+      livePreparingSpeaker.value = false;
+    }
   }
 }
 
@@ -1679,12 +2332,17 @@ async function startRealtimeMode() {
     const spkKey = await syncLiveSpeakerReference();
     if (startup.signal.aborted) return;
     liveTraceHistory = [];
+    liveMinF0.value = 40;
+    liveMaxF0.value = 320;
+    liveMaxPR.value = 1200;
     liveAnimQueue = [];
     liveStateSnapshot.value = null;
     liveAnimSnapshot.value = null;
     liveTract3DSnapshot.value = null;
     liveLatestM27Row.value = null;
 
+    liveError.value = '';
+    liveStaleEngineWarning.value = false;
     const options = {
       includeTractGeometry: liveTractGeometry.value,
       includeTract3D: liveHead3D.value,
@@ -1695,6 +2353,11 @@ async function startRealtimeMode() {
       keepRecording: liveKeepRecording.value,
       speakerMode: getLiveSpeakerMode(),
       speakerKey: spkKey,
+      speakerPitchMatch: liveSpeakerPitchMatch.value,
+      phonationPreset: livePhonationPresetId.value,
+      phonationStrength: livePhonationStrengthPct.value / 100,
+      phonationF0Coupling: livePhonationPresetId.value !== 'none' ? livePhonationF0Coupling.value : null,
+      phonationCreakIrregularity: livePhonationIsCreaky.value ? livePhonationCreakIrregPct.value / 100 : null,
     };
     await Promise.all([warmUpRealtimeModels(options, startup.signal), headPreparation]);
     if (startup.signal.aborted) return;
@@ -1704,9 +2367,23 @@ async function startRealtimeMode() {
       {
         onStep: (data: RealtimeStepPayload, metrics: RealtimeMetrics) => {
           liveMetrics.value = metrics;
+          if (!metrics.engineSupportsPhonation && (livePhonationPresetId.value !== 'none' || (showLiveSpeakerPitchMatch.value && liveSpeakerPitchMatch.value))) {
+            liveStaleEngineWarning.value = true;
+          } else if (metrics.engineSupportsPhonation) {
+            liveStaleEngineWarning.value = false;
+          }
           if (Array.isArray(data.m27_50hz_pa) && data.m27_50hz_pa.length) {
             for (const row of data.m27_50hz_pa) {
               liveTraceHistory.push(row);
+              const f0 = row[17];
+              const pr = row[18];
+              if (Number.isFinite(f0) && f0 > 0) {
+                if (f0 < liveMinF0.value) liveMinF0.value = Math.max(0, Math.floor(f0 / 10) * 10);
+                if (f0 > liveMaxF0.value) liveMaxF0.value = Math.ceil(f0 / 50) * 50;
+              }
+              if (Number.isFinite(pr) && pr > liveMaxPR.value) {
+                liveMaxPR.value = Math.min(1600, Math.ceil(pr / 200) * 200);
+              }
             }
             if (liveTraceHistory.length > 250) {
               liveTraceHistory = liveTraceHistory.slice(-250);
@@ -1793,8 +2470,17 @@ function stopRealtimeMode(preserveCapture = liveKeepRecording.value) {
     replaceM27Url('neural', URL.createObjectURL(synthFile));
     outputs.value = { ...outputs.value, neural: synthFile };
   }
-  status.value = `实时会话已结束并载入 ${captured.durationSec.toFixed(1)} s 录音，可直接播放或点击「开始声道重建」精细对齐`;
-  store.pushToast(`已保存 ${captured.durationSec.toFixed(1)} s 实时录音到重建工作区`, 'success', 2800);
+  status.value = `实时会话已结束并载入 ${captured.durationSec.toFixed(1)} s 录音，可在弹窗中裁剪、降噪或填写原文对齐`;
+  store.pushToast(`已保存 ${captured.durationSec.toFixed(1)} s 实时录音，可按需裁剪与降噪`, 'success', 2800);
+  recordPrepDraft.value = {
+    target: 'source',
+    file: micFile,
+    originalFile: micFile,
+    text: alignmentText.value,
+    lang: alignmentLang.value,
+    grid: null,
+    fromExisting: true,
+  };
   void nextTick(paintAll);
 }
 
@@ -1823,6 +2509,7 @@ watch(synthesisGainMode, (mode) => {
 });
 
 watch(liveDelayTargetMs, (delayMs) => {
+  liveController?.updateOptions({ delayTargetMs: delayMs });
   try { localStorage.setItem(liveDelayStorageKey, String(delayMs)); } catch { /* Keep the session selection. */ }
 });
 
@@ -1843,13 +2530,27 @@ watch(
   },
 );
 
+watch(
+  [liveSpeakerPitchMatch, livePhonationPresetId, livePhonationStrengthPct, livePhonationF0Coupling, livePhonationCreakIrregPct],
+  () => {
+    if (!liveActive.value || !liveController) return;
+    liveController.updateOptions({
+      speakerPitchMatch: liveSpeakerPitchMatch.value,
+      phonationPreset: livePhonationPresetId.value,
+      phonationStrength: livePhonationStrengthPct.value / 100,
+      phonationF0Coupling: livePhonationPresetId.value !== 'none' ? livePhonationF0Coupling.value : null,
+      phonationCreakIrregularity: livePhonationIsCreaky.value ? livePhonationCreakIrregPct.value / 100 : null,
+    });
+  },
+);
+
 function paintAlignedCurves() {
   const canvas = tracksCanvas.value;
   const wrap = tracksPlotWrap.value;
-  const timeline = anim.value;
-  const current = state.value;
+  const dataRows = rows.value;
+  const curRow = interpolatedActiveRow.value;
   const lanes = paramLanes.value;
-  if (!canvas || !wrap || !timeline?.frames?.length || !current || !lanes.length) return;
+  if (!canvas || !wrap || !dataRows.length || !curRow || !lanes.length) return;
 
   const w = Math.max(160, Math.round(wrap.clientWidth));
   const h = wrap.clientHeight;
@@ -1865,7 +2566,8 @@ function paintAlignedCurves() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const pal = readThemePalette(canvas);
-  ctx.fillStyle = pal.curvesBg || '#fffef9';
+  const sem = readSemanticChartColors(canvas);
+  ctx.fillStyle = pal.curvesBg;
   ctx.fillRect(0, 0, w, h);
 
   const vStart = clampedViewStartSec.value;
@@ -1881,7 +2583,8 @@ function paintAlignedCurves() {
   const toTick = Math.floor((vEnd + 1e-8) / step);
 
   ctx.save();
-  ctx.strokeStyle = pal.zeroLine || 'rgba(120, 134, 128, 0.20)';
+  ctx.globalAlpha = 0.45;
+  ctx.strokeStyle = pal.zeroLine;
   ctx.lineWidth = 1;
   for (let ti = fromTick; ti <= toTick; ti++) {
     const tx = xAt(ti * step);
@@ -1894,7 +2597,8 @@ function paintAlignedCurves() {
   }
   // Phoneme interval vertical guides
   ctx.setLineDash([2, 3]);
-  ctx.strokeStyle = 'rgba(120, 134, 128, 0.16)';
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = pal.anatomyMuted;
   for (const iv of phoneBoundaries.value) {
     const bx = xAt(iv.xmin);
     if (bx > 0 && bx < w) {
@@ -1906,21 +2610,29 @@ function paintAlignedCurves() {
   }
   ctx.restore();
 
-  const frames = timeline.frames;
+  const readCell = (row: readonly number[], col: number, fallback = 0) => {
+    const v = row[col];
+    return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  };
+  const iMin = Math.max(0, Math.floor((vStart - 0.08) * 50));
+  const iMax = Math.min(dataRows.length - 1, Math.ceil((vEnd + 0.08) * 50));
 
   lanes.forEach((lane, li) => {
     const top = li * laneHeight;
     const bot = top + laneHeight;
-    const plotT = top + 15;
-    const plotB = bot - 5;
-    const plotH = Math.max(14, plotB - plotT);
+    const plotT = top + 14;
+    const plotB = bot - 4;
+    const plotH = Math.max(12, plotB - plotT);
 
     // Subtle alternating row stripe + bottom divider
     if (li % 2 === 1) {
-      ctx.fillStyle = pal.laneBg || 'rgba(128, 138, 132, 0.05)';
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = pal.laneBg;
       ctx.fillRect(0, top, w, laneHeight);
+      ctx.restore();
     }
-    ctx.strokeStyle = pal.laneBorder || 'rgba(128, 138, 132, 0.25)';
+    ctx.strokeStyle = pal.laneBorder;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, bot - 0.5);
@@ -1936,7 +2648,8 @@ function paintAlignedCurves() {
       const zy = yAt(lane.zeroVal, lane.zeroRange[0], lane.zeroRange[1]);
       ctx.save();
       ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = pal.zeroLine || 'rgba(105, 119, 111, 0.30)';
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = pal.zeroLine;
       ctx.lineWidth = 0.9;
       ctx.beginPath();
       ctx.moveTo(0, zy);
@@ -1946,17 +2659,17 @@ function paintAlignedCurves() {
     }
 
     for (const ser of lane.series) {
-      if (ser.fill) {
+      const serColor = sem[ser.colorToken];
+      const serFill = ser.fillToken ? sem[ser.fillToken] : '';
+      if (serFill) {
         ctx.save();
         ctx.beginPath();
         let started = false;
         let firstX = 0;
         let lastX = 0;
-        for (let i = 0; i < frames.length; i++) {
-          const f = frames[i];
-          if (f.t < vStart - 0.08 || f.t > vEnd + 0.08) continue;
-          const x = xAt(f.t);
-          const y = yAt(ser.read(f), ser.min, ser.max);
+        for (let i = iMin; i <= iMax; i++) {
+          const x = xAt(i / 50);
+          const y = yAt(readCell(dataRows[i], ser.col, ser.fallback), ser.min, ser.max);
           if (!started) {
             firstX = x;
             ctx.moveTo(x, plotB);
@@ -1969,7 +2682,7 @@ function paintAlignedCurves() {
           ctx.lineTo(lastX, plotB);
           ctx.lineTo(firstX, plotB);
           ctx.closePath();
-          ctx.fillStyle = ser.fill;
+          ctx.fillStyle = serFill;
           ctx.fill();
         }
         ctx.restore();
@@ -1977,15 +2690,13 @@ function paintAlignedCurves() {
 
       ctx.save();
       if (ser.dash) ctx.setLineDash(ser.dash);
-      ctx.strokeStyle = ser.color;
+      ctx.strokeStyle = serColor;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       let started = false;
-      for (let i = 0; i < frames.length; i++) {
-        const f = frames[i];
-        if (f.t < vStart - 0.08 || f.t > vEnd + 0.08) continue;
-        const x = xAt(f.t);
-        const y = yAt(ser.read(f), ser.min, ser.max);
+      for (let i = iMin; i <= iMax; i++) {
+        const x = xAt(i / 50);
+        const y = yAt(readCell(dataRows[i], ser.col, ser.fallback), ser.min, ser.max);
         if (!started) {
           ctx.moveTo(x, y);
           started = true;
@@ -2005,20 +2716,22 @@ function paintAlignedCurves() {
     const pxHead = xAt(playheadSec.value);
 
     for (const ser of lane.series) {
-      const curVal = ser.read(current as unknown as Record<string, unknown>);
+      const serColor = sem[ser.colorToken];
+      const curVal = readCell(curRow, ser.col, ser.fallback);
       if (pxHead >= 0 && pxHead <= w) {
         const cy = yAt(curVal, ser.min, ser.max);
-        ctx.fillStyle = ser.color;
+        ctx.fillStyle = serColor;
         ctx.beginPath();
-        ctx.arc(pxHead, cy, 2.8, 0, Math.PI * 2);
+        ctx.arc(pxHead, cy, 2.7, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = pal.dotStroke || '#ffffff';
+        ctx.strokeStyle = pal.dotStroke;
         ctx.lineWidth = 1;
         ctx.stroke();
       }
-      const txt = `${ser.label} ${curVal.toFixed(ser.dec)}${ser.unit ? ' ' + ser.unit : ''}`;
-      ctx.fillStyle = ser.color;
-      ctx.fillText(txt, rx, top + 8.5);
+      const suffix = ser.unit ? (ser.unit === '°' || ser.unit === '%' ? ser.unit : ` ${ser.unit}`) : '';
+      const txt = `${ser.label} ${curVal.toFixed(ser.dec)}${suffix}`;
+      ctx.fillStyle = serColor;
+      ctx.fillText(txt, rx, top + 8);
       rx += ctx.measureText(txt).width + 10;
     }
   });
@@ -2027,7 +2740,7 @@ function paintAlignedCurves() {
   const headX = xAt(playheadSec.value);
   if (headX >= 0 && headX <= w) {
     ctx.save();
-    ctx.strokeStyle = '#f3a341';
+    ctx.strokeStyle = sem.playhead;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(headX, 0);
@@ -2040,6 +2753,7 @@ function paintAlignedCurves() {
 function paintAll() {
   paintAnatomy();
   paintAlignedCurves();
+  if (liveActive.value && !liveHead3D.value) paintLiveMonitor();
 }
 
 const SCROLL_STEPS = 1000;
@@ -2115,6 +2829,9 @@ function updateClock() {
 }
 
 async function play() {
+  if (liveActive.value || liveStarting.value || recording.value || incomingDialogOpen.value || assignModalOpen.value) {
+    return;
+  }
   stopAuditionWindow();
   const el = audio.value;
   if (!el || !selectedUrl.value) return;
@@ -2122,8 +2839,10 @@ async function play() {
     stopPlayback();
     return;
   }
-  if (el.ended) el.currentTime = 0;
-  else if (Math.abs(el.currentTime - playheadSec.value) > 0.03) {
+  if (el.ended) {
+    el.currentTime = 0;
+    playheadSec.value = 0;
+  } else if (Math.abs(el.currentTime - playheadSec.value) > 0.03) {
     el.currentTime = playheadSec.value;
   }
   const requestedUrl = selectedUrl.value;
@@ -2138,6 +2857,7 @@ async function play() {
 }
 
 function onPlaying() {
+  switchingVersionSeek = null;
   playing.value = true;
   cancelAnimationFrame(frameLoop);
   updateClock();
@@ -2148,16 +2868,36 @@ function onAudioPause() {
   cancelAnimationFrame(frameLoop);
 }
 
+function onAudioLoadedMetadata() {
+  const el = audio.value;
+  mediaDuration.value = Number.isFinite(el?.duration) ? el!.duration : 0;
+  const target = switchingVersionSeek ?? playheadSec.value;
+  switchingVersionSeek = null;
+  if (el && target > 0 && mediaDuration.value > 0) {
+    const clamped = Math.min(target, mediaDuration.value);
+    el.currentTime = clamped;
+    playheadSec.value = clamped;
+  }
+}
+
+function onAudioTimeUpdate() {
+  if (!playing.value || switchingVersionSeek !== null) return;
+  playheadSec.value = audio.value?.currentTime || 0;
+}
+
 function selectAudioVersion(next: Version) {
   if (version.value === next) return;
   const keepPlayhead = playheadSec.value;
   stopPlayback();
+  switchingVersionSeek = keepPlayhead;
   version.value = next;
-  if (next !== 'source') voiceRenderMode.value = next;
   playheadSec.value = keepPlayhead;
   void nextTick(() => {
     if (audio.value && audio.value.readyState >= 1) {
-      audio.value.currentTime = Math.min(audio.value.duration || keepPlayhead, keepPlayhead);
+      const clamped = Math.min(audio.value.duration || keepPlayhead, keepPlayhead);
+      audio.value.currentTime = clamped;
+      playheadSec.value = clamped;
+      switchingVersionSeek = null;
     }
   });
   if (historyId.value) rememberSource();
@@ -2187,9 +2927,12 @@ watch(
   [
     playheadSec,
     anim,
+    rows,
     showLabels,
     vibMode,
     curveMode,
+    liveActive,
+    liveHead3D,
     rightAnatomyShare,
     store.resolvedColorMode,
     store.paletteId,
@@ -2218,10 +2961,11 @@ function tractParameters(row: number[], lm: number[] | undefined) {
 }
 
 async function sendAudio(target: AudioDestination) {
+  await waitForSourceNormalization();
   if (target === 'arranger' && !hasResult.value) {
     const sourceToken = sourceGeneration;
     if (!sourceFile.value || working.value) return;
-    await run('reconstruct');
+    await run('reconstruct', 'arranger');
     if (unmounted || sourceToken !== sourceGeneration) return;
     if (!hasResult.value) {
       status.value = '未能送入编曲 · ' + (status.value || '请等当前操作结束后重试声道重建');
@@ -2271,14 +3015,14 @@ async function sendAudio(target: AudioDestination) {
         }))
       : undefined;
 
-    if ((target === 'continuumA' || target === 'continuumB') && activeRow.value) {
-      const row = activeRow.value;
+    const continuumRow = interpolatedActiveRow.value ?? activeRow.value;
+    if ((target === 'continuumA' || target === 'continuumB') && continuumRow) {
       const endpoint = {
         label: sourceName.value || label,
         timeSec: playheadSec.value,
-        params: tractParameters(row, state.value?.lm),
-        f0Hz: row[17],
-        prPa: row[18],
+        params: tractParameters(continuumRow, state.value?.lm),
+        f0Hz: continuumRow[17],
+        prPa: continuumRow[18],
       };
       (target === 'continuumA' ? m27ImportedEndpointA : m27ImportedEndpointB).value = endpoint;
     }
@@ -2369,11 +3113,31 @@ function isEditableShortcutTarget(target: EventTarget | null): boolean {
 }
 
 function handleReconstructionKeydown(ev: KeyboardEvent) {
-  if (ev.defaultPrevented || isEditableShortcutTarget(ev.target)) return;
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'x') {
-    if (canEditAudio.value && sourceFile.value && selectionSec.value) {
+  if (ev.defaultPrevented) return;
+  if (ev.key === 'Escape') {
+    if (assignModalOpen.value) {
+      ev.preventDefault();
+      assignModalOpen.value = false;
+      return;
+    }
+    if (incomingDialogOpen.value) {
+      ev.preventDefault();
+      incomingDialogOpen.value = false;
+      return;
+    }
+  }
+  if (isEditableShortcutTarget(ev.target)) return;
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey) {
+    const k = ev.key.toLowerCase();
+    if (k === 'x' && canEditAudio.value && sourceFile.value && selectionSec.value) {
       ev.preventDefault();
       void cutSourceAudio('selection');
+      return;
+    }
+    if (k === 'z' && canEditAudio.value && cutUndo.value.length) {
+      ev.preventDefault();
+      undoSourceCut();
+      return;
     }
   }
 }
@@ -2398,6 +3162,13 @@ onMounted(() => {
       if (!unmounted) historyStatus.value = '本地历史无法读取';
     });
   void loadReconstructionVoices().catch(() => undefined);
+  void mixerRequest<MixerMeta>()
+    .then((meta) => {
+      if (!unmounted && Array.isArray(meta?.presets) && meta.presets.length) {
+        livePhonationPresets.value = meta.presets.map(normalizeMixerPreset);
+      }
+    })
+    .catch(() => undefined);
 
   consumeIncomingM27Align();
 
@@ -2413,7 +3184,7 @@ onMounted(() => {
   });
 
   window.addEventListener('vocalcut:m27-play', play);
-  window.addEventListener('keydown', handleReconstructionKeydown);
+  window.addEventListener('keydown', handleReconstructionKeydown, true);
   window.addEventListener('vocalcut:tour-action', handleM27TourAction);
 });
 
@@ -2453,8 +3224,17 @@ async function handleM27TourAction(e: Event): Promise<void> {
     actionId !== 'm27-load-demo' &&
     actionId !== 'm27-align-demo' &&
     actionId !== 'm27-run-demo' &&
-    actionId !== 'm27-play-neural'
+    actionId !== 'm27-play-neural' &&
+    actionId !== 'm27-toggle-labels'
   ) {
+    return;
+  }
+
+  if (actionId === 'm27-toggle-labels') {
+    showLabels.value = true;
+    await nextTick();
+    paintAnatomy();
+    detail?.done?.(true);
     return;
   }
 
@@ -2530,6 +3310,11 @@ watch(tracksPlotWrap, (el, prev) => {
   if (el) observer?.observe(el);
 });
 
+watch(liveMonitorPlotWrap, (el, prev) => {
+  if (prev) observer?.unobserve(prev);
+  if (el) observer?.observe(el);
+});
+
 onBeforeUnmount(() => {
   unmounted = true;
   statusProbeAbort?.abort();
@@ -2541,11 +3326,12 @@ onBeforeUnmount(() => {
   stopRealtimeMode(false);
   stopPlayback();
   discardCapture();
+  discardSpeakerCapture();
   observer?.disconnect();
   void auditionCtx?.close().catch(() => undefined);
   auditionCtx = null;
   window.removeEventListener('vocalcut:m27-play', play);
-  window.removeEventListener('keydown', handleReconstructionKeydown);
+  window.removeEventListener('keydown', handleReconstructionKeydown, true);
   window.removeEventListener('vocalcut:tour-action', handleM27TourAction);
   tourActionAbort?.abort();
   tourActionAbort = null;
@@ -2565,11 +3351,8 @@ onBeforeUnmount(() => {
       ref="audio"
       :src="selectedUrl || undefined"
       preload="auto"
-      @loadedmetadata="
-        mediaDuration = Number.isFinite(audio?.duration) ? audio!.duration : 0;
-        if (audio && playheadSec > 0 && mediaDuration > 0) audio.currentTime = Math.min(playheadSec, mediaDuration);
-      "
-      @timeupdate="playheadSec = audio?.currentTime || 0"
+      @loadedmetadata="onAudioLoadedMetadata"
+      @timeupdate="onAudioTimeUpdate"
       @playing="onPlaying"
       @pause="onAudioPause"
       @ended="stopPlayback"
@@ -2580,7 +3363,7 @@ onBeforeUnmount(() => {
     <aside class="panel m27-left-col">
       <header class="p-head">
         <strong>重建控制与流转</strong>
-        <ModuleGuideButton module-id="m27" size="xs" />
+        <ModuleGuideButton module-id="m27" size="xs" data-tour="m27-guide-btn" />
       </header>
 
       <div class="inspector-scroll">
@@ -2640,6 +3423,16 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="btn xs"
+              :disabled="audioEditBlocked"
+              title="打开波形裁剪、去首尾静音、降噪与原文自动音素对齐弹窗"
+              @click="openSourceAudioEditor"
+            >
+              <IconSvg name="trim" :size="11" />
+              <span>编辑录音</span>
+            </button>
+            <button
+              type="button"
+              class="btn xs"
               :disabled="working || recording || transcribing || cleaningSource || cutting || sourceFile !== originalSource"
               @click="processSource"
             >
@@ -2670,15 +3463,17 @@ onBeforeUnmount(() => {
                 :cloud="!!deepSeekAsrKey"
                 :blocked="transcriptionBlocked"
                 :transcribing="transcribing"
+                :transcribing-mode="transcribingMode"
                 :install="localAsrStatus"
                 :install-message="localAsrMessage"
                 :pending-model="localAsrPending"
                 @transcribe="transcribeReferenceText"
                 @choose="localAsr.choose"
+                @remove="localAsr.remove"
                 @refresh="localAsr.refresh"
               />
             </div>
-            <small v-if="localAsrMessage && !deepSeekAsrKey" role="status">{{ localAsrMessage }}</small>
+            <small v-if="localAsrMessage" role="status">{{ localAsrMessage }}</small>
             <textarea
               v-model="alignmentText"
               class="inp"
@@ -2690,21 +3485,22 @@ onBeforeUnmount(() => {
               @change="rememberSource()"
             />
             <div class="button-row">
-              <select
-                v-model="alignmentLang"
-                class="inp"
+              <CustomSelect
+                size="xs"
+                class="align-lang-select"
                 aria-label="对齐语言"
                 :title="deepSeekAsrKey ? 'DeepSeek 自动检测录音语种，此处设置用于原文对齐' : undefined"
                 :disabled="working"
-                @change="
-                  editReferenceText();
-                  rememberSource();
+                :model-value="alignmentLang"
+                :options="alignLangOptions"
+                @update:model-value="
+                  (v) => {
+                    alignmentLang = String(v) as 'auto' | 'zh' | 'en';
+                    editReferenceText();
+                    rememberSource();
+                  }
                 "
-              >
-                <option value="auto">自动识别语种</option>
-                <option value="zh">普通话</option>
-                <option value="en">英语</option>
-              </select>
+              />
               <button
                 type="button"
                 class="btn xs"
@@ -2727,31 +3523,52 @@ onBeforeUnmount(() => {
 
         <section data-tour="m27-engine">
           <h3>目标音色 <small>神经重合成</small></h3>
-          <CustomSelect
-            aria-label="目标音色选择"
-            size="sm"
-            placeholder="选择目标音色"
-            :model-value="speakerChoice"
-            :options="speakerOptions"
-            @update:model-value="chooseSpeakerReference"
+          <div class="speaker-select-row">
+            <CustomSelect
+              aria-label="目标音色选择"
+              size="sm"
+              class="speaker-select-grow"
+              placeholder="选择目标音色"
+              :model-value="speakerChoice"
+              :options="speakerOptions"
+              @update:model-value="chooseSpeakerReference"
+            />
+            <button type="button" class="btn xs" :disabled="recordingSpeaker" @click="speakerInput?.click()">上传参考音</button>
+          </div>
+          <ReconstructionMicControl
+            size="xs"
+            idle-label="录参考音"
+            active-label="停止录音"
+            :acquiring="acquiringSpeakerMic"
+            :recording="recordingSpeaker"
+            :elapsed="speakerMicElapsed"
+            :bars="speakerMicBars"
+            :quiet="speakerMicQuiet"
+            :disabled="working || recording || acquiringMic || liveActive"
+            @toggle="toggleSpeakerRecording"
           />
-          <div class="field-row">
+          <div v-if="speakerFile" class="field-row">
             <span class="reference-name muted" :title="speakerLabel">{{ speakerLabel }}</span>
-            <div class="button-row">
-              <button type="button" class="btn xs" @click="speakerInput?.click()">上传参考音</button>
-              <button
-                v-if="speakerFile"
-                type="button"
-                class="btn xs icon-only"
-                title="清除自定义参考音，恢复沿用输入音色"
-                @click="setSpeaker(null, inputVoice)"
-              >
-                <IconSvg name="close" :size="11" />
-              </button>
-            </div>
+            <button
+              type="button"
+              class="btn xs icon-only"
+              title="清除自定义参考音，恢复沿用输入音色"
+              @click="setSpeaker(null, inputVoice)"
+            >
+              <IconSvg name="close" :size="11" />
+            </button>
           </div>
           <input ref="speakerInput" type="file" hidden accept="audio/*" @change="onFileChange($event, true)" />
           <div v-if="speakerFile" class="button-row">
+            <button
+              type="button"
+              class="btn xs"
+              :disabled="working || cleaningSpeaker || recordingSpeaker"
+              @click="openSpeakerAudioEditor"
+            >
+              <IconSvg name="trim" :size="11" />
+              <span>编辑参考音</span>
+            </button>
             <button
               type="button"
               class="btn xs"
@@ -2794,7 +3611,7 @@ onBeforeUnmount(() => {
           <div class="engine-select-grid">
             <label class="engine-select-field">
               <span>合成模型</span>
-              <VoiceRenderSelect size="sm" />
+              <VoiceRenderSelect size="sm" :custom-title="voiceRenderHint" />
             </label>
           </div>
           <div class="button-row main-run-row">
@@ -2805,7 +3622,7 @@ onBeforeUnmount(() => {
               @click="run('reconstruct')"
             >
               <IconSvg name="reconstruct" :size="13" />
-              <span>{{ working && !hasResult ? '重建中…' : '开始声道重建' }}</span>
+              <span>{{ workingAction === 'reconstruct' ? '重建中…' : '开始声道重建' }}</span>
             </button>
             <button
               type="button"
@@ -2814,7 +3631,7 @@ onBeforeUnmount(() => {
               @click="run('resynthesize')"
             >
               <IconSvg name="refresh" :size="12" />
-              <span>轨迹重合成</span>
+              <span>{{ workingAction === 'resynthesize' ? '重合成中…' : '轨迹重合成' }}</span>
             </button>
           </div>
           <p v-if="status" class="status-line" role="status">{{ status }}</p>
@@ -2842,25 +3659,117 @@ onBeforeUnmount(() => {
               <input v-model="liveSynthAudio" type="checkbox" :disabled="liveStarting" />
               <span>实时合成音频</span>
             </label>
-            <label
-              class="live-rt-delay"
-              title="开始实时合成前选择。较长目标给模型更多上下文，实际延迟随运行负载变化"
-            >
-              <span>监听延迟目标</span>
-              <select v-model.number="liveDelayTargetMs" class="inp mono" :disabled="!liveSynthAudio || liveStarting || liveActive">
-                <option v-for="delay in REALTIME_DELAY_TARGETS_MS" :key="delay" :value="delay">
-                  {{ (delay / 1000).toFixed(1) }} 秒
-                </option>
-              </select>
-            </label>
             <label class="live-rt-check" title="默认不保留录音以免污染语谱图；勾选后在停止实时合成时将本段录音与合成音载入工作区">
               <input v-model="liveKeepRecording" type="checkbox" :disabled="liveStarting" />
               <span>保留实时录音</span>
             </label>
           </div>
+          <div class="live-rt-options live-rt-voice-box">
+            <div class="live-rt-field">
+              <div class="live-rt-field-head">
+                <span>实时音色</span>
+                <small class="muted">{{ liveUseTimbreModel ? '运行中可随时切换' : '已关模型 · 默认声纹' }}</small>
+              </div>
+              <div class="speaker-select-row">
+                <CustomSelect
+                  size="xs"
+                  class="speaker-select-grow"
+                  aria-label="实时合成音色"
+                  placeholder="选择实时音色"
+                  :min-menu-width="210"
+                  :disabled="liveStarting || cleaningSpeaker"
+                  :model-value="speakerChoice"
+                  :options="speakerOptions"
+                  @update:model-value="selectLiveSpeaker"
+                />
+                <button
+                  type="button"
+                  class="btn xs"
+                  :disabled="liveStarting || cleaningSpeaker"
+                  title="上传自定义参考音作为实时合成目标音色"
+                  @click="triggerLiveSpeakerUpload"
+                >
+                  上传参考音
+                </button>
+              </div>
+              <label
+                v-if="showLiveSpeakerPitchMatch"
+                class="live-rt-check"
+                title="开启后按目标发音人的参考中位基频比例自动平移实时基频（与语音合成页一致），关闭则保留您自己的原始音域"
+              >
+                <input v-model="liveSpeakerPitchMatch" type="checkbox" :disabled="liveStarting" />
+                <span>
+                  匹配目标音色基频<template v-if="liveTargetSpeakerF0Display !== null">（约 {{ Math.round(liveTargetSpeakerF0Display) }} Hz）</template>
+                </span>
+              </label>
+            </div>
+            <div class="live-rt-field">
+              <div class="live-rt-field-head">
+                <span>发声类型</span>
+                <small class="muted">{{ activeLivePhonationPreset ? '复用发声调音台' : '保持原声' }}</small>
+              </div>
+              <CustomSelect
+                size="xs"
+                aria-label="实时发声类型"
+                placeholder="选择发声类型"
+                :min-menu-width="230"
+                :disabled="liveStarting"
+                :model-value="livePhonationPresetId"
+                :options="livePhonationOptions"
+                @update:model-value="selectLivePhonationPreset"
+              />
+            </div>
+            <template v-if="activeLivePhonationPreset">
+              <small class="live-rt-desc muted">{{ activeLivePhonationPreset.desc }}</small>
+              <CompactSlider
+                v-model="livePhonationStrengthPct"
+                label="调制强度"
+                :min="0"
+                :max="100"
+                :step="5"
+                :decimals="0"
+                unit="%"
+                :default-value="85"
+                :disabled="liveStarting"
+              />
+              <CompactSlider
+                v-if="livePhonationIsCreaky"
+                v-model="livePhonationCreakIrregPct"
+                label="脉冲不规则"
+                :min="0"
+                :max="100"
+                :step="5"
+                :decimals="0"
+                unit="%"
+                :default-value="livePhonationDefaultIrregPct"
+                :disabled="liveStarting"
+              />
+              <label
+                v-if="livePhonationHasF0Option"
+                class="live-rt-check"
+                title="开启后同步按所选发声类型的典型音域平移基频（如假声抬高、嘎裂压低）"
+              >
+                <input v-model="livePhonationF0Coupling" type="checkbox" :disabled="liveStarting" />
+                <span>同步音域基频联动</span>
+              </label>
+            </template>
+          </div>
+          <div v-if="liveActive && liveSynthAudio" class="live-rt-options">
+            <label class="live-rt-delay">
+              <span>监听延迟</span>
+              <CustomSelect
+                size="xs"
+                aria-label="监听延迟"
+                :model-value="liveDelayTargetMs"
+                :options="liveDelayOptions"
+                @update:model-value="(v) => (liveDelayTargetMs = Number(v) as RealtimeDelayTargetMs)"
+              />
+            </label>
+            <small id="m27-live-delay-tip" class="live-rt-tip muted">默认 0.7 秒。合成效果不理想时，可试试 1.0 秒。</small>
+          </div>
           <button
             type="button"
-            class="btn sm live-rt-btn"
+            class="btn sm live-rt-action"
             :class="liveActive ? 'danger' : 'primary'"
             :disabled="liveStarting || working || recording || cutting"
             @click="toggleRealtimeMode"
@@ -2878,6 +3787,15 @@ onBeforeUnmount(() => {
               PR {{ liveMetrics.prPa.toFixed(0) }} Pa
             </span>
             <span class="muted">{{ liveTimbreStatusText }}</span>
+            <span v-if="showLiveSpeakerPitchMatch && liveSpeakerPitchMatch && Math.abs(liveMetrics.speakerF0Ratio - 1) > 0.02" class="muted">
+              音色基频 ×{{ liveMetrics.speakerF0Ratio.toFixed(2) }}<template v-if="liveMetrics.speakerTargetF0Hz">（参考 {{ Math.round(liveMetrics.speakerTargetF0Hz) }} Hz）</template>
+            </span>
+            <span v-if="activeLivePhonationPreset" class="muted">
+              发声调制 · {{ activeLivePhonationShortLabel }}
+            </span>
+            <span v-if="liveStaleEngineWarning" class="live-rt-err" role="status">
+              检测到本地 Python 引擎尚未重启加载新模块，请重启引擎后发声调制与音色基频偏移即可生效。
+            </span>
             <span v-if="liveMetrics.playbackDelayMs !== null" class="muted" title="从麦克风音频进入处理线程到安排播放的估计时差，不含设备缓冲">
               监听延迟约 {{ liveMetrics.playbackDelayMs }} ms
             </span>
@@ -2895,7 +3813,7 @@ onBeforeUnmount(() => {
           <h3>一键流转至工作区</h3>
           <button
             type="button"
-            class="btn primary sm handoff-main-btn"
+            class="btn primary sm handoff-primary"
             :disabled="!selectedUrl"
             title="将当前音频、50 Hz 27 维声道轨迹及校正后的音节/音素边界完整送回标注时间轴"
             @click="sendAudio('annotation')"
@@ -2922,7 +3840,7 @@ onBeforeUnmount(() => {
               @click="sendAudio('arranger')"
             >
               <IconSvg name="piano" :size="12" />
-              <span>{{ working ? '正在重建…' : '送入编曲改音高' }}</span>
+              <span>{{ workingAction === 'arranger' ? '正在重建…' : '送入编曲改音高' }}</span>
             </button>
             <button
               type="button"
@@ -2973,7 +3891,7 @@ onBeforeUnmount(() => {
     <main class="m27-center-col" data-tour="m27-center">
       <!-- Top Playback & Instant Audition / Assign IPA / Selection Cut Bar (Strict 2-Row Layout) -->
       <section class="panel transport-bar" data-tour="m27-transport">
-        <div class="transport-row transport-left">
+        <div class="transport-row transport-left" data-tour="m27-transport-play">
           <button
             type="button"
             class="btn primary sm"
@@ -3009,28 +3927,27 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <div class="transport-row transport-right">
+        <div class="transport-row transport-right" data-tour="m27-transport-tools">
           <!-- T-49: Local window audition (±80 / ±120 / ±200 ms with 12 ms fade) -->
           <div class="window-audition-group" title="在当前播放头前后截取短窗并施加 12 ms 淡入淡出，精准听辨瞬时音色">
             <button
               type="button"
               class="btn xs"
               :class="{ active: auditioningWindow }"
-              :disabled="!selectedUrl"
+              :disabled="!selectedUrl || liveActive || liveStarting || recording"
               @click="auditionWindowAtPlayhead"
             >
               <IconSvg :name="auditioningWindow ? 'stop' : 'volume'" :size="12" />
               <span>试听当前位置</span>
             </button>
-            <select
-              v-model.number="auditionWindowMs"
-              class="inp window-ms-select mono"
+            <CustomSelect
+              size="xs"
+              class="window-ms-select"
               aria-label="局部试听窗口半宽"
-            >
-              <option v-for="ms in M27_WINDOW_MS_OPTIONS" :key="ms" :value="ms as AuditionWindowMs">
-                ±{{ ms }} ms
-              </option>
-            </select>
+              :model-value="auditionWindowMs"
+              :options="auditionWindowOptions"
+              @update:model-value="(v) => (auditionWindowMs = Number(v) as AuditionWindowMs)"
+            />
           </div>
 
           <!-- T-49: Assign current frame 19-D pose to an IPA symbol -->
@@ -3049,6 +3966,16 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="btn xs"
+              :disabled="!canEditAudio"
+              title="自动检测并裁去录音首尾静音，同时同步移动对齐边界与重建轨迹"
+              @click="cutSourceAudio('silence')"
+            >
+              <IconSvg name="scissors" :size="12" />
+              <span>裁剪静音</span>
+            </button>
+            <button
+              type="button"
+              class="btn xs"
               :disabled="!canEditAudio || !selectionSec"
               title="在语谱图拖拽，或点击静音段以选中要剪切的区间（快捷键 Ctrl+X）"
               @click="cutSourceAudio('selection')"
@@ -3056,7 +3983,7 @@ onBeforeUnmount(() => {
               <IconSvg name="scissors" :size="12" />
               <span>剪切选区 (Ctrl+X)</span>
             </button>
-            <button type="button" class="btn xs" :disabled="!canEditAudio || !cutUndo.length" @click="undoSourceCut">
+            <button type="button" class="btn xs" :disabled="!canEditAudio || !cutUndo.length" title="撤销上一次音频剪切（快捷键 Ctrl+Z）" @click="undoSourceCut">
               <IconSvg name="undo" :size="12" />
               <span>撤销剪切</span>
             </button>
@@ -3089,7 +4016,7 @@ onBeforeUnmount(() => {
                 三维透视人头
               </button>
             </div>
-            <div v-else-if="state" class="seg">
+            <div v-if="(liveActive && !liveHead3D) || (!liveActive && hasResult)" class="seg">
               <button
                 v-for="mode in (['all', 'tract', 'glottis'] as const)"
                 :key="mode"
@@ -3097,7 +4024,7 @@ onBeforeUnmount(() => {
                 :class="{ active: curveMode === mode }"
                 @click="curveMode = mode"
               >
-                {{ { all: '全部参数', tract: '声道构音', glottis: '声门激励' }[mode] }}
+                {{ { all: '全部 27 维', tract: '声道 17 维', glottis: '声门 10 维' }[mode] }}
               </button>
             </div>
           </div>
@@ -3165,11 +4092,34 @@ onBeforeUnmount(() => {
               <span class="tree-tag" :class="{ active: liveTractGeometry }">声道构型 {{ liveTractGeometry ? '开' : '关' }}</span>
               <span class="tree-tag" :class="{ active: liveUseTimbreModel }">音色模型 {{ liveUseTimbreModel ? '开' : '关' }}</span>
               <span class="tree-tag" :class="{ active: liveSynthAudio }">实时音频 {{ liveSynthAudio ? '开' : '关' }}</span>
+              <span class="tree-tag" :class="{ active: livePhonationPresetId !== 'none' }">发声 {{ activeLivePhonationShortLabel }}</span>
               <span class="tree-tag" :class="{ active: liveKeepRecording }">保留录音 {{ liveKeepRecording ? '开' : '关' }}</span>
             </div>
           </div>
-          <div class="live-monitor-canvas-wrap">
-            <canvas ref="liveMonitorCanvas" aria-label="实时声道与声门参数监视器" />
+          <div class="live-monitor-grid-wrap">
+            <div
+              class="aligned-curves-grid live-curves-grid"
+              :style="{ minHeight: `${liveParamLanes.length * LANE_HEIGHT_PX}px` }"
+            >
+              <div class="curves-axis-col">
+                <div
+                  v-for="lane in liveParamLanes"
+                  :key="lane.id"
+                  class="curve-axis-cell"
+                  :title="lane.hint"
+                >
+                  <span class="axis-top mono">{{ lane.topTick }}</span>
+                  <div class="axis-mid">
+                    <strong>{{ lane.name }}</strong>
+                    <small>({{ lane.unitLabel }})</small>
+                  </div>
+                  <span class="axis-bot mono">{{ lane.botTick }}</span>
+                </div>
+              </div>
+              <div ref="liveMonitorPlotWrap" class="curves-plot-col live-plot-col">
+                <canvas ref="liveMonitorCanvas" aria-label="实时 9 轨 27 维声道与声门参数监视器" />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -3246,7 +4196,7 @@ onBeforeUnmount(() => {
 
           <div class="timeline-vertical-scroll">
             <ReconstructionAlignment
-              v-if="sourceFile"
+              v-if="sourceFile && !normalizingSource"
               class="alignment-timeline"
               :source="sourceFile"
               :duration="duration"
@@ -3271,16 +4221,17 @@ onBeforeUnmount(() => {
 
             <!-- Pixel-Aligned Multi-Track Parameter Curves (84px Left Axis + Synchronized Right Plot) -->
             <div
-              v-if="state && anim"
+              v-if="hasResult"
               class="aligned-curves-grid"
               :style="{ minHeight: `${paramLanes.length * LANE_HEIGHT_PX}px` }"
               @wheel="onCurvesWheel"
             >
-              <div class="curves-axis-col" aria-hidden="true">
+              <div class="curves-axis-col">
                 <div
                   v-for="lane in paramLanes"
                   :key="lane.id"
                   class="curve-axis-cell"
+                  :title="lane.hint"
                 >
                   <span class="axis-top mono">{{ lane.topTick }}</span>
                   <div class="axis-mid">
@@ -3311,12 +4262,19 @@ onBeforeUnmount(() => {
         <footer class="timeline-footer">
           <span>
             {{
-              hasResult
-                ? '拖拽对齐条竖线可微调音素边界，双击区间可修改音标；滚轮缩放时语谱与参数曲线严格同步。'
-                : '右侧已预载 JD2 中性声道与常态声门参考图谱。'
+              liveActive
+                ? liveHead3D
+                  ? '实时三维透视人头与内部声道联合重建；摄像头仅在本地运行，可切换四视角与半剖透视。'
+                  : '实时 5 秒滚动 9 轨完整 27 维监视（50 Hz 滑窗）；悬停左轴可查看各轨参数与量程。'
+                : hasResult
+                  ? '拖拽对齐条竖线可微调音素边界，双击区间可修改音标；滚轮缩放时语谱与参数曲线严格同步。'
+                  : '右侧已预载 JD2 中性声道与常态声门参考图谱。'
             }}
           </span>
-          <span v-if="hasResult" class="mono">
+          <span v-if="liveActive" class="mono">
+            LIVE · 5 s @ 50 Hz
+          </span>
+          <span v-else-if="hasResult" class="mono">
             {{ currentDevice.toUpperCase() }} · {{ rows.length }} 帧 @ 50 Hz
           </span>
         </footer>
@@ -3339,6 +4297,7 @@ onBeforeUnmount(() => {
       <section
         v-show="!(liveActive && liveHead3D)"
         class="panel plot-panel right-tract-panel"
+        data-tour="m27-tract-panel"
         :style="{ flex: `${rightAnatomyShare} 1 0%` }"
       >
         <header class="p-head">
@@ -3379,6 +4338,7 @@ onBeforeUnmount(() => {
 
       <section
         class="panel plot-panel right-glottis-panel"
+        data-tour="m27-glottis-panel"
         :style="{ flex: liveActive && liveHead3D ? '1 1 100%' : `${100 - rightAnatomyShare} 1 0%` }"
       >
         <header class="p-head">
@@ -3420,8 +4380,8 @@ onBeforeUnmount(() => {
 
     <!-- T-04 Modal: Incoming Audio from Annotation Alignment Bar -->
     <Teleport to="body">
-      <div v-if="incomingDialogOpen" class="m27-modal-backdrop" @click.self="incomingDialogOpen = false">
-        <div class="panel m27-modal-card" role="dialog" aria-modal="true" aria-label="补充对齐参考文本">
+      <div v-if="incomingDialogOpen" class="export-modal-mask" @click.self="incomingDialogOpen = false">
+        <div class="export-modal-card m27-dialog-card" role="dialog" aria-modal="true" aria-label="补充对齐参考文本">
           <header class="p-head">
             <strong>声道重建与音素对齐</strong>
             <button type="button" class="btn xs icon-only" aria-label="关闭" @click="incomingDialogOpen = false">
@@ -3440,20 +4400,20 @@ onBeforeUnmount(() => {
             <div class="align-label-row">
               <span>对齐参考文本（可选）</span>
               <ReconstructionTranscriptionActions
-                hide-model-picker
                 :cloud="!!deepSeekAsrKey"
                 :blocked="transcriptionBlocked"
                 :transcribing="transcribing"
+                :transcribing-mode="transcribingMode"
                 :install="localAsrStatus"
                 :install-message="localAsrMessage"
                 :pending-model="localAsrPending"
                 @transcribe="transcribeReferenceText"
+                @choose="localAsr.choose"
+                @remove="localAsr.remove"
+                @refresh="localAsr.refresh"
               />
             </div>
-            <small v-if="localAsrMessage && !deepSeekAsrKey" class="muted" role="status">{{ localAsrMessage }}</small>
-            <small v-else-if="!deepSeekAsrKey && localAsrStatus?.state === 'missing'" class="muted" role="status">
-              本地语音识别模型尚未下载。可在声道动态重建页面下载后使用自动识别。
-            </small>
+            <small v-if="localAsrMessage" class="muted" role="status">{{ localAsrMessage }}</small>
             <textarea
               v-model="alignmentText"
               class="inp"
@@ -3478,8 +4438,8 @@ onBeforeUnmount(() => {
 
     <!-- T-49 Modal: Assign Current Playhead Frame 19-D Pose to Target IPA Symbol -->
     <Teleport to="body">
-      <div v-if="assignModalOpen" class="m27-modal-backdrop" @click.self="assignModalOpen = false">
-        <div class="panel m27-modal-card" role="dialog" aria-modal="true" aria-label="赋给国际音标构型">
+      <div v-if="assignModalOpen" class="export-modal-mask" @click.self="assignModalOpen = false">
+        <div class="export-modal-card m27-dialog-card" role="dialog" aria-modal="true" aria-label="赋给国际音标构型">
           <header class="p-head">
             <strong>将当前帧构型赋给国际音标</strong>
             <button type="button" class="btn xs icon-only" aria-label="关闭" @click="assignModalOpen = false">
@@ -3566,6 +4526,29 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </Teleport>
+
+    <Teleport to="body">
+      <AudioRecordPrepModal
+        :open="Boolean(recordPrepDraft)"
+        :title="recordPrepDraft?.target === 'speaker' ? '参考音色录音编辑' : '录音裁剪、降噪与原文对齐'"
+        :hint="
+          recordPrepDraft?.target === 'speaker'
+            ? '可先去首尾静音、框选干净语音段并降噪，再作为神经重合成的目标参考音色。'
+            : '录完可在此框选裁剪、一键去首尾静音、降噪，并填写录音原文调用 Vox2Align-Lite v2 自动对齐音素。'
+        "
+        :initial-file="recordPrepDraft?.file ?? null"
+        :initial-original-file="recordPrepDraft?.originalFile ?? null"
+        :initial-text="recordPrepDraft?.text ?? ''"
+        :initial-lang="recordPrepDraft?.lang ?? 'auto'"
+        :initial-grid="recordPrepDraft?.grid ?? null"
+        :device="store.computeDevice.value"
+        :show-alignment="recordPrepDraft?.target !== 'speaker'"
+        allow-re-record
+        :confirm-label="recordPrepDraft?.target === 'speaker' ? '设为参考音色' : '确认载入工作区'"
+        @close="recordPrepDraft = null"
+        @confirm="confirmRecordPrep"
+      />
+    </Teleport>
   </div>
 </template>
 
@@ -3597,7 +4580,7 @@ onBeforeUnmount(() => {
   --ts-lane-border: var(--border);
   --ts-lane-title: var(--text);
   --ts-zero-line: var(--border);
-  --ts-playhead: var(--accent);
+  --ts-playhead: var(--danger);
   --ts-dot-stroke: var(--panel);
 }
 
@@ -3750,7 +4733,23 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-.handoff-main-btn {
+.speaker-select-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.speaker-select-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.align-lang-select {
+  min-width: 112px;
+}
+
+.handoff-primary {
   width: 100%;
   justify-content: center;
 }
@@ -3792,10 +4791,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 6px 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   max-width: 100%;
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 
 .transport-left,
@@ -3832,9 +4829,6 @@ onBeforeUnmount(() => {
 
 .window-ms-select {
   width: auto;
-  height: var(--control-height-xs);
-  padding: 0 5px;
-  font-size: var(--control-font-size-xs);
 }
 
 .center-timeline-card {
@@ -4100,24 +5094,9 @@ input.m27-hscroll:disabled {
   background-color: var(--anatomy-bg, var(--panel));
 }
 
-/* Modals (T-04 & T-49) */
-.m27-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 950;
-  background: rgba(10, 16, 22, 0.42);
-  backdrop-filter: blur(4px);
-  display: grid;
-  place-items: center;
-  padding: 16px;
-}
-
-.m27-modal-card {
+/* Modals (T-04 & T-49) — extends shared .export-modal-mask / .export-modal-card */
+.m27-dialog-card {
   width: min(460px, 100%);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  box-shadow: var(--popover-shadow, 0 12px 36px rgba(0, 0, 0, 0.28));
 }
 
 .m27-modal-body {
@@ -4203,9 +5182,9 @@ input.m27-hscroll:disabled {
   font-size: 0.78rem;
   font-weight: 700;
   padding: 2px 7px;
-  border-radius: 999px;
-  color: #fff;
-  background: var(--danger, #e11d48);
+  border-radius: var(--r-pill);
+  color: var(--on-accent);
+  background: var(--danger);
 }
 
 .live-rt-options {
@@ -4213,7 +5192,7 @@ input.m27-hscroll:disabled {
   gap: 5px;
   padding: 6px 8px;
   border-radius: var(--r-ctrl);
-  background: color-mix(in srgb, var(--surface-2, var(--selected)) 70%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 72%, var(--panel));
   border: 1px solid var(--border);
 }
 
@@ -4239,10 +5218,39 @@ input.m27-hscroll:disabled {
   justify-content: space-between;
   gap: 7px;
   font-size: 0.9rem;
-  padding-left: 21px;
 }
 
-.live-rt-btn {
+.live-rt-voice-box {
+  gap: 7px;
+}
+
+.live-rt-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.live-rt-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.live-rt-field-head small {
+  font-size: 0.76rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.live-rt-desc {
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.live-rt-action {
   width: 100%;
   justify-content: center;
 }
@@ -4256,15 +5264,15 @@ input.m27-hscroll:disabled {
 
 .live-meter-track {
   height: 5px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--border) 75%, transparent);
   overflow: hidden;
 }
 
 .live-meter-fill {
   height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #34d399, #60a5fa, #f59e0b);
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--teal), var(--accent), var(--warning));
   transition: width 80ms linear;
 }
 
@@ -4275,7 +5283,7 @@ input.m27-hscroll:disabled {
 
 .live-rt-err {
   font-size: 0.82rem;
-  color: var(--danger, #e11d48);
+  color: var(--danger);
 }
 
 .live-monitor-stage {
@@ -4296,7 +5304,7 @@ input.m27-hscroll:disabled {
   padding: 7px 10px;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface-2, var(--selected)) 75%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 75%, var(--panel));
 }
 
 .live-monitor-chips {
@@ -4312,7 +5320,7 @@ input.m27-hscroll:disabled {
   align-items: center;
   gap: 5px;
   font-weight: 700;
-  color: var(--danger, #e11d48);
+  color: var(--danger);
 }
 
 .live-dot-badge::before {
@@ -4335,17 +5343,21 @@ input.m27-hscroll:disabled {
   color: var(--accent);
 }
 
-.live-monitor-canvas-wrap {
+.live-monitor-grid-wrap {
   flex: 1 1 auto;
-  min-height: 220px;
+  min-height: 0;
+  overflow-y: auto;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--border);
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-.live-monitor-canvas-wrap canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
+.live-curves-grid .curve-axis-cell:last-child {
+  border-bottom: 0;
+}
+
+.live-plot-col {
+  cursor: default;
 }
 </style>

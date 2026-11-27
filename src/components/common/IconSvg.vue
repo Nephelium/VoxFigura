@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import type { ToolbarArtwork } from './toolbar-artwork';
 
 const props = withDefaults(
   defineProps<{
     name: string;
     size?: number;
     strokeWidth?: number;
+    artwork?: ToolbarArtwork;
   }>(),
   {
     size: 15,
@@ -19,9 +21,9 @@ const pxSize = computed(() => `${props.size}px`);
 <template>
   <svg
     class="vc-icon"
-    :width="pxSize"
-    :height="pxSize"
-    :style="{ width: pxSize, height: pxSize, minWidth: pxSize, minHeight: pxSize, flexShrink: 0 }"
+    :width="artwork ? '100%' : pxSize"
+    :height="artwork ? '100%' : pxSize"
+    :style="artwork ? undefined : { width: pxSize, height: pxSize, minWidth: pxSize, minHeight: pxSize, flexShrink: 0 }"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -30,7 +32,24 @@ const pxSize = computed(() => `${props.size}px`);
     stroke-linejoin="round"
     aria-hidden="true"
   >
-    <template v-if="name === 'waveform'">
+    <g
+      v-if="artwork"
+      :stroke-linecap="artwork.linecap"
+      :stroke-linejoin="artwork.linejoin"
+      stroke-miterlimit="2"
+    >
+      <path
+        v-if="artwork.wash"
+        :d="artwork.wash"
+        :transform="artwork.offset ? `translate(${artwork.offset} ${artwork.offset})` : undefined"
+        :style="{ '--toolbar-art-wash-strength': `${artwork.washStrength}%` }"
+        class="toolbar-art-wash"
+        stroke="none"
+      />
+      <path :d="artwork.outline" class="toolbar-art-outline" :stroke-width="artwork.outlineWidth" />
+      <path :d="artwork.detail" class="toolbar-art-detail" :stroke-width="artwork.detailWidth" />
+    </g>
+    <template v-else-if="name === 'waveform'">
       <path d="M2 12h3l2-6 4 12 3-9 2 3h6" />
     </template>
     <template v-else-if="name === 'fullscreen' || name === 'maximize'">
@@ -172,6 +191,19 @@ const pxSize = computed(() => `${props.size}px`);
     <template v-else-if="name === 'close'">
       <path d="M18 6L6 18M6 6l12 12" />
     </template>
+    <template v-else-if="name === 'window-minimize'">
+      <path d="M5 12h14" />
+    </template>
+    <template v-else-if="name === 'window-maximize'">
+      <rect x="5" y="5" width="14" height="14" rx="1.5" />
+    </template>
+    <template v-else-if="name === 'window-restore'">
+      <rect x="4.5" y="7.5" width="12" height="12" rx="1.5" />
+      <path d="M8.5 7.5V6a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 19.5 6v8a1.5 1.5 0 0 1-1.5 1.5h-1.5" />
+    </template>
+    <template v-else-if="name === 'window-close'">
+      <path d="M6 6l12 12M18 6L6 18" />
+    </template>
     <template v-else-if="name === 'check'">
       <path d="M20 6L9 17l-5-5" />
     </template>
@@ -308,5 +340,19 @@ const pxSize = computed(() => `${props.size}px`);
   display: inline-block;
   flex: none;
   vertical-align: middle;
+}
+
+.toolbar-art-wash {
+  fill: color-mix(
+    in srgb,
+    var(--toolbar-art-detail, var(--accent)) var(--toolbar-art-wash-strength),
+    var(--toolbar-art-wash, var(--selected))
+  );
+}
+.toolbar-art-outline {
+  stroke: var(--toolbar-art-outline, var(--text));
+}
+.toolbar-art-detail {
+  stroke: var(--toolbar-art-detail, var(--accent));
 }
 </style>

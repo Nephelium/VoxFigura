@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
 import SplitPane from '@/components/common/SplitPane.vue';
@@ -11,8 +12,9 @@ import { usePronunciationColumns } from './use-pronunciation-columns';
 const {
   groups, source, book, dialect, currentPersonal, userLexiconBooks, builtinEditing, personalOnly,
   query, searchMode, page, pageCount, visibleRows, filteredKeys, loading, catalogError,
-  draft, editorUnits, changeScope, matchCount, scanning, selectDictionary, applySearch,
-  openEntry, addEntry, selectVariant, selectUnit, clearEditor, previewBatch, saveEntry, saveDialectTools,
+  draft, editorUnits, pendingUnitEdits, draftPreviewIpa, changeScope, matchCount, scanning, scanProgress,
+  selectDictionary, applySearch,
+  openEntry, addEntry, selectVariant, selectUnit, clearEditor, clearBatch, previewBatch, saveEntry, saveDialectTools,
   nameDialog, beginCreate, beginRename, submitName, copyDictionary, useSelectedBook,
   deletion, beginDelete, confirmDelete, exportDictionary,
   tableImport, importError, downloadImportExample, cancelTableImport, importFile, submitTableImport,
@@ -26,7 +28,6 @@ const createNameInputs = ref<HTMLInputElement[]>([]);
 const importOpen = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 const importPicker = ref<HTMLButtonElement | null>(null);
-const importKindSelect = ref<HTMLSelectElement | null>(null);
 const { columnStyles, splitters, setPosition } = usePronunciationColumns(layoutHost);
 const ruleHost = ref<HTMLElement | null>(null);
 const editorTab = ref<'entry' | 'sandhi'>('entry');
@@ -35,13 +36,70 @@ watch(() => source.value.id, () => { editorTab.value = 'entry'; });
 const isEditable = computed(() => source.value.kind === 'personal' || source.value.kind === 'dialect');
 const isCurrent = computed(() => book.value?.id === currentPersonal.value.id);
 const batchMode = computed(() => changeScope.value === 'batch');
-const originalIpa = computed(() => draft.value?.baseIpa.trim().replace(/^[\[［]|[\]］]$/gu, '') ?? '');
 const targetName = computed(() => source.value.builtin ? currentPersonal.value.name : source.value.name);
 const sourceLabel = computed(() => ({
   personal: '个人', dialect: '自建方言', preset: '内置方言', mandarin: '汉语转写',
   english: '英语', kana: '假名', japanese: '日语',
 })[source.value.kind]);
-const langLabels = { zh: '汉语', en: '英语', ja: '日语', ipa: '直接 IPA' };
+
+const searchModeOptions = computed<ReadonlyArray<SelectOption<'word' | 'ipa'>>>(() => [
+  { value: 'word', label: builtinEditing.value ? '字词' : '字词或备注' },
+  { value: 'ipa', label: 'IPA' },
+]);
+
+const variantOptions = computed<ReadonlyArray<SelectOption<string>>>(() =>
+  (draft.value?.row?.variants ?? []).map(variant => ({ value: variant, label: variant })),
+);
+
+const langOptions: ReadonlyArray<SelectOption<'zh' | 'en' | 'ja' | 'ipa'>> = [
+  { value: 'zh', label: '汉语' },
+  { value: 'en', label: '英语' },
+  { value: 'ja', label: '日语' },
+  { value: 'ipa', label: '直接 IPA' },
+];
+
+const standardOptions = computed<ReadonlyArray<SelectOption<string>>>(() => {
+  const current = draft.value?.standard ?? '';
+  const items: SelectOption<string>[] = [{ value: '', label: '通用读音' }];
+  if (current && !mandarinDictionaryOptions.some(item => item.value === current)) {
+    items.push({ value: current, label: current });
+  }
+  for (const item of mandarinDictionaryOptions) {
+    items.push({ value: item.value, label: item.label });
+  }
+  return items;
+});
+
+const importKindOptions: ReadonlyArray<SelectOption<'personal' | 'dialect'>> = [
+  { value: 'personal', label: '个人字典' },
+  { value: 'dialect', label: '方言字典' },
+];
+
+const importColumnLabels = computed(() =>
+  tableImport.value?.kind === 'dialect' ? ['字词', '国际音标', '备注', '调类'] : ['字词', '国际音标', '备注'],
+);
+
+function importColumnOptions(fieldIndex: number): SelectOption<number>[] {
+  const headerRow = tableImport.value?.rows[0] ?? [];
+  const opts: SelectOption<number>[] = fieldIndex >= 2 ? [{ value: -1, label: '无' }] : [];
+  headerRow.forEach((cell, idx) => {
+    opts.push({ value: idx, label: `${idx + 1} · ${cell || '(空)'}` });
+  });
+  return opts;
+}
+
+const importPreviewRows = computed(() => {
+  if (!tableImport.value) return [];
+  const start = tableImport.value.header ? 1 : 0;
+  return tableImport.value.rows.slice(start, start + 5);
+});
+
+const editorHeading = computed(() => {
+  if (!draft.value) return '';
+  if (draft.value.mode === 'add') return '新增词条';
+  if (draft.value.mode === 'copy') return `复制为新词条 · ${draft.value.row?.word ?? ''}`;
+  return draft.value.row?.word || '编辑词条';
+});
 
 function activateRow(event: MouseEvent, row: DictionaryRow) {
   const selection = window.getSelection();
@@ -65,25 +123,34 @@ async function createDictionary() {
   }
 }
 
-async function toggleImport() {
-  importOpen.value = !importOpen.value;
-  if (importOpen.value) {
-    await nextTick();
-    importPicker.value?.focus();
-  } else {
-    cancelTableImport();
-  }
+async function openImportModal() {
+  importOpen.value = true;
+  await nextTick();
+  importPicker.value?.focus();
 }
 
-function openImport(event: Event) {
+function closeImportModal() {
+  importOpen.value = false;
+  cancelTableImport();
+}
+
+async function openImport(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = '';
-  if (file) void importFile(file, currentDialectDraft());
+  if (!file) return;
+  await importFile(file, currentDialectDraft());
+  if (!tableImport.value && !importError.value) {
+    importOpen.value = false;
+  }
 }
-watch(tableImport, table => {
-  if (table) importKindSelect.value?.focus();
-}, { flush: 'post' });
+
+function submitImportAndClose() {
+  submitTableImport();
+  if (!tableImport.value && !importError.value) {
+    importOpen.value = false;
+  }
+}
 </script>
 
 <template>
@@ -91,9 +158,8 @@ watch(tableImport, table => {
     <aside class="panel pd-library" data-tour="dialect-library" aria-labelledby="pd-library-title">
       <header class="p-head">
         <h2 id="pd-library-title">字典库</h2>
-        <div class="pd-actions">
-          <button type="button" class="btn xs" :aria-expanded="importOpen" aria-controls="pd-import"
-            @click="toggleImport">
+        <div class="pd-actions" data-tour="dialect-import-export">
+          <button type="button" class="btn xs" :aria-expanded="importOpen" @click="openImportModal">
             <IconSvg name="upload" :size="12" /> 导入
           </button>
           <button type="button" class="btn xs" :disabled="!dialect && !book"
@@ -108,48 +174,6 @@ watch(tableImport, table => {
         <button type="button" class="btn xs" @click="startCreate('dialect')"><IconSvg name="plus" :size="11" />方言字典</button>
       </div>
       <div ref="libraryBody" class="p-body pd-scroll">
-        <section v-if="importOpen" id="pd-import" class="pd-inline pd-import" aria-label="导入字典">
-          <template v-if="!tableImport">
-            <p>词表支持 UTF-8 编码的 CSV、TSV 和 TXT。Excel 或 WPS 表格请另存为 CSV UTF-8。</p>
-            <p>保留示例表头，每行填写字词和 IPA，备注及方言调类可留空。导入整本字典时，请选择 VoxFigura 导出的 JSON。</p>
-          </template>
-          <input ref="importFileInput" type="file" accept=".json,.csv,.tsv,.txt" aria-label="导入字典文件"
-            hidden @change="openImport" />
-          <div class="pd-actions">
-            <button ref="importPicker" class="btn xs" :class="{ primary: !tableImport }" type="button"
-              @click="importFileInput?.click()">{{ tableImport ? '更换文件' : '选择文件' }}</button>
-            <button class="btn xs" type="button" @click="downloadImportExample">
-              <IconSvg name="download" :size="12" /> 下载 CSV 示例
-            </button>
-          </div>
-          <p v-if="importError" class="pd-danger" role="alert">{{ importError }}</p>
-          <form v-if="tableImport" class="pd-form" @submit.prevent="submitTableImport">
-            <strong>导入词表 · {{ tableImport.name }}</strong>
-            <label class="pd-field">
-              <span>新字典类型</span>
-              <select ref="importKindSelect" v-model="tableImport.kind" class="inp" aria-label="新字典类型">
-                <option value="personal">个人字典</option>
-                <option value="dialect">方言字典</option>
-              </select>
-            </label>
-            <p v-if="tableImport.kind === 'dialect' && tableImport.profile" class="muted">
-              沿用「{{ tableImport.profile.name }}」的调型和变调规则。
-            </p>
-            <label v-for="(label, i) in (tableImport.kind === 'dialect' ? ['字词', '国际音标', '备注', '调类'] : ['字词', '国际音标', '备注'])"
-              :key="label" class="pd-field">
-              <span>{{ label }}</span>
-              <select v-model.number="tableImport.columns[i]" class="inp" :aria-label="label + '列'">
-                <option v-if="i >= 2" :value="-1">无</option>
-                <option v-for="(cell, n) in tableImport.rows[0]" :key="n" :value="n">{{ n + 1 }} · {{ cell }}</option>
-              </select>
-            </label>
-            <label><input v-model="tableImport.header" type="checkbox" /> 首行为表头</label>
-            <div class="pd-actions">
-              <button type="submit" class="btn xs primary">导入为新字典</button>
-              <button type="button" class="btn xs" @click="cancelTableImport">取消</button>
-            </div>
-          </form>
-        </section>
         <section v-for="group in groups" :key="group.kind" class="pd-group">
           <h3>{{ group.title }}</h3>
           <form v-if="nameDialog && nameDialog.kind === group.kind" class="pd-create"
@@ -170,6 +194,7 @@ watch(tableImport, table => {
             <IconSvg name="book" :size="13" />
             <span>{{ item.name }}</span>
             <small v-if="item.id === currentPersonal.id" class="pd-current">在用</small>
+            <small v-else-if="item.kind === 'preset'" class="pd-badge-muted">内置</small>
           </button>
         </section>
       </div>
@@ -178,10 +203,12 @@ watch(tableImport, table => {
     <SplitPane class="pd-divider-library" direction="vertical" percentage :model-value="splitters[0].value" :min="splitters[0].min" :max="splitters[0].max"
       :storage-key="splitters[0].storageKey" title="调整字典库与词条列表宽度" @update:model-value="setPosition(0, $event)" />
 
-    <section class="panel pd-list" aria-labelledby="pd-list-title">
+    <section class="panel pd-list" data-tour="dialect-list" aria-labelledby="pd-list-title">
       <header class="p-head">
-        <h2 id="pd-list-title">词条</h2>
-        <span v-if="!loading && !catalogError" class="muted mono">{{ filteredKeys.length.toLocaleString() }} 条</span>
+        <div class="pd-head-left">
+          <h2 id="pd-list-title">词条</h2>
+          <span v-if="!loading && !catalogError" class="muted mono pd-count">{{ filteredKeys.length.toLocaleString() }} 条</span>
+        </div>
         <button v-if="dialect || book" type="button" class="btn xs" @click="addEntry(); editorTab = 'entry'">
           <IconSvg name="plus" :size="11" /> 新增
         </button>
@@ -191,13 +218,16 @@ watch(tableImport, table => {
         <button type="button" class="btn xs" :class="{ active: personalOnly }" :aria-pressed="personalOnly" @click="personalOnly = true">个人词条</button>
       </div>
       <form class="pd-search" @submit.prevent="applySearch">
-        <select v-model="searchMode" class="inp" aria-label="词条搜索字段">
-          <option value="word">{{ builtinEditing ? '字词' : '字词或备注' }}</option>
-          <option value="ipa">IPA</option>
-        </select>
+        <CustomSelect
+          v-model="searchMode"
+          :options="searchModeOptions"
+          size="xs"
+          aria-label="词条搜索字段"
+          :min-menu-width="112"
+        />
         <input v-model="query" class="inp" type="search" placeholder="搜索词条" aria-label="搜索词条"
           @search="!query && applySearch()" />
-        <button class="btn" type="submit">搜索</button>
+        <button class="btn xs" type="submit">搜索</button>
       </form>
       <div class="pd-list-heading" aria-hidden="true"><span>字词</span><span>读音 IPA</span></div>
       <div class="p-body pd-scroll pd-rows" :aria-busy="loading">
@@ -231,7 +261,7 @@ watch(tableImport, table => {
 
     <section class="panel pd-editor" data-tour="dialect-editor" aria-labelledby="pd-editor-title">
       <header class="p-head pd-editor-header">
-        <div v-if="hasSandhiEditor" id="pd-editor-title" class="seg pd-editor-tabs" role="group" aria-label="编辑内容">
+        <div v-if="hasSandhiEditor" id="pd-editor-title" class="seg pd-editor-tabs" data-tour="dialect-editor-tabs" role="group" aria-label="编辑内容">
           <button type="button" :class="{ active: editorTab === 'entry' }" :aria-pressed="editorTab === 'entry'"
             aria-controls="pd-entry-editor" @click="editorTab = 'entry'">词条编辑</button>
           <button type="button" :class="{ active: editorTab === 'sandhi' }" :aria-pressed="editorTab === 'sandhi'"
@@ -245,51 +275,29 @@ watch(tableImport, table => {
       <div v-if="!draft" v-show="editorTab === 'entry'" id="pd-entry-editor" class="p-body pd-scroll">
         <p class="pd-empty muted">从词条列表选一个读音开始编辑。</p>
       </div>
-      <form v-else v-show="editorTab === 'entry'" id="pd-entry-editor" class="p-body pd-scroll pd-form" @submit.prevent="saveEntry()">
+      <form v-else v-show="editorTab === 'entry'" id="pd-entry-editor" class="p-body pd-scroll pd-form"
+        @submit.prevent="saveEntry(currentDialectDraft())">
         <div class="pd-reading selectable">
-          <strong>{{ draft.row?.word || '新增词条' }}</strong>
-          <span v-if="originalIpa" class="ipa notranslate" translate="no">[{{ originalIpa }}]</span>
+          <strong>{{ editorHeading }}</strong>
+          <span v-if="draftPreviewIpa" class="ipa notranslate" translate="no">[{{ draftPreviewIpa }}]</span>
         </div>
-        <label v-if="draft.mode === 'edit' && (draft.row?.variants?.length ?? 0) > 1" class="pd-field">
-          <span>选读音</span>
-          <select class="inp ipa" :value="draft.baseIpa" aria-label="选读音"
-            @change="selectVariant(($event.target as HTMLSelectElement).value)">
-            <option v-for="(variant, index) in draft.row!.variants" :key="index" :value="variant">{{ variant }}</option>
-          </select>
-        </label>
-        <label v-if="draft.mode === 'edit' && editorUnits.length > 1" class="pd-field">
-          <span>选音节</span>
-          <select class="inp ipa" :value="draft.unit" aria-label="选音节" @change="selectUnit(Number(($event.target as HTMLSelectElement).value))">
-            <option v-for="(unit, index) in editorUnits" :key="index" :value="index">{{ index + 1 }} · {{ unit }}</option>
-          </select>
-        </label>
-        <label v-if="!builtinEditing" class="pd-field">
-          <span>字词</span>
-          <input v-model="draft.word" class="inp" required maxlength="160" :readonly="batchMode" aria-label="字词" />
-        </label>
-        <label class="pd-field">
-          <span>{{ draft.mode === 'edit' ? '音节 IPA' : '国际音标' }}</span>
-          <input v-model="draft.ipa" class="inp ipa notranslate" translate="no" required maxlength="512"
-            aria-label="新 IPA" autocomplete="off" spellcheck="false" />
-        </label>
-        <template v-if="book && !builtinEditing && !batchMode">
+
+        <div v-if="!builtinEditing && !batchMode" class="pd-section">
+          <span class="pd-section-title">整词属性</span>
           <label class="pd-field">
-            <span>语言</span>
-            <select v-model="draft.language" class="inp" aria-label="语言">
-              <option v-for="(name, value) in langLabels" :key="value" :value="value">{{ name }}</option>
-            </select>
+            <span>字词</span>
+            <input v-model="draft.word" class="inp" required maxlength="160" aria-label="字词" />
           </label>
-          <label v-if="draft.language === 'zh'" class="pd-field">
-            <span>汉语转写方案</span>
-            <select v-model="draft.standard" class="inp" aria-label="汉语转写方案">
-              <option value="">通用读音</option>
-              <option v-if="draft.standard && !mandarinDictionaryOptions.some(item => item.value === draft?.standard)"
-                :value="draft.standard">{{ draft.standard }}</option>
-              <option v-for="item in mandarinDictionaryOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
-            </select>
-          </label>
-        </template>
-        <template v-if="!builtinEditing && !batchMode">
+          <template v-if="book">
+            <label class="pd-field">
+              <span>语言</span>
+              <CustomSelect v-model="draft.language" :options="langOptions" size="sm" aria-label="语言" />
+            </label>
+            <label v-if="draft.language === 'zh'" class="pd-field">
+              <span>汉语转写方案</span>
+              <CustomSelect v-model="draft.standard" :options="standardOptions" size="sm" aria-label="汉语转写方案" />
+            </label>
+          </template>
           <label v-if="dialect" class="pd-field">
             <span>调类</span>
             <input v-model="draft.tone" class="inp" placeholder="调类名称、编号或五度调值" aria-label="调类" />
@@ -298,24 +306,69 @@ watch(tableImport, table => {
             <span>备注</span>
             <textarea v-model="draft.note" class="inp" rows="2" maxlength="2000" aria-label="备注" />
           </label>
-        </template>
-        <fieldset v-if="draft.mode === 'edit'" class="pd-scope">
-          <legend>应用范围</legend>
-          <label><input v-model="changeScope" type="radio" value="single" name="pd-scope" /> 仅此词条</label>
-          <label><input v-model="changeScope" type="radio" value="batch" name="pd-scope" /> 当前字典的所有同音节</label>
-          <template v-if="batchMode">
-            <p class="muted">按完整音素序列匹配，保留各条声调和重音。</p>
-            <div class="pd-actions">
-              <button class="btn xs" type="button" :disabled="scanning" @click="previewBatch">{{ scanning ? '正在匹配…' : '预览匹配' }}</button>
-              <output v-if="matchCount !== undefined" class="mono" aria-live="polite">{{ matchCount }} 处</output>
+        </div>
+
+        <div class="pd-section">
+          <span class="pd-section-title">音节读音</span>
+          <label v-if="draft.mode === 'edit' && (draft.row?.variants?.length ?? 0) > 1" class="pd-field">
+            <span>选读音</span>
+            <CustomSelect
+              :model-value="draft.baseIpa"
+              :options="variantOptions"
+              size="sm"
+              aria-label="选读音"
+              @update:model-value="selectVariant(String($event))"
+            />
+          </label>
+          <div v-if="draft.mode === 'edit' && editorUnits.length > 1" class="pd-field">
+            <span>选音节（可连续修改后一次保存）</span>
+            <div class="pd-unit-pills" role="group" aria-label="选音节">
+              <button
+                v-for="(unit, index) in editorUnits"
+                :key="index"
+                type="button"
+                class="btn xs"
+                :class="{ active: draft.unit === index, 'pd-unit-dirty': index in pendingUnitEdits }"
+                :aria-pressed="draft.unit === index"
+                @click="selectUnit(index)"
+              >
+                <span class="mono">{{ index + 1 }}</span>
+                <span class="ipa notranslate" translate="no">{{ pendingUnitEdits[index] ?? unit }}</span>
+              </button>
             </div>
-          </template>
-        </fieldset>
+          </div>
+          <label class="pd-field">
+            <span>{{ draft.mode === 'edit' && editorUnits.length > 1 ? `第 ${draft.unit + 1} 音节 IPA` : '国际音标' }}</span>
+            <input v-model="draft.ipa" class="inp ipa notranslate" translate="no" required maxlength="512"
+              aria-label="新 IPA" autocomplete="off" spellcheck="false" />
+          </label>
+          <fieldset v-if="draft.mode === 'edit'" class="pd-scope" data-tour="dialect-batch">
+            <legend>应用范围</legend>
+            <label><input v-model="changeScope" type="radio" value="single" name="pd-scope" /> 仅此词条</label>
+            <label><input v-model="changeScope" type="radio" value="batch" name="pd-scope" /> 当前字典的所有同音节</label>
+            <template v-if="batchMode">
+              <p class="muted">按完整音素序列匹配，保留各条声调和重音。</p>
+              <div class="pd-actions">
+                <button class="btn xs" type="button" :disabled="scanning" @click="previewBatch">
+                  {{ scanning ? `正在匹配 ${scanProgress}%…` : '预览匹配' }}
+                </button>
+                <button v-if="scanning" class="btn xs" type="button" @click="clearBatch">取消扫描</button>
+                <output v-if="matchCount !== undefined" class="mono" aria-live="polite">{{ matchCount }} 处</output>
+              </div>
+            </template>
+          </fieldset>
+        </div>
+
         <p v-if="builtinEditing" class="pd-target muted">写入个人字典「{{ book?.name ?? targetName }}」</p>
         <p v-else-if="source.kind === 'preset'" class="pd-target muted">保存时创建可编辑的方言副本</p>
         <div class="pd-actions">
-          <button type="submit" class="btn sm primary" :disabled="batchMode && !matchCount">
-            {{ batchMode ? '应用同音节修改' : '保存词条' }}
+          <button
+            type="submit"
+            class="btn xs primary"
+            :disabled="batchMode && !matchCount"
+            :title="batchMode && !matchCount ? '请先点击「预览匹配」确认范围' : ''"
+          >
+            {{ batchMode ? '应用同音节修改' : draft.mode === 'copy' ? '保存为新词条' : '保存词条' }}
           </button>
           <button v-if="draft.row && draft.mode === 'edit' && !builtinEditing" type="button" class="btn xs"
             @click="openEntry(draft.row, 'copy')"><IconSvg name="copy" :size="12" />复制词条</button>
@@ -323,6 +376,14 @@ watch(tableImport, table => {
             @click="beginDelete('entry')"><IconSvg name="trash" :size="12" />删除词条</button>
           <button v-if="draft.mode !== 'edit'" type="button" class="btn xs" @click="clearEditor">取消</button>
         </div>
+
+        <section v-if="deletion?.type === 'entry'" class="pd-inline pd-delete-confirm" role="alertdialog" aria-label="确认删除词条">
+          <strong>删除词条「{{ deletion.label }}」？</strong>
+          <div class="pd-actions">
+            <button type="button" class="btn xs danger" @click="confirmDelete(currentDialectDraft())">确认删除</button>
+            <button type="button" class="btn xs" @click="deletion = undefined">取消</button>
+          </div>
+        </section>
       </form>
       <div v-show="hasSandhiEditor && editorTab === 'sandhi'" id="pd-sandhi-editor" ref="ruleHost" class="p-body pd-scroll" />
     </section>
@@ -333,7 +394,7 @@ watch(tableImport, table => {
     <aside class="panel pd-tools" data-tour="dialect-tools" aria-labelledby="pd-tools-title">
       <header class="p-head">
         <h2 id="pd-tools-title">字典工具</h2>
-        <div style="display: inline-flex; align-items: center; gap: 6px">
+        <div class="pd-head-right">
           <span class="tree-tag">{{ sourceLabel }}</span>
           <ModuleGuideButton data-tour="dialect-guide-btn" module-id="dialect" size="xs" />
         </div>
@@ -364,18 +425,25 @@ watch(tableImport, table => {
             <button type="button" class="btn xs" @click="nameDialog = undefined">取消</button>
           </div>
         </form>
-        <section v-if="deletion" class="pd-inline" role="alertdialog" aria-label="确认删除">
+        <section v-if="deletion?.type === 'dictionary'" class="pd-inline pd-delete-confirm" role="alertdialog" aria-label="确认删除字典">
           <strong>删除「{{ deletion.label }}」？</strong>
-          <p v-if="deletion.type === 'dictionary'" class="muted">字典及其中的词条将从本机移除。</p>
+          <p class="muted">字典及其中的词条将从本机移除。</p>
           <div class="pd-actions">
-            <button type="button" class="btn xs danger" @click="confirmDelete()">确认删除</button>
+            <button type="button" class="btn xs danger" @click="confirmDelete(currentDialectDraft())">确认删除</button>
             <button type="button" class="btn xs" @click="deletion = undefined">取消</button>
           </div>
         </section>
         <template v-if="dialect">
           <p v-if="source.kind === 'dialect'" class="pd-target muted">可在语音合成和编曲的词典菜单选用。</p>
-          <DialectStudioView :key="dialect.id" ref="tool" :profile="dialect"
-            :editable="source.kind === 'dialect'" :rule-host="ruleHost" @save="saveDialectTools" />
+          <DialectStudioView
+            :key="dialect.id"
+            ref="tool"
+            :profile="dialect"
+            :editable="source.kind === 'dialect'"
+            :rule-host="ruleHost"
+            @save="saveDialectTools"
+            @copy="copyDictionary(currentDialectDraft())"
+          />
         </template>
         <div v-else class="pd-inline pd-tips">
           <template v-if="source.builtin">
@@ -391,6 +459,85 @@ watch(tableImport, table => {
         </div>
       </div>
     </aside>
+
+    <Teleport to="body">
+      <div
+        v-if="importOpen"
+        class="export-modal-mask"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pd-import-modal-title"
+        @click.self="closeImportModal"
+        @keydown.esc.stop.prevent="closeImportModal"
+      >
+        <div class="export-modal-card pd-import-modal">
+          <header class="p-head">
+            <h2 id="pd-import-modal-title">导入字典或词表</h2>
+            <button type="button" class="btn xs icon-only" aria-label="关闭导入弹窗" @click="closeImportModal">
+              <IconSvg name="close" :size="12" />
+            </button>
+          </header>
+          <div class="p-body pd-import-body">
+            <p class="muted">词表支持 UTF-8 编码的 CSV、TSV 和 TXT（Excel/WPS 请另存为 CSV UTF-8）。导入整本字典请选择 VoxFigura 导出的 JSON。</p>
+            <input ref="importFileInput" type="file" accept=".json,.csv,.tsv,.txt" aria-label="导入字典文件"
+              hidden @change="openImport" />
+            <div class="pd-actions">
+              <button ref="importPicker" class="btn xs" :class="{ primary: !tableImport }" type="button"
+                @click="importFileInput?.click()">
+                <IconSvg name="upload" :size="12" /> {{ tableImport ? '更换文件' : '选择文件' }}
+              </button>
+              <button class="btn xs" type="button" @click="downloadImportExample">
+                <IconSvg name="download" :size="12" /> 下载 CSV 示例
+              </button>
+            </div>
+            <p v-if="importError" class="pd-danger" role="alert">{{ importError }}</p>
+            <form v-if="tableImport" class="pd-form" @submit.prevent="submitImportAndClose">
+              <div class="pd-import-grid">
+                <label class="pd-field">
+                  <span>新字典类型</span>
+                  <CustomSelect v-model="tableImport.kind" :options="importKindOptions" size="sm" aria-label="新字典类型" />
+                </label>
+                <label v-for="(label, i) in importColumnLabels" :key="label" class="pd-field">
+                  <span>{{ label }}列</span>
+                  <CustomSelect
+                    :model-value="tableImport.columns[i]"
+                    :options="importColumnOptions(i)"
+                    size="sm"
+                    :aria-label="label + '列'"
+                    @update:model-value="tableImport.columns[i] = Number($event)"
+                  />
+                </label>
+              </div>
+              <p v-if="tableImport.kind === 'dialect' && tableImport.profile" class="muted">
+                沿用「{{ tableImport.profile.name }}」的调型和变调规则。
+              </p>
+              <label class="pd-checkbox"><input v-model="tableImport.header" type="checkbox" /> 首行为表头（共 {{ tableImport.rows.length }} 行）</label>
+              <div v-if="importPreviewRows.length" class="pd-import-preview">
+                <span class="muted">数据预览（前 {{ importPreviewRows.length }} 条）</span>
+                <table class="mini-tbl">
+                  <thead>
+                    <tr>
+                      <th v-for="(label, idx) in importColumnLabels" :key="idx">{{ label }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(row, rIdx) in importPreviewRows" :key="rIdx">
+                      <td v-for="(_, cIdx) in importColumnLabels" :key="cIdx" :class="{ ipa: cIdx === 1 }">
+                        {{ tableImport.columns[cIdx] >= 0 ? (row[tableImport.columns[cIdx]] || '—') : '—' }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="pd-actions">
+                <button type="submit" class="btn xs primary">导入为新字典</button>
+                <button type="button" class="btn xs" @click="closeImportModal">取消</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -422,6 +569,8 @@ watch(tableImport, table => {
 .pd-shell > .panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .pd-shell > :deep(.gutter-v) { width: 100%; height: 100%; touch-action: none; }
 .pd-shell .p-head { min-width: 0; flex: none; gap: 6px; }
+.pd-head-left, .pd-head-right { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.pd-count { font-size: 0.85rem; }
 .pd-shell .pd-editor-header { height: auto; min-height: 34px; padding: 4px 8px; }
 .pd-editor-tabs { min-width: 0; }
 .pd-editor-tabs button { white-space: normal; }
@@ -447,7 +596,15 @@ watch(tableImport, table => {
 .pd-source span, .pd-tool-summary strong, .pd-target { overflow-wrap: anywhere; }
 .pd-source:hover, .pd-row:hover { background: var(--ctrl-hover, var(--selected)); }
 .pd-source.selected, .pd-row.selected { border-color: var(--accent); background: var(--selected); }
-.pd-current { color: var(--accent); font-size: .8rem; white-space: nowrap; }
+.pd-current { color: var(--accent); font-size: 0.8rem; white-space: nowrap; }
+.pd-badge-muted {
+  color: var(--muted);
+  font-size: 0.76rem;
+  padding: 1px 5px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--panel-border);
+  white-space: nowrap;
+}
 .pd-create {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -459,9 +616,8 @@ watch(tableImport, table => {
   background: var(--selected);
 }
 .pd-create .inp { width: 100%; min-width: 0; }
-.pd-import { margin-bottom: 8px; overflow-wrap: anywhere; }
 
-.pd-search { display: grid; grid-template-columns: minmax(46px, max-content) minmax(0, 1fr) auto; gap: 5px; padding: 8px; }
+.pd-search { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr) auto; gap: 5px; padding: 8px; align-items: center; }
 .pd-search .inp { min-width: 0; width: 100%; }
 .pd-list-heading, .pd-row { display: grid; grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr); align-items: center; gap: 8px; }
 .pd-list-heading { padding: 5px 11px; color: var(--muted); border-bottom: 1px solid var(--panel-border); }
@@ -472,21 +628,59 @@ watch(tableImport, table => {
 .pd-row small { color: var(--muted); }
 .pd-pagination { flex: none; padding: 7px 8px; border-top: 1px solid var(--panel-border); display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 
-.pd-form, .pd-field, .pd-tools-body, .pd-inline { display: grid; gap: 8px; align-content: start; }
+.pd-form, .pd-field, .pd-tools-body, .pd-inline, .pd-section { display: grid; gap: 8px; align-content: start; }
+.pd-section {
+  padding: 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--r-ctrl);
+  background: color-mix(in srgb, var(--ctrl-bg) 55%, transparent);
+}
+.pd-section-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.pd-unit-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+.pd-unit-dirty { border-color: var(--accent); }
 .pd-form .inp { width: 100%; min-width: 0; }
 .pd-form textarea { resize: vertical; }
 .pd-field { gap: 4px; }
 .pd-reading { padding: 8px 9px; border-left: 2px solid var(--accent); background: var(--selected); display: grid; gap: 3px; overflow-wrap: anywhere; }
-.pd-reading strong { font-size: 1.1rem; }
+.pd-reading strong { font-size: 1.05rem; }
 .pd-reading .ipa { font-size: 1.15rem; }
 .pd-scope { border: 1px solid var(--panel-border); border-radius: var(--r-ctrl); margin: 0; min-width: 0; padding: 7px 8px; display: grid; gap: 5px; }
 .pd-scope p, .pd-target, .pd-inline p { margin: 0; }
-.pd-scope label { display: flex; gap: 4px; align-items: start; }
+.pd-scope label, .pd-checkbox { display: flex; gap: 5px; align-items: center; }
 .pd-danger { color: var(--danger); }
+.pd-delete-confirm { border-color: color-mix(in srgb, var(--danger) 55%, var(--panel-border)); }
 
 .pd-tools-body { padding: 8px; }
-.pd-tool-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; padding: 3px 0; }
+.pd-tool-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; padding: 2px 0; }
 .pd-tool-actions { padding-bottom: 6px; border-bottom: 1px solid var(--panel-border); }
 .pd-inline { border: 1px solid var(--panel-border); border-radius: var(--r-ctrl); padding: 8px; background: var(--ctrl-bg); }
 .pd-tips p { color: var(--muted); line-height: 1.4; }
+
+.pd-import-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pd-import-body {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+.pd-import-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+.pd-import-preview {
+  display: grid;
+  gap: 5px;
+  overflow-x: auto;
+}
 </style>

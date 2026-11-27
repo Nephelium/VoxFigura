@@ -14,6 +14,24 @@ export interface Palette {
 
 export const DEFAULT_PALETTE = 'codex';
 
+// Built-in surface original palettes: airy whisper-tinted whites in light mode,
+// deep obsidian-tinted blacks in dark mode, each retaining its signature accent hue.
+const surfacePalettes: Readonly<Record<string, Omit<Palette, 'id'>>> = {
+  neumorphism: { name: '轻新拟态原始', light: ['#f6f9fc', '#385063', '#236499'], dark: ['#0d131a', '#e4eef6', '#92ccf5'] },
+  clay: { name: '轻黏土原始', light: ['#faf7fc', '#553c6b', '#70499b'], dark: ['#130e17', '#f5eaf7', '#d3a7ef'] },
+  glass: { name: '液态磨砂原始', light: ['#f5fcfb', '#1b505b', '#006665'], dark: ['#0b1417', '#dcf5f0', '#89e2cb'] },
+  minimal: { name: '极简仪器原始', light: ['#fbfcfd', '#262d34', '#3b4a59'], dark: ['#08090b', '#e6e9ed', '#93a0ad'] },
+  material: { name: 'Material 原始', light: ['#f9f8fe', '#3a3670', '#116969'], dark: ['#0f0f19', '#eae6fa', '#83d4ce'] },
+  swiss: { name: '瑞士网格原始', light: ['#fdfbf7', '#2c221d', '#ad1928'], dark: ['#120e0d', '#f7ece0', '#ff858b'] },
+  bauhaus: { name: '包豪斯原始', light: ['#fcfaf2', '#3b2c16', '#1341aa'], dark: ['#12100c', '#faf1d6', '#86aaff'] },
+  brutal: { name: '轻新粗野原始', light: ['#f5f8ff', '#1f2d49', '#164eaf'], dark: ['#0b101b', '#eef3ff', '#85b4ff'] },
+};
+const SURFACE_PALETTE_PREFIX = 'surface-';
+
+export function originalSurfacePaletteId(skin: string): string | undefined {
+  return Object.hasOwn(surfacePalettes, skin) ? SURFACE_PALETTE_PREFIX + skin : undefined;
+}
+
 export const palettes: Palette[] = [
   { id: 'codex', name: 'Codex', light: ['#f9f9f9', '#202020', '#0969da'], dark: ['#171717', '#ededed', '#79aaff'] },
   { id: 'absolutely', name: 'Absolutely', light: ['#faf9f6', '#34322f', '#a94f31'], dark: ['#202020', '#e6e2dc', '#e59b77'] },
@@ -118,7 +136,13 @@ export function updateCustomPalette(hexColor: string): Palette {
 }
 
 export function normalizePalette(value: unknown): string {
-  return typeof value === 'string' && palettes.some((p) => p.id === value) ? value : DEFAULT_PALETTE;
+  return typeof value === 'string' && paletteDefinition(value) ? value : DEFAULT_PALETTE;
+}
+
+export function paletteDefinition(id: string): Palette | undefined {
+  if (!id.startsWith(SURFACE_PALETTE_PREFIX)) return palettes.find((palette) => palette.id === id);
+  const skin = id.slice(SURFACE_PALETTE_PREFIX.length);
+  return Object.hasOwn(surfacePalettes, skin) ? { ...surfacePalettes[skin], id } : undefined;
 }
 
 export function normalizeMode(value: unknown): ThemeMode {
@@ -182,7 +206,7 @@ export const PALETTE_LABELS_ZH: Readonly<Record<string, string>> = {
 
 export function paletteDisplayName(id: string): string {
   const norm = normalizePalette(id);
-  return PALETTE_LABELS_ZH[norm] ?? palettes.find((p) => p.id === norm)?.name ?? norm;
+  return PALETTE_LABELS_ZH[norm] ?? paletteDefinition(norm)?.name ?? norm;
 }
 
 export function paletteShortName(id: string): string {
@@ -190,8 +214,11 @@ export function paletteShortName(id: string): string {
   return full.split(' · ')[0] || full;
 }
 
-export function paletteTokens(id: string, mode: ColorMode): Record<string, string> {
-  const palette = palettes.find((p) => p.id === normalizePalette(id)) ?? palettes[0];
+export function paletteTokens(id: string, mode: ColorMode, customAccent?: string): Record<string, string> {
+  const paletteId = normalizePalette(id);
+  const palette = paletteId === 'custom' && customAccent !== undefined
+    ? customPalette(customAccent)
+    : paletteDefinition(paletteId) ?? palettes[0];
   const seed = palette[mode];
   const isDark = mode === 'dark';
   const [app, ink, hue] = seed;
@@ -243,6 +270,15 @@ export function paletteTokens(id: string, mode: ColorMode): Record<string, strin
 }
 
 export type WaveformColorMode = 'theme' | 'blue' | 'custom';
+
+export function themeBackdropColors(palette: Record<string, string>): readonly [string, string, string] {
+  const accent = palette['--accent'];
+  return [
+    accent,
+    mix(accent, palette['--text'], 0.22),
+    mix(accent, palette['--panel'], 0.38),
+  ];
+}
 
 export interface BackdropColorScheme {
   id: string;

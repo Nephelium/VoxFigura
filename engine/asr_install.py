@@ -1,35 +1,40 @@
-"""Install the optional offline recognizer inside the project cache."""
+"""On-demand downloader for SenseVoice-Small ONNX weights with IP-based mirror switching."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import file_digest
 from http.client import HTTPException
-from importlib import invalidate_caches
-from importlib.metadata import distributions
 from importlib.util import find_spec
 import os
 from pathlib import Path
-from shutil import disk_usage
-import subprocess
-import sys
+from shutil import disk_usage, rmtree
 from tempfile import TemporaryDirectory
 from threading import Lock, Thread
 from time import monotonic
-from typing import Callable
-from urllib.request import urlopen
+from typing import Any, Callable
+from urllib.request import Request, urlopen
 
-from asr_models import CACHE, DEFAULT_MODEL, MODELS, model_dir
+import asr_models
+from asr_models import DEFAULT_MODEL, MODELS, ModelFiles, cache_root, model_dir
 
-RUNTIME = CACHE / "python"
 HUGGING_FACE = "https://huggingface.co"
 HF_MIRROR = "https://hf-mirror.com"
+MODELSCOPE = "https://www.modelscope.cn"
 REGION_LOOKUP = "https://www.cloudflare.com/cdn-cgi/trace"
-PACKAGES = {"faster-whisper": "1.2.1", "ctranslate2": "4.6.0", "av": "15.1.0"}
+USER_AGENT = "VoxFigura/1.0 (+https://github.com/k2-fsa/sherpa-onnx)"
 
 
-def add_runtime_path() -> None:
-    if RUNTIME.is_dir() and str(RUNTIME) not in sys.path:
-        sys.path.append(str(RUNTIME))
-        invalidate_caches()
+@dataclass(frozen=True)
+class DownloadSource:
+    id: str
+    label: str
+    kind: str  # "hf" | "modelscope"
+    host: str
+
+    def file_url(self, spec: ModelFiles, filename: str) -> str:
+        if self.kind == "modelscope":
+            return f"{self.host}/models/{spec.modelscope_repository}/resolve/master/{filename}"
+        return f"{self.host}/{spec.repository}/resolve/{spec.revision}/{filename}"
 
 
 def _verify(path: Path, size: int, expected: str) -> bool:
@@ -39,44 +44,43 @@ def _verify(path: Path, size: int, expected: str) -> bool:
         return file_digest(stream, "sha256").hexdigest() == expected
 
 
-def _download_sources() -> tuple[str, ...]:
+def _detect_region() -> str:
+    try:
+        req = Request(REGION_LOOKUP, headers={"User-Agent": USER_AGENT})
+        with urlopen(req, timeout=4) as response:
+            lines = response.read(4096).decode("utf-8", errors="ignore").splitlines()
+            if "loc=CN" in lines:
+                return "cn"
+            return "global"
+    except (HTTPException, OSError, ValueError):
+        return "global"
+
+
+def _download_sources() -> tuple[str, tuple[DownloadSource, ...]]:
     override = os.environ.get("VOCALCUT_ASR_DOWNLOAD_HOST", "").strip().rstrip("/")
     if override:
-        return (override,)
-    try:
-        with urlopen(REGION_LOOKUP, timeout=4) as response:
-            mainland = "loc=CN" in response.read(4096).decode("utf-8").splitlines()
-    except (HTTPException, OSError, ValueError):
-        mainland = False
-    return (HF_MIRROR, HUGGING_FACE) if mainland else (HUGGING_FACE, HF_MIRROR)
+        kind = "modelscope" if "modelscope.cn" in override.lower() else "hf"
+        return ("custom", (DownloadSource("custom", "指定下载源", kind, override),))
+
+    region = _detect_region()
+    hf_mirror = DownloadSource("hf_mirror", "国内 HF 镜像 (hf-mirror)", "hf", HF_MIRROR)
+    modelscope = DownloadSource("modelscope", "ModelScope 魔搭社区", "modelscope", MODELSCOPE)
+    huggingface = DownloadSource("huggingface", "Hugging Face", "hf", HUGGING_FACE)
+    if region == "cn":
+        return ("cn", (hf_mirror, modelscope, huggingface))
+    return ("global", (huggingface, hf_mirror, modelscope))
 
 
-def _setup_runtime() -> None:
-    installed = {item.metadata["Name"].lower().replace("_", "-"): item.version for item in distributions(path=[str(RUNTIME)])}
-    needed = [f"{package}=={version}" for package, version in PACKAGES.items() if installed.get(package) != version]
-    add_runtime_path()
-    supporting_modules = ("huggingface_hub", "tokenizers", "onnxruntime", "tqdm", "yaml")
-    has_dependencies = all(find_spec(name) is not None for name in supporting_modules)
-    if needed or not has_dependencies:
-        if not has_dependencies:
-            needed = [f"{package}=={version}" for package, version in PACKAGES.items()]
-        subprocess.run(
-            [sys.executable, "-B", "-m", "pip", "--disable-pip-version-check", "install",
-             "--no-cache-dir", "--no-compile", "--only-binary=:all:", "--upgrade",
-             "--target", str(RUNTIME), *(["--no-deps"] if has_dependencies else []), *needed],
-            check=True, timeout=240,
-        )
-        add_runtime_path()
-        invalidate_caches()
-
-    import faster_whisper  # noqa: F401
-    import onnxruntime  # noqa: F401
+def _check_onnx_runtime() -> None:
+    if find_spec("onnxruntime") is None or find_spec("numpy") is None:
+        raise RuntimeError("本地 ONNX 推理运行库缺失，请检查应用运行环境")
 
 
 def _fetch_file(url: str, target: Path, max_bytes: int, progress: Callable[[int], None]) -> None:
     deadline = monotonic() + 7200
     total = 0
-    with urlopen(url, timeout=18) as response, target.open("wb") as stream:
+    req = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(req, timeout=20) as response, target.open("wb") as stream:
         while chunk := response.read(256 * 1024):
             total += len(chunk)
             if total > max_bytes or monotonic() > deadline:
@@ -85,89 +89,155 @@ def _fetch_file(url: str, target: Path, max_bytes: int, progress: Callable[[int]
             progress(total)
 
 
-def _setup_model(model: str, report: Callable[[str], None]) -> None:
+def _setup_model(model: str, report: Callable[[dict[str, Any]], None]) -> None:
     spec = MODELS[model]
+    root = cache_root()
+    root.mkdir(parents=True, exist_ok=True)
     destination = model_dir(model)
     destination.mkdir(parents=True, exist_ok=True)
     missing = {name: meta for name, meta in spec.files.items() if not _verify(destination / name, *meta)}
     if not missing:
+        report({
+            "hint": "SenseVoice-Small 已就绪",
+            "progress": 100,
+            "downloaded_bytes": spec.size_bytes,
+            "total_bytes": spec.size_bytes,
+        })
         return
+
     download_bytes = sum(size for size, _ in missing.values())
-    if disk_usage(CACHE).free < download_bytes:
-        raise RuntimeError("项目磁盘空间不足，无法下载所选 Whisper 模型")
-    report("正在根据公网出口地区选择下载源…")
-    sources = _download_sources()
-    labels = {HUGGING_FACE: "Hugging Face", HF_MIRROR: "国内 HF 镜像"}
-    with TemporaryDirectory(prefix="download-", dir=CACHE) as scratch:
-        for host in sources:
-            description = f"正在从 {labels.get(host, '指定下载源')} 下载 Whisper {model}"
+    if disk_usage(root).free < download_bytes + 32 * 1024 * 1024:
+        raise RuntimeError("磁盘可用空间不足，无法下载 SenseVoice-Small 模型（需要约 260 MB 空间）")
+
+    report({
+        "hint": "正在根据网络地区自动选择下载源…",
+        "progress": 0,
+        "downloaded_bytes": 0,
+        "total_bytes": download_bytes,
+    })
+    region, sources = _download_sources()
+    with TemporaryDirectory(prefix="download-", dir=root) as scratch:
+        for source in sources:
             last_percent = -1
             completed_bytes = 0
 
-            def progress(file_bytes: int) -> None:
+            def on_progress(file_bytes: int) -> None:
                 nonlocal last_percent
-                percent = min(99, (completed_bytes + file_bytes) * 100 // download_bytes)
-                if percent != last_percent:
+                done = completed_bytes + file_bytes
+                percent = min(99, int(done * 100 // max(1, download_bytes)))
+                if percent != last_percent or done == 0:
                     last_percent = percent
-                    report(f"{description} · {percent}%")
+                    report({
+                        "hint": f"正在从 {source.label} 下载 SenseVoice-Small · {percent}%",
+                        "progress": percent,
+                        "downloaded_bytes": done,
+                        "total_bytes": download_bytes,
+                        "source": source.label,
+                        "region": region,
+                    })
 
-            progress(0)
-            base_url = f"{host}/{spec.repository}/resolve/{spec.revision}"
+            on_progress(0)
             try:
                 for name, (size, digest) in missing.items():
                     pending = Path(scratch) / name
                     if not _verify(pending, size, digest):
-                        _fetch_file(f"{base_url}/{name}", pending, size, progress)
+                        _fetch_file(source.file_url(spec, name), pending, size, on_progress)
                         if not _verify(pending, size, digest):
                             raise ValueError("Model file failed SHA-256 verification")
                     completed_bytes += size
+                    on_progress(0)
             except (HTTPException, OSError, ValueError):
                 continue
+
+            report({
+                "hint": "下载完成，正在校验并安装 SenseVoice-Small…",
+                "progress": 99,
+                "downloaded_bytes": download_bytes,
+                "total_bytes": download_bytes,
+                "source": source.label,
+                "region": region,
+            })
             for name in missing:
                 (Path(scratch) / name).replace(destination / name)
+            report({
+                "hint": "SenseVoice-Small 已安装就绪",
+                "progress": 100,
+                "downloaded_bytes": download_bytes,
+                "total_bytes": download_bytes,
+                "source": source.label,
+                "region": region,
+            })
             return
-    raise RuntimeError(f"Whisper {model} 下载或校验未完成，请检查网络后重试")
+
+    raise RuntimeError("SenseVoice-Small 下载或校验未完成，请检查网络连接后重试")
 
 
-def setup_asr(model: str = DEFAULT_MODEL, report: Callable[[str], None] = print) -> None:
-    report("正在准备本地语音识别运行库…")
-    try:
-        _setup_runtime()
-    except (ImportError, OSError, RuntimeError, subprocess.SubprocessError) as error:
-        raise RuntimeError("本地语音识别运行库安装失败，请检查 Python 环境和网络后重试") from error
+def remove_model(model: str = DEFAULT_MODEL) -> bool:
+    if model not in MODELS:
+        return False
+    target = model_dir(model)
+    if target.is_dir():
+        rmtree(target, ignore_errors=False)
+        return True
+    return False
+
+
+def setup_asr(model: str = DEFAULT_MODEL, report: Callable[[Any], None] = print) -> None:
+    def emit(payload: dict[str, Any]) -> None:
+        if report is print:
+            print(payload.get("hint", ""))
+        else:
+            report(payload)
+
+    _check_onnx_runtime()
     if model in MODELS and not os.environ.get("VOCALCUT_ASR_MODEL_DIR"):
-        _setup_model(model, report)
+        _setup_model(model, emit)
 
 
 class AsrInstallJob:
     def __init__(self) -> None:
         self._lock = Lock()
-        self._status: dict[str, str] = {}
+        self._status: dict[str, Any] = {}
 
-    def status(self) -> dict[str, str]:
+    def status(self) -> dict[str, Any]:
         with self._lock:
             return self._status.copy()
 
-    def start(self, model: str) -> dict[str, str]:
+    def start(self, model: str = DEFAULT_MODEL) -> dict[str, Any]:
         with self._lock:
             if self._status.get("state") != "installing":
-                self._status = {"state": "installing", "model": model, "hint": "正在准备下载 Whisper…"}
-                Thread(target=self._run, args=(model,), name="whisper-install", daemon=True).start()
+                total = MODELS[model].size_bytes if model in MODELS else 0
+                self._status = {
+                    "state": "installing",
+                    "model": model,
+                    "hint": "正在准备下载 SenseVoice-Small…",
+                    "progress": 0,
+                    "downloaded_bytes": 0,
+                    "total_bytes": total,
+                }
+                Thread(target=self._run, args=(model,), name="sensevoice-install", daemon=True).start()
             return self._status.copy()
 
-    def _report(self, hint: str) -> None:
+    def _report(self, update: dict[str, Any] | str) -> None:
         with self._lock:
-            self._status["hint"] = hint
+            if isinstance(update, str):
+                self._status["hint"] = update
+            else:
+                self._status.update(update)
 
     def _run(self, model: str) -> None:
         try:
             setup_asr(model, self._report)
-            result = {}
+            result: dict[str, Any] = {}
         except RuntimeError as error:
             result = {"state": "failed", "hint": str(error)}
         except (OSError, ValueError):
-            result = {"state": "failed", "hint": "无法写入本地识别缓存，请检查项目目录权限和剩余空间"}
+            result = {"state": "failed", "hint": "无法写入本地模型缓存，请检查目录权限与磁盘剩余空间"}
         except Exception:
-            result = {"state": "failed", "hint": "本地 Whisper 安装意外中断，请重试"}
+            result = {"state": "failed", "hint": "SenseVoice-Small 下载意外中断，请重试"}
         with self._lock:
             self._status = {"model": model, **result} if result else {}
+
+
+# Keep module alias accessible for tests patching cache root
+CACHE = asr_models.DEFAULT_CACHE

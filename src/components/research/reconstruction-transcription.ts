@@ -1,46 +1,35 @@
+import { defaultM27Adapter } from '@vocalcut/model-adapters';
 import { blobToBase64 } from './research-utils';
 import { audioBufferFile } from '@/data/workspace-transfer';
-import { localWhisperEnabled, type WhisperModelId } from '@/data/whisper-models';
+import { DEFAULT_LOCAL_ASR_MODEL, localWhisperEnabled, type WhisperModelId } from '@/data/whisper-models';
 
-type Language = 'auto' | 'zh' | 'en';
+type Language = 'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue';
+
+export type TranscriptionMode = 'local' | 'cloud';
 
 export async function requestTranscription(
   file: Blob,
   lang: Language,
   cancel: AbortSignal,
-  options: { deepSeekKey?: string; model?: WhisperModelId | null } = {},
+  options: { deepSeekKey?: string; model?: WhisperModelId | null; mode?: TranscriptionMode } = {},
 ) {
-  if (options.deepSeekKey) return requestDeepSeekTranscription(file, cancel, options.deepSeekKey);
-  if (!localWhisperEnabled) throw new Error('请配置 DeepSeek API 转写，或直接填写参考文本');
+  const mode: TranscriptionMode = options.mode ?? (options.deepSeekKey ? 'cloud' : 'local');
+  if (mode === 'cloud') {
+    if (!options.deepSeekKey) throw new Error('请先在 AI 助手中配置 DeepSeek API Key');
+    return requestDeepSeekTranscription(file, cancel, options.deepSeekKey);
+  }
+  if (!localWhisperEnabled) throw new Error('本地语音转文字未启用，请配置在线 API 或直接填写参考文本');
 
   const audio = await blobToBase64(file);
   cancel.throwIfAborted();
-  const timeout = AbortSignal.timeout(125_000);
-  const response = await fetch('/api/m27/transcribe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.any([cancel, timeout]),
-    body: JSON.stringify({ wav_base64: audio, lang, model: options.model ?? undefined }),
-  }).catch((error: unknown) => {
-    if (timeout.aborted) throw new Error('本地语音识别超时，请缩短录音后重试');
-    throw error;
-  });
-
-  const data = (await response.json().catch(() => null)) as {
-    ok?: boolean;
-    text?: string;
-    lang?: string;
-    hint?: string;
-    error?: { hint?: string };
-  } | null;
-  if (!response.ok || data?.ok !== true) {
-    throw new Error(data?.error?.hint || data?.hint || `本地引擎未能转写录音（HTTP ${response.status}）`);
+  const res = await defaultM27Adapter.transcribe(
+    { wav_base64: audio, lang, model: options.model ?? DEFAULT_LOCAL_ASR_MODEL },
+    { signal: cancel, timeoutMs: 125_000 },
+  );
+  if (!res.ok) {
+    throw new Error(res.error.hint || '本地引擎未能转写录音');
   }
-  const text = typeof data.text === 'string' ? data.text.trim() : '';
-  if (!text || (data.lang !== 'en' && data.lang !== 'zh')) {
-    throw new Error('本地引擎返回的转写结果不完整');
-  }
-  return { text, lang: data.lang };
+  return res.value;
 }
 
 async function prepareDeepSeekAudio(file: Blob, cancel: AbortSignal): Promise<File> {

@@ -1,6 +1,7 @@
 import {
-  activePhonationAnchorAt, DEFAULT_BASE_PRESSURE_PA, DYNAMIC_STEP_PA, msToSamples, samplesToMs,
-  SAMPLE_RATE_HZ, type PhonationAnchor, type SegmentAnchor, type Syllable, type VcProject,
+  activePhonationAnchorAt, DEFAULT_BASE_PRESSURE_PA, DEFAULT_SCORE_NOTATION, DYNAMIC_STEP_PA, isScoreNotationId,
+  msToSamples, samplesToMs, SAMPLE_RATE_HZ,
+  type PhonationAnchor, type ScoreNotationId, type SegmentAnchor, type Syllable, type VcProject,
 } from '@vocalcut/core';
 import { loadCmu, needsEnglishDictionary, reviewText, tonicMidi, mixedSpeechTokens, type SongTonic } from '@vocalcut/g2p';
 import { VOQS_PROFILES, voqsAnchorLabel, voqsAnchorPatch, voqsProfile } from '@/data/voqs-library';
@@ -267,34 +268,68 @@ export async function compileScore(args: ToolArgs, context: ToolContext): Promis
   if ((args.score === undefined) === (args.asset_id === undefined)) throw new Error('请分别用 score 或 asset_id 指定唯一简谱来源');
   const score = (typeof args.score === 'string' ? args.score : textOfScore(context, String(args.asset_id)))?.trim();
   if (!score || score.length > 3000) throw new Error('简谱为空、尚未关联，或超过 3000 字符');
-  const { lyrics, rows, language } = await resolveClipSyllableRows(existing, args.lyrics);
-  if (!lyrics) {
-    throw new Error('当前片段尚无歌词，请在 compile_score 中通过 lyrics 参数传入歌词');
-  }
-  if (rows.length === 0 || rows.length > 240 || rows.some(row => !row.ipa)) {
-    throw new Error('歌词需有 1–240 个可读音节。字典未覆盖时可粘贴方括号 IPA');
-  }
   const tonic = (args.tonic ?? existing.source?.score_tonic ?? 'C3') as SongTonic;
   if (!Object.hasOwn(tonicMidi, tonic)) throw new Error('不支持该主音');
+  const notation: ScoreNotationId = isScoreNotationId(args.notation)
+    ? args.notation
+    : isScoreNotationId(existing.source?.score_notation)
+      ? existing.source.score_notation
+      : DEFAULT_SCORE_NOTATION;
   const bpm = context.project.settings.tempo_map[0]?.bpm ?? 92;
   const leadMs = 75;
   const origin = msToSamples(leadMs + 30);
-  const viewed = timelineOfScore(score, tonic, bpm, true, origin, rows.length);
+
+  // If the AI passed inline lyrics like `汉《[3]/ [2]/》 皇《[1]/ 6/》` without a separate `lyrics` field, extract them automatically
+  let overrideLyrics: unknown = args.lyrics;
+  if (overrideLyrics === undefined) {
+    const probe = timelineOfScore(score, tonic, bpm, true, origin, undefined, notation, false);
+    if (probe.ok && probe.inlineLyrics?.length) {
+      overrideLyrics = probe.inlineLyrics.join(probe.inlineLyrics.some((w) => /^[A-Za-z]/u.test(w)) ? ' ' : '');
+    }
+  }
+
+  const { lyrics, rows, language } = await resolveClipSyllableRows(existing, overrideLyrics);
+  if (!lyrics) {
+    throw new Error('当前片段尚无歌词，请在 compile_score 中传入 lyrics 或使用带字写法（如 汉《[3]/ [2]/》）');
+  }
+  if (rows.length === 0 || rows.length > 240 || rows.some((row) => !row.ipa)) {
+    throw new Error('歌词需有 1–240 个可读音节。字典未覆盖时可粘贴方括号 IPA');
+  }
+  const viewed = timelineOfScore(score, tonic, bpm, true, origin, rows.length, notation, false);
   if (!viewed.ok) throw new Error(viewed.issue.message);
   if (!Number.isSafeInteger(viewed.endSmp) || viewed.endSmp > SAMPLE_RATE_HZ * 3600) throw new Error('助手支持一小时内的简谱');
-  const notes = viewed.notes.map(note => ({ ...note, pressurePa: DEFAULT_BASE_PRESSURE_PA + note.dynamic * DYNAMIC_STEP_PA }));
+  const notes = viewed.notes.map((note) => ({ ...note, pressurePa: DEFAULT_BASE_PRESSURE_PA + note.dynamic * DYNAMIC_STEP_PA }));
   const speakerId = existing.voice_id ?? context.store.activeVoiceId.value;
   const speaker = context.project.voices[speakerId];
   const compiled = compileArrangement({
-    voice: { rows, lyricsText: lyrics, fullScoreStr: score }, notes, endSmp: viewed.endSmp, ok: true, issueMsg: '',
+    voice: { rows, lyricsText: lyrics, fullScoreStr: score },
+    notes,
+    endSmp: viewed.endSmp,
+    ok: true,
+    issueMsg: '',
   }, {
-    clipId: existing.id, speakerId, speaker: speaker?.speaker, bpm, tonic, language, referenceHz: speaker?.f0_ref_hz ?? 220,
-    leadEnabled: true, leadMs, biasMs: 0, dampingRate: arrangerDampingRate(existing), vibrato: true,
+    clipId: existing.id,
+    speakerId,
+    speaker: speaker?.speaker,
+    bpm,
+    tonic,
+    notation,
+    language,
+    referenceHz: speaker?.f0_ref_hz ?? 220,
+    leadEnabled: true,
+    leadMs,
+    biasMs: 0,
+    dampingRate: arrangerDampingRate(existing),
+    vibrato: true,
   });
   if (!compiled.clip) throw new Error(compiled.issue);
-  return { type: 'score.apply', payload: {
-    clip: { ...compiled.clip, annotation_controls: existing.annotation_controls }, autoAudition: Boolean(args.auto_audition),
-  } };
+  return {
+    type: 'score.apply',
+    payload: {
+      clip: { ...compiled.clip, annotation_controls: existing.annotation_controls },
+      autoAudition: Boolean(args.auto_audition),
+    },
+  };
 }
 
 export function placeMedia(args: ToolArgs, context: ToolContext): WorkbenchCommand {

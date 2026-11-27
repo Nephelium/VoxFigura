@@ -8,6 +8,7 @@ export type GuideDemoKind =
   | 'continuum-suan-swan'
   | 'dialect-sandhi'
   | 'arranger-prebeat'
+  | 'stage-cinema'
   | 'explore-compare';
 
 export interface GuideWorkflowStep {
@@ -27,6 +28,15 @@ export interface GuidePitfall {
   title: string;
   detail: string;
 }
+
+export interface GuideCodeBlock {
+  title: string;
+  tag: string;
+  code: string;
+  caption?: string;
+}
+
+export type GuideDiagramKey = 'main-architecture' | 'ipa-architecture' | 'm27-architecture' | 'stage-pipeline' | 'continuum-pipeline' | 'dialect-architecture' | 'mixer-pipeline' | 'card-architecture';
 
 export interface GuideDemoSpec {
   id: string;
@@ -59,8 +69,10 @@ export interface GuideModuleDoc {
   workflowSteps: GuideWorkflowStep[];
   demoSpec?: GuideDemoSpec;
   demoPlaceholder?: GuideDemoPlaceholder;
-  chartKey?: 'coarticulation' | 'voqsScale';
+  diagramKey?: GuideDiagramKey;
+  chartKey?: 'mainSynthesisPhysics' | 'coarticulation' | 'voqsScale' | 'arrangerOverview' | 'stageCinemaCurves' | 'm27RealtimeBudget' | 'cardExportBudget';
   tables?: GuideSyntaxTable[];
+  referenceCodeBlocks?: GuideCodeBlock[];
   pitfalls: GuidePitfall[];
   shortcuts: Array<[string, string]>;
   jumpAction?: {
@@ -81,7 +93,7 @@ export interface GuideAppendixSection {
   bullets: Array<{ head: string; body: string }>;
   callout?: { kind: 'note' | 'warn'; title: string; text: string };
   tables?: GuideSyntaxTable[];
-  chartKey?: 'coarticulation' | 'voqsScale';
+  chartKey?: 'coarticulation' | 'voqsScale' | 'arrangerOverview';
   showVoqsBadges?: boolean;
   showShortcutGroups?: boolean;
   actionButton?: {

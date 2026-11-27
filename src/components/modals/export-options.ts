@@ -16,6 +16,54 @@ interface ExportOption {
 
 export const exportOptions = [
   {
+    kind: 'mid',
+    suffix: 'mid',
+    badge: 'mid',
+    label: 'MIDI 乐谱',
+    detail: '导出多轨标准 MIDI（含轨名、歌词、力度与速度/拍号）',
+    help: {
+      format: 'Standard MIDI Format 1（960 PPQ），UTF-8 编码轨名与歌词，所有启用轨道同步写入。',
+      data: [
+        '保存全部已启用轨道（遵循静音 M 与独奏 S 状态）的音高、时值、力度、GM 乐器音色、控制器、变速图与拍号变化。',
+        '人声轨的歌词会按音节起音时刻写入 MIDI Lyrics 事件；单端口最多支持 15 条旋律轨与 1 条鼓轨。',
+      ],
+      use: '可直接导入任意 DAW、制谱软件（MuseScore / Guitar Pro）或其他歌声合成软件继续编曲。',
+      reimport: '在编曲页左栏顶部点击「导入乐谱」，选择 .mid 文件即可按轨挑选并导回工作台。',
+    },
+  },
+  {
+    kind: 'vsqx',
+    suffix: 'vsqx',
+    badge: 'vsqx',
+    label: 'VOCALOID 工程 (VSQX)',
+    detail: '导出 VOCALOID 4 多轨歌声工程（含歌词、拖腔与音素）',
+    help: {
+      format: 'VOCALOID 4 XML 工程文件（<vsq4>，480 PPQ，含 1 小节预备拍），兼容 VOCALOID 4/5/6、OpenUtau 与 UtaFormatix。',
+      data: [
+        '保存全部启用轨道的音符起止、音高、力度、静音/独奏/音量、速度图与拍号变化。',
+        '人声轨自动保留一字多音拖腔（续音记为 -），并自动将中文/英语/日语 IPA 转换为对应 VOCALOID X-SAMPA 音素（导入自 VSQX 且未改音标时原样保留原始音素）。',
+      ],
+      use: '可直接在 VOCALOID 编辑器、OpenUtau 或支持 VSQX 的歌声软件中打开调教与渲染。',
+      reimport: '在编曲页左栏顶部点击「导入乐谱」，选择 .vsqx 文件即可完整恢复多轨音符、歌词与音素。',
+    },
+  },
+  {
+    kind: 'svp',
+    suffix: 'svp',
+    badge: 'svp',
+    label: 'Synthesizer V 工程 (SVP)',
+    detail: '导出 SynthV Studio 多轨工程（含歌词、拖腔、音素与混音）',
+    help: {
+      format: 'Synthesizer V Studio JSON 工程文件（705,600,000 blicks/拍），UTF-8 编码。',
+      data: [
+        '保存全部启用轨道的音符起止、音高、轨道混音增益/静音/独奏、速度变化与拍号变化。',
+        '人声轨自动保留一字多音拖腔（续音记为 -），按语种设置数据库语言与音标集，并将中文 IPA 映射为 X-SAMPA、英语 IPA 映射为 ARPAbet（未改音标时原样保留导入的原始音素）。',
+      ],
+      use: '可直接在 Synthesizer V Studio 中打开，挂接任意 AI 声库继续调校音高、气声与唱法。',
+      reimport: '在编曲页左栏顶部点击「导入乐谱」，选择 .svp 文件即可完整恢复多轨音符、歌词与音素。',
+    },
+  },
+  {
     kind: 'vcproj',
     suffix: 'vcproj',
     badge: 'vcproj',

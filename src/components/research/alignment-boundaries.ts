@@ -28,27 +28,38 @@ export function fallbackAlignmentGrid(duration: number, phones: readonly TextGri
 
 export function alignmentBoundaries(grid: TextGridDocument, lanes: AlignmentLane[], duration: number): AlignmentBoundary[] {
   const byTime = new Map<number, Edge[]>();
-  for (const { tier,index } of lanes) {
+  const timesByTier = new Map<number, number[]>();
+  for (const { tier, index } of lanes) {
+    const tierSet = new Set<number>();
     tier.intervals.forEach((interval, item) => {
       for (const value of ['xmin', 'xmax'] as const) {
         const time = alignmentSample(interval[value]);
         if (!Number.isSafeInteger(time)) continue;
+        tierSet.add(time);
         const edges = byTime.get(time) ?? [];
         edges.push({ tier: index, interval: item, value });
         byTime.set(time, edges);
       }
     });
+    timesByTier.set(index, [...tierSet].sort((a, b) => a - b));
   }
-  const times = [...byTime.keys()].sort((a,b) => a-b);
-  return times.flatMap((sample,index) => {
+  const times = [...byTime.keys()].sort((a, b) => a - b);
+  return times.flatMap((sample) => {
     const edges = byTime.get(sample)!;
     const tiers = [...new Set(edges.map(edge => edge.tier))];
     const bounds = tiers.map(tier => grid.tiers[tier]);
     const start = Math.max(0, alignmentSample(grid.xmin), ...bounds.map(tier => alignmentSample(tier.xmin)));
     const end = Math.min(alignmentSample(duration), alignmentSample(grid.xmax), ...bounds.map(tier => alignmentSample(tier.xmax)));
     if (sample <= start || sample >= end) return [];
-    const min = Math.max(start + 1, (times[index - 1] ?? start) + 1);
-    const max = Math.min(end - 1, (times[index + 1] ?? end) - 1);
+    let min = start + 1;
+    let max = end - 1;
+    for (const tierIndex of tiers) {
+      const tierTimes = timesByTier.get(tierIndex);
+      if (!tierTimes) continue;
+      const pos = tierTimes.indexOf(sample);
+      if (pos > 0) min = Math.max(min, tierTimes[pos - 1] + 1);
+      if (pos >= 0 && pos + 1 < tierTimes.length) max = Math.min(max, tierTimes[pos + 1] - 1);
+    }
     if (min >= max) return [];
     const key = edges.map(edge => [edge.tier, edge.interval, edge.value].join('-')).join('/');
     return [{ key, sample, min, max, edges, lanes: tiers }];

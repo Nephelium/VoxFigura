@@ -1,7 +1,13 @@
+<script lang="ts">
+// Persists original pre-denoise audio across tab switches without leaking memory.
+const originalBeforeDenoise = new WeakMap<Blob, { file: Blob; name: string }>();
+</script>
+
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef } from 'vue';
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { encodeWavFromAudioBuffer } from '@/components/modals/download';
+import { denoiseFile } from '@/data/denoise';
 import { applyPeakAudioGain, parseWavSampleRate, synthesisGainMode } from '@/data/voice-renderer';
 import MixerAudioPlayer from './MixerAudioPlayer.vue';
 import { encodeMonoWavBase64 } from './research-utils';
@@ -25,6 +31,9 @@ const props = withDefaults(
     compact?: boolean;
     showPrepButton?: boolean;
     annotationCount?: number;
+    hidePlayer?: boolean;
+    showDemoButton?: boolean;
+    demoBusy?: boolean;
   }>(),
   {
     roleBadge: '',
@@ -32,6 +41,9 @@ const props = withDefaults(
     compact: false,
     showPrepButton: false,
     annotationCount: 0,
+    hidePlayer: false,
+    showDemoButton: false,
+    demoBusy: false,
   },
 );
 
@@ -39,12 +51,22 @@ const emit = defineEmits<{
   change: [audio: MixerAudio];
   busy: [value: boolean];
   playhead: [norm: number | null];
+  playing: [active: boolean];
   'open-prep': [];
+  'load-demo': [];
 }>();
 
 const fileInput = ref<HTMLInputElement>();
+const playerRef = ref<InstanceType<typeof MixerAudioPlayer> | null>(null);
 const busy = ref(false);
+const denoising = ref(false);
+const denoiseRev = ref(0);
+const denoised = computed(() => {
+  void denoiseRev.value;
+  return Boolean(props.audio?.file && originalBeforeDenoise.has(props.audio.file));
+});
 const recording = ref(false);
+const dragOver = ref(false);
 const recordElapsedSec = ref(0);
 const status = ref('');
 const failed = ref(false);
@@ -54,6 +76,19 @@ let controller: AbortController | undefined;
 let recordTimer: number | undefined;
 let elapsedTimer: number | undefined;
 let disposed = false;
+
+watch(
+  () => props.audio?.url,
+  (url) => {
+    if (!url || draft.value?.audio.url !== url) {
+      draft.value = undefined;
+      if (url && !busy.value) {
+        failed.value = false;
+        status.value = '';
+      }
+    }
+  },
+);
 
 const clipStats = computed(() => {
   const analysis = props.audio?.analysis;
@@ -87,8 +122,8 @@ async function analyze(audio: MixerAudio, encoded: string, signal: AbortSignal) 
 
 async function load(
   getAudio: (signal: AbortSignal) => Promise<{ blob: Blob; name: string }>,
-  options: { successNote?: string } = {},
-) {
+  options: { successNote?: string; denoiseSource?: { file: Blob; name: string } } = {},
+): Promise<boolean> {
   controller?.abort();
   setBusy(true);
   status.value = '正在读取并解码音频…';
@@ -123,7 +158,11 @@ async function load(
         // Keep original blob if native-rate re-encoding fails
       }
     }
-    if (disposed) return;
+    if (disposed) return false;
+    if (options.denoiseSource) {
+      originalBeforeDenoise.set(playableBlob, options.denoiseSource);
+      denoiseRev.value++;
+    }
     const audio: MixerAudio = { name, url: URL.createObjectURL(playableBlob), file: playableBlob, duration: decoded.duration };
     const encoded = encodeMonoWavBase64(samples, decoded.sampleRate);
     draft.value = { audio, encoded };
@@ -132,18 +171,63 @@ async function load(
     if (!disposed && options.successNote) {
       status.value = options.successNote;
     }
+    return !disposed;
   } catch (error) {
     if (!disposed && !controller.signal.aborted) {
       failed.value = true;
       status.value = error instanceof Error ? error.message : '音频载入失败';
     }
+    return false;
   } finally {
     if (!disposed) setBusy(false);
   }
 }
 
+async function toggleDenoise() {
+  if (busy.value || denoising.value || props.disabled || !props.audio?.file) return;
+  const savedOriginal = originalBeforeDenoise.get(props.audio.file);
+  if (savedOriginal) {
+    denoising.value = true;
+    try {
+      await load(
+        async () => ({ blob: savedOriginal.file, name: savedOriginal.name }),
+        { successNote: '已恢复降噪前原音并重新反演' },
+      );
+      denoiseRev.value++;
+    } finally {
+      denoising.value = false;
+    }
+    return;
+  }
+
+  const orig = { file: props.audio.file, name: props.audio.name };
+  denoising.value = true;
+  try {
+    await load(
+      async () => {
+        status.value = '正在使用 DPDFNet 48 kHz 降噪…';
+        const cleaned = await denoiseFile(orig.file, orig.name);
+        return { blob: cleaned, name: cleaned.name };
+      },
+      { successNote: '已完成 DPDFNet 降噪并重新反演', denoiseSource: orig },
+    );
+  } finally {
+    denoising.value = false;
+  }
+}
+
 async function retry() {
-  if (!draft.value || busy.value) return;
+  if (busy.value) return;
+  if (!draft.value) {
+    if (props.audio?.file) {
+      const savedOriginal = originalBeforeDenoise.get(props.audio.file);
+      await load(
+        async () => ({ blob: props.audio!.file, name: props.audio!.name }),
+        { denoiseSource: savedOriginal },
+      );
+    }
+    return;
+  }
   controller?.abort();
   setBusy(true);
   failed.value = false;
@@ -164,6 +248,27 @@ function chooseFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = '';
+  if (file) void load(async () => ({ blob: file, name: file.name }));
+}
+
+function onDragOver(ev: DragEvent) {
+  if (busy.value || props.disabled) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+  dragOver.value = true;
+}
+
+function onDragLeave(ev: DragEvent) {
+  const host = ev.currentTarget as HTMLElement | null;
+  if (host && ev.relatedTarget instanceof Node && host.contains(ev.relatedTarget)) return;
+  dragOver.value = false;
+}
+
+function onDrop(ev: DragEvent) {
+  ev.preventDefault();
+  dragOver.value = false;
+  if (busy.value || props.disabled) return;
+  const file = ev.dataTransfer?.files?.[0];
   if (file) void load(async () => ({ blob: file, name: file.name }));
 }
 
@@ -223,8 +328,12 @@ async function toggleRecording() {
   }
 }
 
-async function loadExternalBlob(blob: Blob, name: string) {
-  await load(async () => ({ blob, name }));
+async function loadExternalBlob(blob: Blob, name: string): Promise<boolean> {
+  return load(async () => ({ blob, name }));
+}
+
+function pausePlayer() {
+  playerRef.value?.pause();
 }
 
 onBeforeUnmount(() => {
@@ -239,11 +348,18 @@ onBeforeUnmount(() => {
   }
 });
 
-defineExpose({ loadExternalBlob, retry });
+defineExpose({ loadExternalBlob, retry, pausePlayer });
 </script>
 
 <template>
-  <section class="mx-input" :class="{ compact }" :aria-label="label">
+  <section
+    class="mx-input"
+    :class="{ compact, 'is-dragover': dragOver }"
+    :aria-label="label"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
     <div v-if="!compact && (label || roleBadge)" class="mx-in-head">
       <strong>{{ label }}</strong>
       <span v-if="roleBadge" class="mx-badge" :class="`tone-${badgeTone}`">{{ roleBadge }}</span>
@@ -267,15 +383,44 @@ defineExpose({ loadExternalBlob, retry });
           <IconSvg v-else name="mic" :size="13" />
           <span>{{ recording ? `停止 ${formatAudioTime(recordElapsedSec)}` : compact ? '录音' : '麦克风录音' }}</span>
         </button>
+        <button
+          v-if="showDemoButton && !audio && !recording"
+          type="button"
+          class="btn sm mx-demo-trigger"
+          :disabled="busy || disabled || demoBusy"
+          title="载入内置示例语音快速体验"
+          @click="emit('load-demo')"
+        >
+          <IconSvg name="sparkles" :size="12" />
+          <span>{{ demoBusy ? '载入中…' : '示例' }}</span>
+        </button>
       </div>
     </div>
 
-    <div class="mx-clip-well">
+    <div class="mx-clip-well" :class="{ 'is-dragover': dragOver }">
       <div class="mx-clip-meta-row">
         <span class="mx-clip-name" :class="{ failed, muted: !audio && !failed }" :title="audio?.name || status">
-          {{ failed ? status : audio?.name || status || '支持 0.04–15 秒 WAV / FLAC 音频或现场录音' }}
+          {{
+            dragOver
+              ? '松开鼠标即可载入音频文件'
+              : failed
+                ? status
+                : audio?.name || status || '支持拖入或上传 0.04–15 秒 WAV / FLAC 音频'
+          }}
         </span>
         <div class="mx-clip-tools">
+          <button
+            v-if="audio?.file && !disabled && (!busy || denoising)"
+            type="button"
+            class="btn xs"
+            :class="{ active: denoised }"
+            :disabled="busy || denoising"
+            :title="denoised ? '恢复降噪前的原始音频并重新反演' : '使用本地 DPDFNet 48 kHz 降噪并重新反演'"
+            @click="toggleDenoise"
+          >
+            <IconSvg name="sparkles" :size="11" />
+            <span>{{ denoising ? '降噪中…' : denoised ? '恢复原音' : '降噪' }}</span>
+          </button>
           <button
             v-if="showPrepButton && audio && !busy && !disabled"
             type="button"
@@ -288,7 +433,7 @@ defineExpose({ loadExternalBlob, retry });
             <span>{{ annotationCount > 0 ? `裁剪与标注 · ${annotationCount}` : '裁剪与标注' }}</span>
           </button>
           <button
-            v-if="draft && !busy && !disabled"
+            v-if="(draft || audio?.file) && !busy && !disabled"
             type="button"
             class="btn xs icon-only"
             title="按当前推理设备重新反演"
@@ -305,13 +450,16 @@ defineExpose({ loadExternalBlob, retry });
       </div>
 
       <MixerAudioPlayer
+        v-if="!hidePlayer"
+        ref="playerRef"
         :src="audio?.url ?? null"
         :label="label"
         :duration-hint="audio?.analysis?.dur_sec ?? audio?.duration ?? 0"
         :peaks="audio?.analysis?.waveform_peaks ?? []"
-        placeholder="尚未加载音频，请上传文件或现场录音"
+        placeholder="尚未加载音频，请拖入、上传或现场录音"
         :disabled="busy"
         @playhead="emit('playhead', $event)"
+        @playing="emit('playing', $event)"
       />
     </div>
   </section>
@@ -356,6 +504,11 @@ defineExpose({ loadExternalBlob, retry });
   justify-content: center;
 }
 
+.mx-in-btns .mx-demo-trigger {
+  flex: 0 0 auto;
+  padding-inline: 9px;
+}
+
 .mx-clip-well {
   display: flex;
   flex-direction: column;
@@ -364,6 +517,13 @@ defineExpose({ loadExternalBlob, retry });
   border-radius: var(--r-ctrl);
   background: color-mix(in srgb, var(--sidebar) 46%, transparent);
   border: var(--border-w, 1px) solid color-mix(in srgb, var(--panel-border) 82%, transparent);
+  transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.mx-clip-well.is-dragover {
+  border-color: var(--accent);
+  border-style: dashed;
+  background: color-mix(in srgb, var(--selected) 68%, var(--panel));
 }
 
 .mx-clip-meta-row {

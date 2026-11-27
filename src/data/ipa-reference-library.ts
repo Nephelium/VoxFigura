@@ -28,14 +28,14 @@ export const ipaReferenceUrl = (
 };
 
 export async function fetchIpaReferences(): Promise<IpaReference[]> {
-  const response = await fetch('/api/models/ipa-references/index', { signal: AbortSignal.timeout(4000) });
-  if (!response.ok) return [];
+  const response = await fetch('/api/models/ipa-references/index', { signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`实录索引请求失败 (HTTP ${response.status})`);
   const data = await response.json() as { records?: IpaReference[] };
   return data.records ?? [];
 }
 
 export async function fetchIpaReferenceTrajectory(reference: IpaReference): Promise<{ animation: M27TrajectoryAnim; m27_50hz_pa: number[][] }> {
-  const response = await fetch(ipaReferenceUrl(reference.id, 'animation'), { signal: AbortSignal.timeout(4000) });
+  const response = await fetch(ipaReferenceUrl(reference.id, 'animation'), { signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new Error('未能载入该音标的重建轨迹');
   return await response.json() as { animation: M27TrajectoryAnim; m27_50hz_pa: number[][] };
 }

@@ -1,9 +1,10 @@
 /**
- * Comprehensive Model Training Technical Report, Corpus Inventory, Tensor Contracts & Verified Benchmarks.
- * Single source of truth for `ModelReportView.vue`, `AboutView.vue`, and `SettingsView.vue`.
+ * VoxFigura Core Batch-2 Model Training Technical Report, Architecture Specs,
+ * 27D Physical Control Space, 32D IPA Feature System, Expanded Corpus Inventory & ONNX Contracts.
+ * Single source of truth for `ModelReportView.vue`, `SettingsView.vue`, and `AboutView.vue`.
  *
- * All metrics, step counts, corpus statistics, and tensor shapes are verified directly against
- * training run logs and `engine/model_registry_runtime.py`.
+ * All metrics, layer counts, corpus counts, and tensor contracts are verified directly against
+ * Batch-2 training summaries (`F:/TensorTract3_Train/runs/`) and `engine/model_registry_runtime.py`.
  */
 
 import { APP_BRAND_NAME } from './app-branding';
@@ -18,63 +19,59 @@ export interface LocalModelSpec {
   cpuLatencyMs: number;
   trainSteps: string;
   bestMetric: string;
+  optionalSlot?: boolean;
 }
 
+/**
+ * Default 8-model local pure-ONNX runtime matrix.
+ * `Vox2Tract-Lite` now mounts the unified `Vox2TractAlign v4` (vocal tract + 7-head alignment),
+ * so standalone `Vox2Align-Lite v2` is hidden & unloaded by default (kept in OPTIONAL_LOCAL_MODEL_SPECS
+ * for users who train custom aligners for other languages or dialects).
+ */
 export const LOCAL_MODEL_SPECS: readonly LocalModelSpec[] = [
   {
     name: 'Vox2Tract-Lite',
-    paramsM: 7.64,
-    sizeMb: 14.75,
+    paramsM: 9.40,
+    sizeMb: 18.15,
     precision: 'ONNX',
-    role: '16 kHz 语音反演为 50 Hz 27 维声道与声门动态轨迹',
-    pipelineStage: '声学反演主干',
-    cpuLatencyMs: 80.2,
-    trainSteps: '55,000 步（132.3 min）',
-    bestMetric: '自然 T17 PCC 0.9102 · R21 L24 0.8235',
+    role: '16 kHz 语音单次前向联合反演 50 Hz 27 维声道声门轨迹与中英双语音素对齐/静音门控',
+    pipelineStage: '联合反演与对齐',
+    cpuLatencyMs: 24.3,
+    trainSteps: '飞轮精调 10,000 步 / best @8k（56.4 min）',
+    bestMetric: 'T17 PCC 0.9108 · 中/英 ≤20ms 93.0% / 94.9% · Mask F1 0.989',
   },
   {
-    name: 'Vox2Align-Lite v2',
-    paramsM: 4.33,
-    sizeMb: 8.37,
+    name: 'Tract2Vox-Lite',
+    paramsM: 14.39,
+    sizeMb: 27.56,
     precision: 'ONNX',
-    role: '按参考文本或识别结果精准定位音节与音素边界及静音门控',
-    pipelineStage: '双语强制对齐',
-    cpuLatencyMs: 41.4,
-    trainSteps: '20,000 步（66.9 min）',
-    bestMetric: '中/英 ≤20ms 边界 93.7% / 95.5% · Mask F1 0.989',
+    role: '27 维声道声门轨迹与 512 维声纹联合驱动的高保真神经声码器（默认 Large v2.1，可选 3.73M Lite v3）',
+    pipelineStage: '神经声码器',
+    cpuLatencyMs: 238.4,
+    trainSteps: 'Large v2.1 13k+4k 飞轮精调（43.8 min）',
+    bestMetric: 'L24 0.8926 · L6 0.7910 · S1 闭环 L24 0.8737（Lite v3 50 句 ASR 7.18%）',
+  },
+  {
+    name: 'Vox2Spk-Lite',
+    paramsM: 4.60,
+    sizeMb: 8.82,
+    precision: 'ONNX',
+    role: '跨音域高区分度 512 维说话人声纹编码器（覆盖常规人声与女高音/戏剧独唱）',
+    pipelineStage: '音色声纹编码',
+    cpuLatencyMs: 4.3,
+    trainSteps: 'v2 18k + v2.1 区分度精调 7k / best @4.2k（13.5 min）',
+    bestMetric: '常规 Teacher Cos 0.9422 · 女声 Gap 0.3531 · 165 Hz 换声 Cos 0.8013',
   },
   {
     name: 'IPA2Tract-Lite',
     paramsM: 4.23,
     sizeMb: 8.18,
     precision: 'ONNX',
-    role: '音标关键帧之间的连续协同发音构音轨迹残差规划',
+    role: '基于 32 维窄标 IPA 特征与 293 键构型库的连续协同发音动态声道残差规划',
     pipelineStage: '协同构音规划',
-    cpuLatencyMs: 64.4,
-    trainSteps: '合成预热 15k + 自然扩展 30k',
-    bestMetric: '较基线降误差 35.9% · EMA LD 0.6956',
-  },
-  {
-    name: 'Tract2Vox-Lite',
-    paramsM: 3.72,
-    sizeMb: 7.19,
-    precision: 'ONNX',
-    role: '27 维声道轨迹与 512 维声纹联合驱动的高保真神经声码器',
-    pipelineStage: '神经声码器',
-    cpuLatencyMs: 149.0,
-    trainSteps: '21,000 步 / best @17,000（45.3 min）',
-    bestMetric: 'val_score 0.0626 · 8 句 L24 0.8478 / Spk 0.8533',
-  },
-  {
-    name: 'Vox2Spk-Lite',
-    paramsM: 2.90,
-    sizeMb: 5.57,
-    precision: 'ONNX',
-    role: '从参考录音提取跨语种解耦的 512 维说话人声纹表征',
-    pipelineStage: '音色声纹编码',
-    cpuLatencyMs: 12.3,
-    trainSteps: '30,000 步（12.4 min）',
-    bestMetric: 'Teacher Cos 0.9172 · 类间间隙 0.3546',
+    cpuLatencyMs: 10.1,
+    trainSteps: 'Stage-2 v4 32D 联合精调 8,000 步（35.4 min）',
+    bestMetric: '较基线降误差 43.4%（宽域 50.7%）· EMA LD 0.7013 · 零泄漏 0.0',
   },
   {
     name: 'DPDFNet',
@@ -85,18 +82,18 @@ export const LOCAL_MODEL_SPECS: readonly LocalModelSpec[] = [
     pipelineStage: '音频前端降噪',
     cpuLatencyMs: 18.0,
     trainSteps: '预训练开源 ONNX',
-    bestMetric: '48 kHz 高解析实时流式降噪',
+    bestMetric: '48 kHz 高解析流式降噪，保护高频擦音细节',
   },
   {
     name: 'Text2Prosody-Lite',
     paramsM: 1.98,
     sizeMb: 3.88,
     precision: 'ONNX',
-    role: '普通话与英语文本的音素时长、相对半音 F0 轮廓及停顿预测',
-    pipelineStage: '文本韵律预测',
-    cpuLatencyMs: 18.5,
-    trainSteps: '18,000 步 / best @7,500（19.3 min）',
-    bestMetric: '中/英时长 MAE 22.9 / 17.4 ms · F0 MAE 1.20 st',
+    role: '普通话、英语、中英混排与任意手写 [IPA] 的音素时长、相对半音 F0 轮廓及停顿预测',
+    pipelineStage: '多语与 IPA 韵律',
+    cpuLatencyMs: 1.5,
+    trainSteps: 'Stage-2 v4 32D 联合精调 8,000 步 / best @2.4k',
+    bestMetric: '中/英/IPA 时长 MAE 22.6 / 17.3 / 21.4 ms · F0 PCC 0.779',
   },
   {
     name: 'Tract2Area-Proxy',
@@ -105,7 +102,7 @@ export const LOCAL_MODEL_SPECS: readonly LocalModelSpec[] = [
     precision: 'ONNX',
     role: '关键帧规划阶段的可微 6 维声道关键区面积代理（全口腔、双唇、舌冠、舌背、咽腔最小截面积与腭咽口面积）',
     pipelineStage: '可微物理守卫',
-    cpuLatencyMs: 1.8,
+    cpuLatencyMs: 0.4,
     trainSteps: '25 epochs / 300k 帧',
     bestMetric: '6 维关键区面积 MAE 0.0478 cm²',
   },
@@ -114,186 +111,307 @@ export const LOCAL_MODEL_SPECS: readonly LocalModelSpec[] = [
     paramsM: 0.03,
     sizeMb: 0.13,
     precision: 'ONNX',
-    role: '超轻量低延迟实测基频轨迹提取（40–600 Hz）与清浊音判别',
+    role: '超轻量低延迟实测基频轨迹提取（46.875–2093.75 Hz）与清浊音判别',
     pipelineStage: '基频提取前端',
     cpuLatencyMs: 4.2,
     trainSteps: '预训练开源 ONNX 0.3.0',
-    bestMetric: '50 Hz 严格对齐 · 超轻 29.9K 参数',
+    bestMetric: '50 Hz 锁相 · 29.9K 参数宽音域提取',
+  },
+] as const;
+
+/** Optional standalone aligner kept hidden & unloaded by default when unified Vox2TractAlign v4 is active. */
+export const OPTIONAL_LOCAL_MODEL_SPECS: readonly LocalModelSpec[] = [
+  {
+    name: 'Vox2Align-Lite v2',
+    paramsM: 4.33,
+    sizeMb: 8.37,
+    precision: 'ONNX',
+    role: '可选独立对齐槽位：常规中英已并入 Vox2Tract-Lite 联合模型，本槽位默认隐藏且不装载，保留供用户针对其他语种或方言自行训练并挂载独立对齐模型',
+    pipelineStage: '方言/多语可选对齐',
+    cpuLatencyMs: 13.5,
+    trainSteps: '独立对齐兼容槽位（可自训微调）',
+    bestMetric: '支持 65 类音素 + 415 音节 CTC，外置挂载后自动接管对齐',
+    optionalSlot: true,
   },
 ] as const;
 
 export const LOCAL_MODEL_TOTALS = {
   count: LOCAL_MODEL_SPECS.length,
-  totalParamsText: '27.64 M',
-  totalSizeText: '58.96 MiB',
+  totalParamsText: '37.44 M',
+  totalSizeText: '77.61 MiB',
 } as const;
 
 export const MODEL_TRAINING_REPORT_META = {
-  version: '技术报告 · 2026-11-25',
-  suiteName: 'VoxFigura Core 物理—神经模型体系（旗舰教师链 + 9 项端侧纯 ONNX 矩阵）',
-  flagshipLineage:
-    '旗舰教师基座：Vox2Tract-Large (22.62M) · Vox2Tract-PR (3.21M) · Tract2Feat-Proxy (14.88M) · Tract2Vox-Large (14.36M)',
+  version: '技术报告 · Batch-2 (2026-11-27)',
+  suiteName: 'VoxFigura Core 第二代物理—神经模型体系（8 项端侧纯 ONNX 矩阵）',
   geometryStandard:
-    'VocalTractLab 2.4（原生 R21 声管管线）/ JD2 成年男声 3D 解剖几何（65 截面面积函数 / 200 Hz 物理管段 / 50 Hz 神经控制 / 48 kHz 整数采样输出；Tract2Area-Proxy 输出 6 个关键区汇总面积）',
+    'VocalTractLab 2.4（原生 R21 声管管线）/ JD2 成年男声 3D 解剖几何（65 截面面积函数 · 200 Hz 物理管段 · 50 Hz 神经控制 · 48 kHz 整数采样输出；宽域基频平滑外延至 20–1200 Hz）',
   hardwareEnv:
-    '单卡 NVIDIA GeForce RTX 5090 Laptop GPU (24 GB VRAM) · Python 3.11.9 · PyTorch 2.7.1+cu128 · 推理端纯 ONNX Runtime 1.32.0（零 PyTorch 运行时依赖）',
+    '单卡 NVIDIA GeForce RTX 5090 Laptop GPU (24 GB VRAM) · Python 3.11 · PyTorch 2.7+cu128 · 推理端纯 ONNX Runtime（零 PyTorch 运行时依赖）',
   cpuBenchmarkProtocol:
-    '端到端评测折线（Vox2Tract-Lite 80.2 ms、Tract2Vox-Lite 149.0 ms 等）取自 8 段评测音频（2.22–5.00 s，均值 3.06 s，CPU 4 线程含前端特征提取与解码）的算术均值，其中 DPDFNet (18.0 ms) 按 48 kHz 流式逐帧 STFT 增强实测，SwiftF0 (4.2 ms) 为评测切片平均耗时。纯 ONNX Runtime 1.32.0（CPUExecutionProvider，intra_op=4 / inter_op=1，统一固定 3.0 s / 150 帧输入，预热 5 次取 20 次均值）算子图前向实测为：Vox2Tract-Lite 22.5 ms、Vox2Align-Lite v2 13.5 ms、IPA2Tract-Lite 15.0 ms、Tract2Vox-Lite 126.9 ms、Vox2Spk-Lite 6.0 ms、Text2Prosody-Lite 1.1 ms、Tract2Area-Proxy 0.41 ms、SwiftF0 9.7 ms。',
+    '纯 ONNX Runtime（CPUExecutionProvider，intra_op=4 / inter_op=1，统一 3.0 s / 150 帧或 40 音素输入）算子图前向实测：Vox2TractAlign v4 24.3 ms、Tract2Vox-Large v2.1 238.4 ms（轻量档 Lite v3 为 152.5 ms）、Vox2Spk-v2.1 4.3 ms、IPA2Tract-Lite v4 10.1 ms、Text2Prosody-Lite v4 1.5 ms、Tract2Area-Proxy 0.4 ms、SwiftF0 4.2 ms、DPDFNet 48 kHz 流式 18.0 ms。',
   updatedNote:
-    '本文档收录 14 项关联模型（4 项旗舰教师与代理 + 7 项自研端侧 ONNX + 2 项开源前端 ONNX + 1 项 22 维历史归档）的架构演进、语料清单、实测收敛曲线、训练复盘、二次训练方法以及本地 ONNX 热插拔契约。',
+    '本报告聚焦第二代（Batch-2）最新训练成果：通过联合反演对齐架构将默认运行矩阵精简为 8 个纯 ONNX 模型，引入 32 维窄标 IPA 特征与 293 键构型库，大幅扩充情感、戏曲、歌唱与宽音域真实语料，并给出完整 CNN/Conformer/RNN 架构拆解与最新评测数据。',
 } as const;
 
 export interface ModelZooRow {
   name: string;
-  tier: '旗舰教师' | '训练代理' | '端侧 ONNX' | '前端开源' | '历史基线';
+  tier: '核心 8 模' | '轻量替代' | '方言扩展' | '前端开源';
   arch: string;
   params: string;
   weightSize: string;
   schedule: string;
-  status: '已验证上线' | '旗舰教师' | '历史归档';
   metrics: string;
 }
 
 export const FULL_MODEL_ZOO: readonly ModelZooRow[] = [
   {
-    name: 'Vox2Tract-Large',
-    tier: '旗舰教师',
-    arch: '双分支 Conformer + BiLSTM（声道 17 维 / 声门 8 维解耦）',
-    params: '22.62 M',
-    weightSize: '86.50 MB (FP32)',
-    schedule: '合成预热 45k → 锚定微调 32k（best @26.5k）',
-    status: '旗舰教师',
-    metrics: 'T17 PCC 0.8200 · G8 PCC 0.9040 · VTL 物理重合成 L24 0.8707',
+    name: 'Vox2TractAlign v4 (Vox2Tract-Lite)',
+    tier: '核心 8 模',
+    arch: '6×Conformer-192 + 声道 BiLSTM + 声门 2×ConvNeXt1D/BiLSTM + 高频 Mel 门控 + BiGRU 7 头对齐',
+    params: '9.40 M',
+    weightSize: '18.15 MiB (FP16s)',
+    schedule: 'v3 35k → v4 飞轮 10k（56.4 min）',
+    metrics: '自然 T17 PCC 0.9108 · 宽域 G8 0.9200 · 中/英 ≤20ms 93.0%/94.9% · Mask F1 0.989 · CPU 24.3 ms',
   },
   {
-    name: 'Vox2Tract-PR',
-    tier: '旗舰教师',
-    arch: '25 层加权 WavLM + 3 VQ + 8×ConvNeXt + BiLSTM 肺压编码器',
-    params: '3.21 M',
-    weightSize: '12.28 MB (FP32)',
-    schedule: '30,000 步（best @26.5k）',
-    status: '旗舰教师',
-    metrics: 'val_loss 0.009636 · PR PCC 0.9811',
+    name: 'Tract2Vox-Large v2.1 (Tract2Vox-Lite)',
+    tier: '核心 8 模',
+    arch: '纯 CNN Glottis-NSF v4（ch=512，float64 连续相位 12 谐波 + 1/2&1/3 亚谐波 + 嘎裂脉冲 + 分级 FiLM）',
+    params: '14.39 M',
+    weightSize: '27.56 MiB (FP16s)',
+    schedule: 'v2 13k → v2.1 飞轮 4k（43.8 min）',
+    metrics: 'L24 0.8926 · L6 0.7910 · S1 闭环 L24 0.8737 · Spk 0.8879 · CPU 238.4 ms',
   },
   {
-    name: 'Tract2Feat-Proxy',
-    tier: '训练代理',
-    arch: '8 层 Conformer-256 双头声学代理（预测 L24 + L6）',
-    params: '14.88 M',
-    weightSize: '56.88 MB (FP32)',
-    schedule: '50,000 步（best @43.5k，270h 联合）',
-    status: '旗舰教师',
-    metrics: 'Cos24 0.8809 · Cos6 0.8408（作为感知蒸馏教师）',
+    name: 'Vox2Spk-v2.1 (Vox2Spk-Lite)',
+    tier: '核心 8 模',
+    arch: '纯 CNN ECAPA-TDNN（C=512, mfa=640, 3×SE-Res2Block + MFA + ASP → 512D L2 声纹）',
+    params: '4.60 M',
+    weightSize: '8.82 MiB (FP16s)',
+    schedule: 'v2 18k → v2.1 区分度 7k（13.5 min）',
+    metrics: '常规 Cos 0.9422 · 女声 Gap 0.3531 / Top1 46.2% · 165 Hz 换声 Cos 0.8013 · CPU 4.3 ms',
   },
   {
-    name: 'Tract2Vox-Large',
-    tier: '旗舰教师',
-    arch: 'Glottis-NSF v3 神经声码器（ch=512，12 谐波 + 0.5F0 次谐波）',
-    params: '14.36 M (G) + 22.61 M (D)',
-    weightSize: '54.87 MB (FP32 G)',
-    schedule: '主训 28k + 低 LR 余弦精调 4k（best @29k）',
-    status: '旗舰教师',
-    metrics: 'mel_l1 0.7176 · L24 0.8895 · L6 0.7918 · Spk 0.8855',
-  },
-  {
-    name: 'Vox2Tract-Lite',
-    tier: '端侧 ONNX',
-    arch: '167 维纯声学前端 + 6 层 Conformer-192 + 三路解耦头',
-    params: '7.64 M',
-    weightSize: '14.75 MB (ONNX) / 7.56 MB (INT8)',
-    schedule: '55,000 步 / 132.3 min（65% 蒸馏 + 35% 180h）',
-    status: '已验证上线',
-    metrics: '未见自然 T17 0.9102 / G8 0.8420 · 8 句端到端均值 80.2 ms (RTF 0.029) · ORT 3s 22.5 ms',
-  },
-  {
-    name: 'Vox2Align-Lite v2',
-    tier: '端侧 ONNX',
-    arch: '4 层 Conformer-192 + BiGRU-144（输入 163 维 80-Mel+Δ+能量，图内拼 80-ΔΔ 为 243 维 + 7 输出头）',
-    params: '4.33 M',
-    weightSize: '8.37 MB (ONNX) / 4.31 MB (INT8)',
-    schedule: '20,000 步 / 66.9 min（70,000+ 双语朗读与歌唱）',
-    status: '已验证上线',
-    metrics: '中/英 ≤20ms 边界 93.66% / 95.47% · 中文音节准 90.71% · 全链路 41.4 ms (ORT 3s 13.5 ms)',
-  },
-  {
-    name: 'IPA2Tract-Lite',
-    tier: '端侧 ONNX',
-    arch: '111 维条件 + 4 层 Conformer-192 + BiGRU + 零初始化双残差',
+    name: 'IPA2Tract-Lite v4 (32D)',
+    tier: '核心 8 模',
+    arch: '121D 窄标条件 + Conv1d + 4×Conformer-192 + BiGRU-384 + 零初始化双残差 + qTA 基线',
     params: '4.23 M',
-    weightSize: '8.18 MB (ONNX) / 4.17 MB (INT8)',
-    schedule: '合成预热 15k → 自然扩展 30k（best @15k）',
-    status: '已验证上线',
-    metrics: 'val_loss 0.2420 · 零泄漏 0.0 · EMA LD 0.6956 / TTX 0.6743 · 全链路 64.4 ms (ORT 3s 15.0 ms)',
+    weightSize: '8.18 MiB (FP16s)',
+    schedule: 'Stage-2 v4 联合 8k（35.4 min）',
+    metrics: 'Clean 降误差 43.4% / 宽域 50.7% · Dec L24 0.9035 · EMA LD 0.7013 · 零泄漏 0.0 · CPU 10.1 ms',
   },
   {
-    name: 'Tract2Vox-Lite',
-    tier: '端侧 ONNX',
-    arch: '轻量 Glottis-NSF v3 神经声码器（ch=256，cond=128，去 weight_norm）',
-    params: '3.72 M',
-    weightSize: '7.19 MB (ONNX) / 3.65 MB (INT8)',
-    schedule: '21,000 步 / 45.3 min（best @17,000，含教师 Mel 蒸馏）',
-    status: '已验证上线',
-    metrics: 'val_score 0.0626 · 8 句 Lite L24 0.8478 / Spk 0.8533 · 8 句均值 149 ms (ORT 3s 126.9 ms)',
-  },
-  {
-    name: 'Vox2Spk-Lite',
-    tier: '端侧 ONNX',
-    arch: '80-Mel CMN + 3×ECAPA SE-Res2Block + ASP → 512 维声纹编码器',
-    params: '2.90 M',
-    weightSize: '5.57 MB (ONNX) / 2.91 MB (INT8)',
-    schedule: '30,000 步 / 12.4 min（PK 采样 32×4，全内存缓存）',
-    status: '已验证上线',
-    metrics: 'Teacher Cos 0.9172 · 同人 0.9394 / 异人 0.5848 · 全链路 12.3 ms (ORT 3s 6.0 ms)',
-  },
-  {
-    name: 'Text2Prosody-Lite',
-    tier: '端侧 ONNX',
-    arch: '4 层 Conformer-128 + BiGRU（22 维音素特征 + 10 维结构位置 + 4 离散嵌入）',
+    name: 'Text2Prosody-Lite v4 (32D)',
+    tier: '核心 8 模',
+    arch: '32D IPA 特征 + 10D 结构 + 4 嵌入 → 4×Conformer-128 + BiGRU-128 → 时长串联停顿/F0 头',
     params: '1.98 M',
-    weightSize: '3.88 MB (ONNX) / 2.00 MB (INT8)',
-    schedule: '18,000 步 / 19.3 min（best @7,500，中英混排拼接增强）',
-    status: '已验证上线',
-    metrics: '中/英时长 MAE 22.94 / 17.37 ms · F0 PCC 0.774 / 0.678 · 全链路 18.5 ms (ORT 1.1 ms)',
+    weightSize: '3.88 MiB (FP16s)',
+    schedule: 'Stage-2 v4 联合 8k / best @2.4k',
+    metrics: 'ZH 22.6 ms / EN 17.3 ms / CS 22.7 ms / 任意 [IPA] 21.4 ms · F0 PCC 0.779 · CPU 1.5 ms',
   },
   {
     name: 'Tract2Area-Proxy',
-    tier: '端侧 ONNX',
-    arch: '3 层 ResMLP-192（输出全口腔/双唇/舌冠/舌背/咽腔最小面积与腭咽口面积共 6 维）',
+    tier: '核心 8 模',
+    arch: '3 层残差 MLP（17D 声道 → 6 关键区截面积 cm²，8 层 Linear）',
     params: '0.23 M',
-    weightSize: '0.88 MB (ONNX FP32)',
-    schedule: '25 epochs / 300,000 JD2 采样帧',
-    status: '已验证上线',
-    metrics: '6 维关键区面积 val_mae 0.04776 cm²（可微闭塞与开口物理守卫 · ORT 3s 0.41 ms）',
+    weightSize: '0.88 MiB (FP32)',
+    schedule: '25 epochs / 300k JD2 帧',
+    metrics: '6 维关键区面积 MAE 0.0478 cm² · 闭塞/穿模物理守卫 · CPU 0.4 ms',
   },
   {
     name: 'DPDFNet',
     tier: '前端开源',
-    arch: '48 kHz 高解析流式频谱增强网络（有状态逐帧 STFT 滤波）',
+    arch: '48 kHz 有状态流式复数频谱增强网络',
     params: '2.58 M',
-    weightSize: '10.01 MB (ONNX)',
-    schedule: '预训练开源权重',
-    status: '已验证上线',
-    metrics: '保持 48 kHz 采样率实时去底噪，保护高频擦音纹理',
+    weightSize: '10.01 MiB (FP32)',
+    schedule: '预训练开源 ONNX',
+    metrics: '48 kHz 实时宽带去噪，完整保留高频擦音与爆破瞬态',
   },
   {
     name: 'SwiftF0',
     tier: '前端开源',
     arch: '超轻量单帧卷积基频与置信度估计器（0.3.0）',
     params: '0.03 M',
-    weightSize: '0.13 MB (ONNX)',
-    schedule: '预训练开源权重',
-    status: '已验证上线',
-    metrics: '40–600 Hz 全域覆盖，与 50 Hz 反演网格严格锁相',
+    weightSize: '0.13 MiB (FP32)',
+    schedule: '预训练开源 ONNX',
+    metrics: '46.875–2093.75 Hz 宽音域实测基频，50 Hz 严格锁相 · CPU 4.2 ms',
   },
   {
-    name: 'Vox2Tract-Legacy (22D)',
-    tier: '历史基线',
-    arch: '早期 22 维反演基线（9.01M）+ 轻量版（7.02M）',
-    params: '9.01 M / 7.02 M',
-    weightSize: '13.55 MB (FP16 轻量归档)',
-    schedule: '合成 60k → 自然 26k（流式 242,556 条 / 278h）',
-    status: '历史归档',
-    metrics: '验证冻结解码器感知蒸馏将 L24 从 0.7642 拉升至 0.7976',
+    name: 'Tract2Vox-Lite v3（可选极速档）',
+    tier: '轻量替代',
+    arch: '纯 CNN Glottis-NSF v4（ch=256，由 Large v2 蒸馏 12k / best @6k）',
+    params: '3.73 M',
+    weightSize: '7.23 MiB (FP16s)',
+    schedule: '12,000 步蒸馏 / best @6k（132.4 min）',
+    metrics: '50 句 Whisper ASR 中英均值 7.18%（全场最低）· 236 条金标 L6 0.7598 · CPU 152.5 ms',
+  },
+  {
+    name: 'Vox2Align-Lite v2（可选方言槽位）',
+    tier: '方言扩展',
+    arch: '243D Mel+Δ+ΔΔ → 4×Conformer-192 + BiGRU-144 → 7 路对齐头',
+    params: '4.33 M',
+    weightSize: '8.37 MiB (FP16s)',
+    schedule: '默认隐藏不装载 · 保留自训兼容',
+    metrics: '支持用户针对小语种或方言自行训练并挂载，外置生效后自动接管对齐',
+  },
+];
+
+export interface ModelArchLayerRow {
+  name: string;
+  stage: string;
+  params: string;
+  family: string;
+  cnn: string;
+  rnn: string;
+  attention: string;
+  linear: string;
+  highlight: string;
+}
+
+export const MODEL_ARCHITECTURE_LAYERS: readonly ModelArchLayerRow[] = [
+  {
+    name: 'Vox2TractAlign v4',
+    stage: '阶段 1 · 反演+对齐',
+    params: '9.40 M',
+    family: 'Conformer + BiLSTM + ConvNeXt + BiGRU',
+    cnn: '35 层 Conv1d',
+    rnn: '2 层 BiLSTM + 1 层 BiGRU',
+    attention: '7 层 ConformerBlock（6 共享 + 1 对齐）',
+    linear: '54 层',
+    highlight: '单次前向同时输出 27D 轨迹与 7 路对齐，高频 Mel 旁路护航清擦音边界',
+  },
+  {
+    name: 'Tract2Vox-Large v2.1 / Lite v3',
+    stage: '阶段 3 · 神经声码器',
+    params: '14.39 M / 3.73 M',
+    family: 'Glottis-NSF v4 + HiFi-GAN（纯 CNN）',
+    cnn: '4 层 ConvTranspose1d + 90 层 Conv1d',
+    rnn: '0（无 RNN）',
+    attention: '0（无 Attention）',
+    linear: '4 层',
+    highlight: 'float64 连续相位物理声源 + 320× 四级上采样 MRF + 音色/声门分级 FiLM',
+  },
+  {
+    name: 'Vox2Spk-v2.1',
+    stage: '独立解耦 · 声纹',
+    params: '4.60 M',
+    family: 'ECAPA-TDNN（纯 CNN + 统计池化）',
+    cnn: '25 层 Conv1d（C=512, mfa=640）',
+    rnn: '0（无 RNN）',
+    attention: '0（ASP 注意力统计池化）',
+    linear: '1 层',
+    highlight: '3×SE-Res2Block 多尺度空洞卷积 + 关系矩阵蒸馏与非对称负对排斥',
+  },
+  {
+    name: 'IPA2Tract-Lite v4',
+    stage: '阶段 2B · 协同构音',
+    params: '4.23 M',
+    family: '残差 Conformer + BiGRU',
+    cnn: '13 层 Conv1d',
+    rnn: '1 层 BiGRU',
+    attention: '4 层 ConformerBlock',
+    linear: '29 层',
+    highlight: '121D 窄标条件 + 零初始化双残差头 + qTA 物理基线（可调协同强度 alpha）',
+  },
+  {
+    name: 'Text2Prosody-Lite v4',
+    stage: '阶段 2A · 韵律预测',
+    params: '1.98 M',
+    family: 'Conformer + BiGRU',
+    cnn: '12 层 Conv1d',
+    rnn: '1 层 BiGRU',
+    attention: '4 层 ConformerBlock',
+    linear: '31 层',
+    highlight: '32D IPA 特征 + 时长预测串联停顿与 3 点相对半音 F0 头，支持 LANG_IPA=3',
+  },
+  {
+    name: 'Tract2Area-Proxy',
+    stage: '物理守卫 · 截面积',
+    params: '0.23 M',
+    family: '残差 MLP',
+    cnn: '0',
+    rnn: '0',
+    attention: '0',
+    linear: '8 层',
+    highlight: '冻结可微代理：17D 声道实时映射 6 区最小截面积，防止闭塞漏气与穿模',
+  },
+];
+
+export interface ModelArchCard {
+  id: string;
+  name: string;
+  badge: string;
+  summary: string;
+  blocks: Array<{ label: string; detail: string; accent?: boolean }>;
+  designNote: string;
+}
+
+export const MODEL_ARCHITECTURE_CARDS: readonly ModelArchCard[] = [
+  {
+    id: 'arch-v4',
+    name: 'Vox2TractAlign v4（联合声道反演 + 双语对齐）',
+    badge: '9.40 M · Conformer + BiLSTM + BiGRU',
+    summary: '共享主干单次前向输出 27 维声道声门轨迹与 7 路对齐头，免去双模型重复计算，3 s CPU 延迟 24.3 ms。',
+    blocks: [
+      { label: '50 Hz 前端 + 瞬态残差 Stem', detail: '163D (80 Mel + 80 Δ + 3 能量) + 3D VQ + 1D 宽域 F0，叠加 80D ΔΔ 零初始化残差 Conv1d' },
+      { label: '共享主干 · 6×ConformerBlock', detail: 'dim=192, heads=4, conv_k=31, ff_mult=4（Macaron FFN + 相对位置自注意力 + 门控深度卷积）', accent: true },
+      { label: '三路解耦物理分支', detail: '肺压 3 层 Conv1d → 声道 BiLSTM(192×2) 输出 T17 → 声门 2×ConvNeXt1D(k=15) + BiLSTM(128×2) 输出 G8' },
+      { label: '高频 Mel 旁路 + 对齐支路', detail: '243D Mel+Δ+ΔΔ 浅层 Conv1d 与声道先验门控融合 → 1×Conformer + BiGRU(144×2) → 7 路 Linear 对齐头' },
+    ],
+    designNote: 'CNN 抓毫秒级爆破瞬态，Conformer 抓数百毫秒协同发音，尾部 BiLSTM/BiGRU 保帧间平滑；高频 Mel 旁路避免平滑主干削钝 /f, s, ɕ/ 边界。',
+  },
+  {
+    id: 'arch-t2v',
+    name: 'Tract2Vox-Large v2.1 / Lite v3（声门感知 NSF 声码器）',
+    badge: '14.39 M / 3.73 M · 纯 CNN + 物理声源',
+    summary: '全系唯一无 RNN/无 Transformer 的纯 CNN + 物理激励混合声码器，4 级反卷积 320× 上采样至 16 kHz 波形。',
+    blocks: [
+      { label: 'GlottisAwareSourceModule v4', detail: 'float64 连续相位积分：12 阶动态谐波 + 1/2 与 1/3 亚谐波 + 相位锁定嘎裂脉冲 + 声门缝隙高通气噪', accent: true },
+      { label: '双条件编码与投影', detail: 'conv_pre(27→512/256) 拼接 512D 声纹投影；独立 glottis_enc 编码 10D 动态发声态' },
+      { label: '4 级上采样 + 多感受野 MRF', detail: 'ConvTranspose1d (×8, ×5, ×4, ×2) + 90 层 Conv1d MRF (k=3/7/11, d=1/3/5)，前两级音色 FiLM、后三级声门 FiLM' },
+      { label: '波形重建输出', detail: 'conv_post (k=7) + tanh 输出 16 kHz 单声道波形（密轨模式重采样至 48 kHz）' },
+    ],
+    designNote: '物理声源保证 20 Hz 嘎裂与 1200 Hz 超高音相位稳定不生电音；静态音色 FiLM 与逐帧声门 FiLM 分级解耦，互不干扰。',
+  },
+  {
+    id: 'arch-spk',
+    name: 'Vox2Spk-v2.1（高区分度跨音域声纹编码器）',
+    badge: '4.60 M · ECAPA-TDNN 纯 CNN',
+    summary: '对齐 WavLM-SV 512 维单位球面空间，引入关系矩阵蒸馏与非对称负对排斥，兼顾常规人声辨识度与女高音歌唱音色。',
+    blocks: [
+      { label: 'CMN 80-Mel 前端', detail: '16 kHz → 80 维 50 Hz Slaney Log-Mel，仅做均值倒谱归一化保留共振峰包络' },
+      { label: '3×SE-Res2Block 多尺度主干', detail: 'C=512, k=3, dilation=2/3/4, scale=4，分组残差卷积叠加 SE 通道注意力', accent: true },
+      { label: 'MFA + ASP 注意力统计池化', detail: '拼接 3 层输出聚合至 640D → 帧级注意力加权均值与标准差（1280D）' },
+      { label: '单位球面声纹投影', detail: 'Linear(1280→512) + BN + L2 归一化，输出 512 维说话人嵌入' },
+    ],
+    designNote: '在逐样本余弦对齐外叠加 Batch 相似度矩阵 MSE 与负对超额惩罚，防止不同说话人向球面均值坍缩。',
+  },
+  {
+    id: 'arch-ipa',
+    name: 'IPA2Tract-Lite v4（32D 窄标协同构音规划）',
+    badge: '4.23 M · 零初始化残差 Conformer + BiGRU',
+    summary: '在三阶临界阻尼目标逼近物理基线（qTA）之上预测自然协同发音残差，配套 293 键窄标构型库。',
+    blocks: [
+      { label: '121 维帧级条件输入', detail: 'x_base(26) + g_masked(26) + w_mask(26) + f0(1) + 相位(5) + 阻塞(4) + 32D IPA 特征 + has_phon(1)' },
+      { label: '局部卷积 + 4×Conformer + BiGRU', detail: 'Linear(121→192) + Conv1d(k=5) → 4×Conformer(dim=192, k=15) → BiGRU(192×2)', accent: true },
+      { label: '零初始化双残差头', detail: '声道头(17D) 与声源头(9D) 末层全零初始化；常规限幅 ±0.85，下颌 JA 限幅 ±0.35' },
+      { label: '物理合成输出与面积护栏', detail: 'x_hat = clamp(x_base + alpha · delta, -1, 1)；训练期挂冻结 Tract2Area-Proxy(0.23M) 监控 6 区截面积' },
+    ],
+    designNote: '未约束器官通道严格置零保证零上下文泄漏（max_abs_diff = 0.0）；alpha 可直接作为字正腔圆与流利协同的连续滑块。',
+  },
+  {
+    id: 'arch-pros',
+    name: 'Text2Prosody-Lite v4（多语与任意 IPA 韵律模型）',
+    badge: '1.98 M · Conformer + BiGRU',
+    summary: '无 LLM 依赖，CPU 1.5 ms/句统一预测普通话、英语、中英混排与任意无标调 [IPA] 的时长、停顿与相对半音基频。',
+    blocks: [
+      { label: '音素级多模态输入', detail: '32D 通用 IPA 特征 + 10D 韵律结构位置 + 4 离散嵌入（语种含 LANG_IPA=3 / 声调重音 / 标点 / 角色）' },
+      { label: '4×Conformer + 残差 BiGRU', detail: 'Linear(106→128) → 4×Conformer(dim=128, heads=4, k=7) → BiGRU(64×2) + 残差', accent: true },
+      { label: 'Head 1 · 音素时长预测', detail: '2 层 Linear(128→64→1) 输出相对 80 ms 的对数时长 log_dur' },
+      { label: '时长条件串联 Head 2 & Head 3', detail: '拼接预测时长(129D) → 停顿门控/时长头 + 3 点相对半音 [起,中,尾] 与浊音概率头' },
+    ],
+    designNote: '将预测时长作为条件喂给 F0 与停顿头，让音高曲线随音节长短自然展开；输出相对半音解耦男女高音，可锚定任意参考音色中位基频。',
   },
 ];
 
@@ -326,7 +444,7 @@ export const M27_PARAMETER_SPECS: readonly M27ParamSpec[] = [
   { idx: 14, code: 'TS1', group: '声道 17 维', min: '0.0', max: '1.0', unit: '相对值', norm: '线性 [-1,1]', meaning: '舌侧缘高度 1（控制边音与中央气流通道）' },
   { idx: 15, code: 'TS2', group: '声道 17 维', min: '0.0', max: '1.0', unit: '相对值', norm: '线性 [-1,1]', meaning: '舌侧缘高度 2' },
   { idx: 16, code: 'TS3', group: '声道 17 维', min: '-1.0', max: '1.0', unit: '相对值', norm: '线性 [-1,1]', meaning: '舌侧缘高度 3' },
-  { idx: 17, code: 'F0', group: '基频与肺压', min: '40.0', max: '600.0', unit: 'Hz', norm: '对数 ln(F0) [-1,1]', meaning: '声带振动基频（推理由 SwiftF0 给定，编辑范围 60–600 Hz）' },
+  { idx: 17, code: 'F0', group: '基频与肺压', min: '20', max: '1200+', unit: 'Hz', norm: '对数 ln(F0) 仿射（40/600 锚点平滑外延）', meaning: '声带振动基频（神经链路支持 20 Hz 嘎裂至 1200 Hz 超高音；VTL 物理声门保留 40–600 Hz）' },
   { idx: 18, code: 'PR', group: '基频与肺压', min: '0.0', max: '1600.0', unit: 'Pa', norm: '线性 [-1,1]', meaning: '声门下肺压（UI 统一用 Pa，原生 VTL 边界换算 0–16000 dPa）' },
   { idx: 19, code: 'XB', group: '声门 8 维', min: '-0.05', max: '0.30', unit: 'cm', norm: '线性 [-1,1]', meaning: '声带下缘静止位移（紧嗓负值，气声正值）' },
   { idx: 20, code: 'XT', group: '声门 8 维', min: '-0.05', max: '0.30', unit: 'cm', norm: '线性 [-1,1]', meaning: '声带上缘静止位移（控制声门聚合/发散角）' },
@@ -336,6 +454,51 @@ export const M27_PARAMETER_SPECS: readonly M27ParamSpec[] = [
   { idx: 24, code: 'PS', group: '声门 8 维', min: '-1.0', max: '1.0', unit: '相对值', norm: '线性 [-1,1]', meaning: '声门脉冲形状与开商特征（气声偏负，挤压偏正）' },
   { idx: 25, code: 'FL', group: '声门 8 维', min: '0.0', max: '100.0', unit: '%', norm: '线性 [-1,1]', meaning: '基频周期性抖动/微颤幅度（Flutter / Jitter）' },
   { idx: 26, code: 'SHIM', group: '声门 8 维', min: '0.0', max: '100.0', unit: '%', norm: '线性 [-1,1]', meaning: '周期振幅微扰（Shimmer，嘎裂声可达 50–100）' },
+];
+
+export interface Ipa32FeatureSpec {
+  idx: number;
+  key: string;
+  group: '基础类别 (3)' | '构音部位 (10)' | '构音方式 (8)' | '嗓音与元音 (5)' | '窄标扩展 (6)';
+  range: string;
+  examples: string;
+  meaning: string;
+}
+
+/** Exact 32-dim PanPhon-enhanced IPA feature vector (`PHON_FEAT_NAMES_32` in `kf_ipa_synth/phonetics.py`). */
+export const IPA32_FEATURE_SPECS: readonly Ipa32FeatureSpec[] = [
+  { idx: 0, key: 'is_sil', group: '基础类别 (3)', range: '0 / 1', examples: 'sil, pau', meaning: '静音或停顿边界标记' },
+  { idx: 1, key: 'is_vowel', group: '基础类别 (3)', range: '0..1', examples: '[i, a, u, ə, ɿ]', meaning: '元音与成音节响音核标记' },
+  { idx: 2, key: 'is_consonant', group: '基础类别 (3)', range: '0 / 1', examples: '[p, s, m, l, ɹ]', meaning: '辅音音段标记' },
+  { idx: 3, key: 'place_labial', group: '构音部位 (10)', range: '0..1', examples: '[p, b, m, f, w]', meaning: '双唇与唇齿等唇部构音' },
+  { idx: 4, key: 'place_labiodent', group: '构音部位 (10)', range: '0 / 1', examples: '[f, v, ɱ, ʋ]', meaning: '下唇贴上齿的唇齿构音' },
+  { idx: 5, key: 'place_coronal', group: '构音部位 (10)', range: '0..1', examples: '[t, s, n, l, ʃ]', meaning: '齿、齿龈、龈后与卷舌舌冠区' },
+  { idx: 6, key: 'place_retroflex', group: '构音部位 (10)', range: '0..1', examples: '[ʈ, ʂ, ʐ, ɻ, ɚ]', meaning: '卷舌与龈后儿化舌尖后卷程度' },
+  { idx: 7, key: 'place_palatal', group: '构音部位 (10)', range: '0..1', examples: '[tɕ, ɕ, c, ɲ, j]', meaning: '龈腭与硬腭舌面抬升部位' },
+  { idx: 8, key: 'place_velar', group: '构音部位 (10)', range: '0..1', examples: '[k, ɡ, ŋ, x, ɫ]', meaning: '软腭与软腭化次要构音部位' },
+  { idx: 9, key: 'place_glottal', group: '构音部位 (10)', range: '0..1', examples: '[ʔ, h, ɦ]', meaning: '声门与喉部构音部位' },
+  { idx: 10, key: 'manner_stop', group: '构音方式 (8)', range: '0..1', examples: '[p, t, k, ʔ] (塞擦 0.5)', meaning: '完全闭塞的塞音方式' },
+  { idx: 11, key: 'manner_fric', group: '构音方式 (8)', range: '0..1', examples: '[f, s, ʃ, x, ɬ]', meaning: '窄缝湍流擦音方式' },
+  { idx: 12, key: 'manner_affric', group: '构音方式 (8)', range: '0 / 1', examples: '[ts, tʃ, tʂ, tɕ]', meaning: '闭塞接续同部位摩擦的塞擦音' },
+  { idx: 13, key: 'manner_nasal', group: '构音方式 (8)', range: '0..1', examples: '[m, n, ŋ, ã]', meaning: '鼻音与鼻化元音（腭咽通道开启）' },
+  { idx: 14, key: 'manner_lateral', group: '构音方式 (8)', range: '0 / 1', examples: '[l, ɫ, ɭ, ʎ, ɬ]', meaning: '舌侧气流通道（边音与边擦音）' },
+  { idx: 15, key: 'manner_approx', group: '构音方式 (8)', range: '0..1', examples: '[ɹ, j, w, ʋ, ɰ]', meaning: '无湍流近音与半元音' },
+  { idx: 16, key: 'manner_tap_trill', group: '构音方式 (8)', range: '0 / 1', examples: '[ɾ, ɽ, r, ʙ, ʀ]', meaning: '闪音、拍音与颤音周期拍击' },
+  { idx: 17, key: 'voiced', group: '嗓音与元音 (5)', range: '0 / 1', examples: '[b, z, m, a] vs [p, s]', meaning: '声带清浊状态（支持清化 ◌̥ / 浊化 ◌̬ 修饰）' },
+  { idx: 18, key: 'aspirated', group: '嗓音与元音 (5)', range: '0 / 1', examples: '[pʰ, tʰ, kʰ, t͡ʃʰ]', meaning: '送气特征（驱动长 VOT 释放段）' },
+  { idx: 19, key: 'rounded', group: '嗓音与元音 (5)', range: '0..1', examples: '[u, o, y, ɔ, tʷ]', meaning: '圆唇度与唇化附加修饰' },
+  { idx: 20, key: 'vowel_height', group: '嗓音与元音 (5)', range: '0..1', examples: '低 [a]=0 · 中 [ə]=0.5 · 高 [i/u]=1', meaning: '元音舌位高低连续坐标（响应 ◌̝/◌̞）' },
+  { idx: 21, key: 'vowel_backness', group: '嗓音与元音 (5)', range: '0..1', examples: '前 [i/a]=0 · 央 [ə]=0.5 · 后 [u/ɑ]=1', meaning: '元音舌位前后连续坐标（响应 ◌̟/◌̠）' },
+  { idx: 22, key: 'place_dental', group: '构音部位 (10)', range: '0 / 1', examples: '[θ, ð, t̪, d̪, n̪]', meaning: '新增窄标维：区分齿音与齿龈音' },
+  { idx: 23, key: 'manner_sibilant', group: '构音方式 (8)', range: '0 / 1', examples: '[s, z, ʃ, ʂ, ɕ, ts]', meaning: '新增窄标维：区分有咝高频擦音与非咝擦音 [θ/f/ç]' },
+  { idx: 24, key: 'place_uvular', group: '构音部位 (10)', range: '0 / 1', examples: '[q, ɢ, ɴ, ʀ, χ, ʁ]', meaning: '新增窄标维：将小舌音与软腭音解耦' },
+  { idx: 25, key: 'place_pharyngeal', group: '构音部位 (10)', range: '0 / 1', examples: '[ħ, ʕ, ʜ, ʢ, ʡ, tˤ]', meaning: '新增窄标维：咽音、会厌音与咽化附加修饰' },
+  { idx: 26, key: 'is_syllabic', group: '窄标扩展 (6)', range: '0 / 1', examples: '[n̩, l̩, m̩, ŋ̩, ɿ, ʅ]', meaning: '成音节辅音与舌尖元音标记' },
+  { idx: 27, key: 'is_unreleased', group: '窄标扩展 (6)', range: '0 / 1', examples: '[p̚, t̚, k̚]', meaning: '唯闭音 / 入声塞音无除阻释放标记' },
+  { idx: 28, key: 'phonation_breathy', group: '窄标扩展 (6)', range: '0..1', examples: '[ɦ, a̤, b̤]', meaning: '音段级气声发声态修饰' },
+  { idx: 29, key: 'phonation_creaky', group: '窄标扩展 (6)', range: '0 / 1', examples: '[ʔ, ʡ, a̰]', meaning: '音段级嘎裂声 / 喉塞修饰' },
+  { idx: 30, key: 'airstream_glottalic', group: '窄标扩展 (6)', range: '-1 / 0 / +1', examples: '内爆 [ɓ, ɗ, ɠ]=-1 · 喷音 [pʼ, tʼ]=+1', meaning: '声门气流机制（负值内爆，正值喷音）' },
+  { idx: 31, key: 'airstream_velaric', group: '窄标扩展 (6)', range: '0 / 1', examples: '[ʘ, ǀ, ǃ, ǂ, ǁ]', meaning: '软腭吸气音（搭嘴音）气流机制' },
 ];
 
 export interface CorpusRow {
@@ -353,24 +516,24 @@ export const FULL_CORPUS_INVENTORY: readonly CorpusRow[] = [
     category: '本地物理合成',
     scale: '459 个声道构形（435 kB）',
     durationOrSpk: '元音 131 · 闭塞 124 · 擦音 130 · 边音 67 · 近音 7',
-    usedBy: '全部合成生成脚本',
-    notes: '8,000 次随机探索多轮凸包剥离与 JD2 原型合并构建，可完全本地再生',
+    usedBy: '全部物理合成生成脚本',
+    notes: '多轮凸包剥离与 JD2 原型合并构建，可完全本地复现',
   },
   {
     name: 'synth_full_glottis_180h',
     category: '本地物理合成',
     scale: '170,550 条（3,411 分片，20.94 GB）',
     durationOrSpk: '179.89 小时（VTL JD2 200Hz/48kHz）',
-    usedBy: '教师全链 / 端侧 Lite / IPA2Tract 预热',
-    notes: '覆盖 7 种单发声态（70%）与 50,756 条句内多态渐变（30%），引擎异常剔除率 2.46%',
+    usedBy: 'Vox2TractAlign v4 / Tract2Vox / IPA2Tract v4',
+    notes: '覆盖 7 种单发声态（70.2%）与 50,756 条句内多态渐变（29.8%）',
   },
   {
-    name: 'synth_100h（早期 22 维升格）',
+    name: 'synth_wide_f0_16h（Batch-2 新增）',
     category: '本地物理合成',
-    scale: '85,300 条（853 分片，10.34 GB）',
-    durationOrSpk: '90.16 小时（零失败率 0.00%）',
-    usedBy: '22 维历史基线 / 声学代理与反演预热（带声门掩码）',
-    notes: '升格至 27 维后仅在 XB/CA/RA 提供 0.25 权重，阻断固定常数污染声门分支',
+    scale: '120 分片（719 MB，含 5,610 条 5.13 h 增量）',
+    durationOrSpk: '20–1200 Hz 宽音域物理传递函数增广',
+    usedBy: 'Vox2TractAlign v4 / IPA2Tract v4 / Tract2Vox v2/v3',
+    notes: '补齐 20–45 Hz 深嘎裂与 550–1200 Hz 超高音的精确物理轨迹锚定',
   },
   {
     name: 'tube_proxy_samples.npz',
@@ -378,103 +541,119 @@ export const FULL_CORPUS_INVENTORY: readonly CorpusRow[] = [
     scale: '300,000 帧（22.39 MB）',
     durationOrSpk: '65% 轨迹抖动 + 20% 状态扰动 + 15% 全盒采样',
     usedBy: 'Tract2Area-Proxy',
-    notes: '直接调用 VTL 2.4 (R21) prepare_tube() 获取 6 区精确最小截面积真值',
+    notes: '调用 VTL 2.4 (R21) 直接获取 6 个声道关键区精确最小截面积真值',
   },
   {
     name: 'AISHELL-3（普通话多人）',
     category: '公开朗读/方言',
     scale: '训 74,328 条 / 测 13,707 条',
     durationOrSpk: '训 174 人 / 测 44 人（说话人严格隔离）',
-    usedBy: '反演 / 声码器 / Lite 缓存 / IPA2Tract / Prosody / Align v2',
-    notes: '流式读取未压缩 .tar 字节偏移，零解压落盘；Prosody 与 Align v2 使用过滤后 MFA 对齐（17,534 条）',
+    usedBy: '全链反演 / 声码器 / 声纹 / 韵律 / 动腔',
+    notes: '零解压流式读取；MFA 过滤对齐 17,534 条并升级窄标映射',
   },
   {
     name: 'LibriSpeech（clean-100 / dev-clean）',
     category: '公开朗读/方言',
-    scale: '多人索引 3,012 训 / 160 测 + 流式全集',
-    durationOrSpk: '训 251 人 / 测 40 人（百小时级流式）',
-    usedBy: '反演 / 声码器 / Lite 缓存 / Prosody (4,326) / Align v2 (7,500)',
-    notes: 'GPU WavLM-CTC 生成 7.5 ms 精度英语对齐边界',
-  },
-  {
-    name: 'KeSpeech（普通话与方言）',
-    category: '公开朗读/方言',
-    scale: '分卷 aa..ai 跨卷流式',
-    durationOrSpk: '1,000+ 小时级多方言',
-    usedBy: '早期 22 维流式基线 & 端到端测试句',
-    notes: '自研 MultiPartRawStream 内存级跨卷流式解压读取',
+    scale: '多人索引 + 百小时级流式全集',
+    durationOrSpk: '训 251 人 / 测 40 人（英语朗读）',
+    usedBy: '全链反演 / 声码器 / 声纹 / 韵律 / 对齐',
+    notes: '高质量英语朗读语料，同时用于 50 句离线 Whisper WER 门禁评测',
   },
   {
     name: 'TIMIT（英语人工金标）',
     category: '授权朗读语料',
     scale: '6,300 条（训 4,620 / 测 1,680）',
-    durationOrSpk: '人工音素边界（含 *cl 塞音闭塞段）',
-    usedBy: 'IPA2Tract-Lite / Text2Prosody-Lite / Vox2Align-Lite v2',
-    notes: '核心塞音闭塞与爆破边界金标，用于评测毫秒级边界误差',
+    durationOrSpk: '人工音素边界 + *cl 塞音闭塞段',
+    usedBy: 'IPA2Tract v4 / Text2Prosody v4 / 联合对齐',
+    notes: 'Batch-2 自动升格为窄标（送气 10,238、唯闭 10,087、暗 [ɫ] 2,984、鼻化元音 4,655）',
   },
   {
-    name: 'ESD（中英多情感）',
+    name: 'ESD + Expresso（情感与表现性朗读）',
     category: '公开情感/表现',
-    scale: '35,000 条',
-    durationOrSpk: '29.07 小时（16 kHz 多情绪朗读）',
-    usedBy: '反演微调 / 声码器 / Lite 缓存 / IPA2Tract-Lite',
-    notes: '增强大动态基频、紧嗓/叹气等情绪发声覆盖',
+    scale: '46,615 条（ESD 35,000 + Expresso 11,615）',
+    durationOrSpk: '40.00 小时（多情绪 / 耳语 / 气声 / 强调）',
+    usedBy: '全链反演 / 声码器 / 韵律 / 动腔',
+    notes: '增强大动态基频起伏、耳语、气声与自然会话语调',
   },
   {
-    name: 'Expresso（高表现力英语）',
+    name: 'EmotionTalk + CSEMOTIONS（Batch-2 新增）',
     category: '公开情感/表现',
-    scale: '11,615 条',
-    durationOrSpk: '10.93 小时（耳语/朗读/笑语/强调）',
-    usedBy: '反演微调 / 声码器 / Lite / IPA2Tract / Prosody (7,518) / Align v2 (7,716)',
-    notes: '提供耳语、气声与极富表现力的会话韵律样本',
+    scale: '25,224 条（EmotionTalk 19,080 + CSEMOTIONS 6,144）',
+    durationOrSpk: '32.52 小时（中文多情感对话与单人配音）',
+    usedBy: 'Tract2Vox Large v2.1 / Lite v3 / Vox2Spk-v2.1',
+    notes: '大幅扩充中文高表现力情绪语音（声纹训练严格隔离单人洁净集 CSEMOTIONS）',
   },
   {
-    name: 'GTSinger ZH/EN（精细声乐技巧）',
-    category: '公开干声歌唱',
-    scale: '17,080 条（含 15,000 人工对齐标注）',
-    durationOrSpk: '36.20 小时（真假声/咽音/滑音/气声）',
-    usedBy: '反演微调 / 声码器 / Lite / IPA2Tract (23,885) / Align v2 (15k)',
-    notes: '自动过滤 P95(F0) > 550 Hz 极端女高音；Align v2 屏蔽歌唱音高声调头以防干扰说话声调',
+    name: 'EmoV-DB + RAVDESS（Batch-2 新增）',
+    category: '公开情感/表现',
+    scale: '9,175 条（EmoV-DB 6,993 + RAVDESS 2,182）',
+    durationOrSpk: '10.56 小时（英语情感朗读与情感歌唱）',
+    usedBy: 'Tract2Vox Large v2.1 / Lite v3 / Vox2Spk-v2.1',
+    notes: '补充强情绪爆发、困倦气声、怒吼紧嗓与情感演唱音色',
   },
   {
-    name: 'M4Singer + OpenCpop',
+    name: 'GTSinger + M4Singer + OpenCpop + VocalSet',
     category: '公开干声歌唱',
-    scale: '23,697 条',
-    durationOrSpk: '34.61 小时（中文干声歌唱）',
-    usedBy: '反演微调 / 声码器 / Lite 缓存',
-    notes: '扩展宽音域连贯元音动程与歌唱肺压支撑',
+    scale: '44,390 条（17,080 + 23,697 + 3,613）',
+    durationOrSpk: '79.60 小时（中英干声歌唱与声乐发声技巧）',
+    usedBy: '全链反演 / 声码器 / Vox2Spk-v2.1 / IPA2Tract v4',
+    notes: '覆盖真假声、咽音、颤音、气声与 23 位纯净女高音/女中音独唱音色',
   },
   {
-    name: 'VocalSet（声乐发声技巧）',
+    name: 'JACRC 京剧独唱声乐库（Batch-2 新增）',
     category: '公开干声歌唱',
-    scale: '3,613 条',
-    durationOrSpk: '8.79 小时（气声/颤音/直声/歌剧等）',
-    usedBy: '反演微调 / 声码器 / Lite / IPA2Tract-Lite',
-    notes: '强化非模态声门参数与大跨度基频泛化',
+    scale: '7,604 条（Part 1–3 合计）',
+    durationOrSpk: '10.45 小时（高音戏剧独唱干声）',
+    usedBy: 'Tract2Vox Large v2.1 / Lite v3 / Vox2Spk-v2.1',
+    notes: '强化高音区共鸣、假声与极高基频的音质透明度与声纹稳定性',
+  },
+  {
+    name: 'EMVD / AVP / Beatbox / 呼麦与喉声库（Batch-2 新增）',
+    category: '公开干声歌唱',
+    scale: '3,053 条（EMVD 1,600 · AVP/Beatbox 1,216 · 呼麦/嘎裂/泛音 237）',
+    durationOrSpk: '4.21 小时（图瓦呼麦 / 次谐波嘎裂 / 泛音 / B-box）',
+    usedBy: 'Tract2Vox Large v2.1 / Lite v3',
+    notes: '专项覆盖 1/2 与 1/3 亚谐波室带双音、深嘎裂颗粒与非言语气流瞬态',
   },
   {
     name: 'USC-TIMIT EMA（真人电磁发音仪）',
     category: '真人传感盲测',
-    scale: '276 条（仅盲测，0 条进训练）',
-    durationOrSpk: '20 份独立测试文件同步唇/舌/颌传感器',
-    usedBy: 'IPA2Tract-Lite 物理传感独立检验',
-    notes: '用于客观检验预测舌位与真实人类口腔器官位移的相关性',
+    scale: '276 条（20 份独立文件，0 条进训练）',
+    durationOrSpk: '同步真人唇/舌/颌传感器坐标',
+    usedBy: 'IPA2Tract-Lite v4 客观构音检验',
+    notes: '零训练泄漏盲测：验证预测舌唇轨迹与真实人类发音器官运动一致性',
+  },
+  {
+    name: '236 条金标准 IPA / VoQS 实录集（Batch-2 新增）',
+    category: '真人传感盲测',
+    scale: '236 条（覆盖爆发音/鼻音/颤音/擦音/边音/元音/VoQS）',
+    durationOrSpk: '高保真实验室实录（用于独立评测与构型标定）',
+    usedBy: 'Tract2Vox 盲测门禁 / 窄标构型库校验',
+    notes: '全面检验各类国际音标辅元音与非模态发声态的声学保真度',
   },
   {
     name: 'distill_m27_v1（共享教师蒸馏缓存）',
     category: '派生任务缓存',
     scale: '60,010 条（120 分片，7.48 GB）',
     durationOrSpk: '63.61 小时（495 人训 / 84 未见人测）',
-    usedBy: 'Vox2Tract-Lite / Vox2Spk-Lite / Tract2Vox-Lite',
-    notes: '由 Vox2Tract-Large 提前推理封装，训练期全量预载主机内存实现 100% RAM 命中',
+    usedBy: 'Vox2TractAlign v4 / Vox2Spk-v2.1 / Tract2Vox',
+    notes: '全量预载主机内存实现 100% RAM 命中，严格隔离 84 位未见验证说话人',
   },
   {
-    name: 'prosody_zh_en & vox2align_v2',
+    name: 'kf_dataset_narrow_v2（Batch-2 窄标联合库）',
     category: '派生任务缓存',
-    scale: 'Prosody 52,339 条 · Align v2 70,000+ 条',
-    durationOrSpk: '含中英朗读、歌唱、单字锚点（webedit / ong_iong）',
-    usedBy: 'Text2Prosody-Lite / Vox2Align-Lite v2',
-    notes: 'Prosody 经过 7 项 MFA 质量门控剔除 4,466 条漂移样本；训练期在线执行 15–18% 中英混排拼接',
+    scale: '协同构音 63,154 条 · 双语/IPA 韵律 52,340 条',
+    durationOrSpk: '配套 canonical_ipa_poses_narrow.json（293 键 / 66 闭塞相）',
+    usedBy: 'IPA2Tract-Lite v4 (32D) / Text2Prosody-Lite v4 (32D)',
+    notes: '融合窄标 TIMIT、AISHELL-3 MFA、213 条参考 IPA 与歌唱数据，支撑 32D 升级',
+  },
+  {
+    name: 'flywheel_large_v2_12k（Batch-2 神经飞轮缓存）',
+    category: '派生任务缓存',
+    scale: '12,000 条（24 分片，993 MB）',
+    durationOrSpk: '8.33 小时（180h 7,178 + 宽域 3,004 + 换声 1,818）',
+    usedBy: 'Vox2TractAlign v4 / Tract2Vox-Large v2.1',
+    notes: '以 Tract2Vox-Large v2 反向生成高保真闭环语料，消除真实语音与声道瓶颈分布差',
   },
 ];
 
@@ -489,103 +668,73 @@ export const SYNTH_180H_MODES: readonly { name: string; count: number; group: st
   { name: '全域探索 (Explore)', count: 5726, group: '单发声态' },
 ];
 
-/** Real training logs sampled directly from F:/TensorTract3_Train/runs/ */
+/** Verified Batch-2 final metrics & evaluation data (from F:/TensorTract3_Train/runs/). */
 export const TRAINING_CURVES = {
-  /** Vox2Tract-Large Anchored (Pass 2) vs Unanchored drift */
-  inverterAnchoredSteps: [0, 2000, 3500, 5500, 7500, 9000, 11000, 14500, 18000, 20000, 23000, 26500, 30000, 32000],
-  inverterAnchoredTract: [0.6293, 0.7309, 0.7496, 0.7711, 0.7760, 0.7892, 0.7953, 0.7962, 0.7964, 0.8029, 0.8166, 0.8200, 0.8221, 0.8144],
-  inverterAnchoredGlottis: [0.8940, 0.9050, 0.9038, 0.9018, 0.9039, 0.9034, 0.9031, 0.9058, 0.9013, 0.9021, 0.9038, 0.9040, 0.9045, 0.9013],
-  inverterUnanchoredSteps: [0, 2500, 3000, 3500, 4000, 4500, 5000, 5500],
-  inverterUnanchoredTract: [0.6299, 0.4374, 0.4248, 0.4258, 0.4145, 0.4092, 0.4068, 0.4076],
-  inverterUnanchoredGlottis: [0.8905, 0.6908, 0.6497, 0.6397, 0.5902, 0.6083, 0.5979, 0.5435],
-
-  /** Tract2Vox-Large (0 -> 32k, 28k->32k low-LR cosine refinement) */
-  vocoderLargeSteps: [2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 22000, 24000, 26000, 28000, 29000, 30000, 31000, 32000],
-  vocoderLargeScore: [0.1790, 0.1580, 0.1443, 0.0953, 0.1289, 0.1131, 0.0586, 0.0725, 0.0434, 0.0651, 0.0670, 0.1165, 0.0681, 0.0531, 0.0353, 0.0369, 0.0358, 0.0361],
-  vocoderLargeL24: [0.7501, 0.8032, 0.8413, 0.8594, 0.8480, 0.8574, 0.8660, 0.8680, 0.8750, 0.8756, 0.8775, 0.8780, 0.8741, 0.8871, 0.8895, 0.8885, 0.8888, 0.8912],
-  vocoderLargeSpk: [0.7670, 0.8320, 0.8465, 0.8589, 0.8701, 0.8789, 0.8829, 0.8838, 0.8869, 0.8876, 0.8795, 0.8779, 0.8807, 0.8876, 0.8855, 0.8834, 0.8834, 0.8852],
-
-  /** Tract2Vox-Lite (2.5k -> 21k, best @17k) */
-  vocoderLiteSteps: [2500, 5000, 7500, 10000, 12500, 15000, 16000, 17000, 18000, 19000, 20000, 21000],
-  vocoderLiteScore: [0.3318, 0.1291, 0.1518, 0.0921, 0.0783, 0.0652, 0.0732, 0.0626, 0.0712, 0.0806, 0.0776, 0.0736],
-  vocoderLiteL24: [0.6993, 0.8170, 0.8296, 0.8545, 0.8568, 0.8602, 0.8582, 0.8588, 0.8633, 0.8665, 0.8679, 0.8654],
-  vocoderLiteE2eSpk: [0.7750, 0.8264, 0.8478, 0.8597, 0.8674, 0.8695, 0.8754, 0.8736, 0.8763, 0.8756, 0.8766, 0.8726],
-
-  /** Vocoder generation comparison */
-  vocoderGen: [
-    { name: 'v1 纯 HiFi-GAN (14.9M)', melL1: 0.8220, l24: 0.7743, spk: 0.8390, score: 0.4348 },
-    { name: 'v2 7 谐波 NSF (14.3M)', melL1: 0.7495, l24: 0.8277, spk: 0.8580, score: 0.3357 },
-    { name: 'v3 Large @29k (14.4M)', melL1: 0.7176, l24: 0.8895, spk: 0.8855, score: 0.0353 },
-    { name: 'Lite @17k (3.72M ONNX)', melL1: 0.7231, l24: 0.8588, spk: 0.8828, score: 0.0626 },
+  /** Vox2TractAlign v4 (9.40M) 25-dim per-parameter PCC on unseen natural val */
+  v4PerDimPcc: [
+    { dim: 'RA', val: 0.9691, group: '声门' },
+    { dim: 'TCX', val: 0.9656, group: '声道' },
+    { dim: 'LD', val: 0.9557, group: '声道' },
+    { dim: 'VO', val: 0.9499, group: '声道' },
+    { dim: 'TTX', val: 0.9483, group: '声道' },
+    { dim: 'TBX', val: 0.9405, group: '声道' },
+    { dim: 'TCY', val: 0.9399, group: '声道' },
+    { dim: 'LP', val: 0.9386, group: '声道' },
+    { dim: 'JA', val: 0.9354, group: '声道' },
+    { dim: 'TBY', val: 0.9349, group: '声道' },
+    { dim: 'TS3', val: 0.9344, group: '声道' },
+    { dim: 'TTY', val: 0.9223, group: '声道' },
+    { dim: 'HX', val: 0.9176, group: '声道' },
+    { dim: 'CA', val: 0.9137, group: '声门' },
+    { dim: 'HY', val: 0.9085, group: '声道' },
+    { dim: 'XB', val: 0.9013, group: '声门' },
+    { dim: 'TS1', val: 0.8655, group: '声道' },
+    { dim: 'TS2', val: 0.8576, group: '声道' },
+    { dim: 'LAG', val: 0.8164, group: '声门' },
+    { dim: 'XT', val: 0.7991, group: '声门' },
+    { dim: 'PS', val: 0.7967, group: '声门' },
+    { dim: 'VS', val: 0.7903, group: '声道' },
+    { dim: 'JX', val: 0.7790, group: '声道' },
+    { dim: 'FL', val: 0.7775, group: '声门' },
+    { dim: 'SHIM', val: 0.7406, group: '声门' },
   ],
 
-  /** Per-dimension PCC of Vox2Tract-Large best @26.5k */
-  perDimPcc: [
-    { dim: 'XT', val: 0.9663, group: '声门' },
-    { dim: 'XB', val: 0.9645, group: '声门' },
-    { dim: 'TCX', val: 0.9512, group: '声道' },
-    { dim: 'RA', val: 0.9496, group: '声门' },
-    { dim: 'VO', val: 0.9429, group: '声道' },
-    { dim: 'SHIM', val: 0.9293, group: '声门' },
-    { dim: 'TCY', val: 0.9055, group: '声道' },
-    { dim: 'HY', val: 0.8964, group: '声道' },
-    { dim: 'LAG', val: 0.8953, group: '声门' },
-    { dim: 'TTY', val: 0.8734, group: '声道' },
-    { dim: 'CA', val: 0.8728, group: '声门' },
-    { dim: 'PS', val: 0.8616, group: '声门' },
-    { dim: 'TTX', val: 0.8421, group: '声道' },
-    { dim: 'LP', val: 0.8324, group: '声道' },
-    { dim: 'TS2', val: 0.8249, group: '声道' },
-    { dim: 'HX', val: 0.8182, group: '声道' },
-    { dim: 'TS3', val: 0.7940, group: '声道' },
-    { dim: 'FL', val: 0.7924, group: '声门' },
-    { dim: 'LD', val: 0.7899, group: '声道' },
-    { dim: 'TBY', val: 0.7892, group: '声道' },
-    { dim: 'JA', val: 0.7884, group: '声道' },
-    { dim: 'JX', val: 0.7631, group: '声道' },
-    { dim: 'VS', val: 0.7520, group: '声道' },
-    { dim: 'TBX', val: 0.7514, group: '声道' },
-    { dim: 'TS1', val: 0.6257, group: '声道' },
+  /** 50-sentence offline Whisper Large-v3-Turbo bilingual ASR intelligibility gate (25 ZH + 25 EN) */
+  whisperAsrGate: [
+    { name: '旧基线 Lite v1 (3.7M)', zhCer: 14.95, enWer: 4.20, meanErr: 9.58, l24: 0.8577, spk: 0.9063 },
+    { name: '旧基线 Large v1 (14.4M)', zhCer: 13.52, enWer: 2.88, meanErr: 8.20, l24: 0.8732, spk: 0.9143 },
+    { name: 'Batch-2 Large v2.1 (14.4M)', zhCer: 11.03, enWer: 5.75, meanErr: 8.39, l24: 0.8829, spk: 0.9171 },
+    { name: 'Batch-2 Lite v2 (3.7M)', zhCer: 11.74, enWer: 3.76, meanErr: 7.75, l24: 0.8639, spk: 0.9083 },
+    { name: 'Batch-2 Large v2 (14.4M)', zhCer: 9.96, enWer: 4.65, meanErr: 7.31, l24: 0.8815, spk: 0.9179 },
+    { name: 'Batch-2 Lite v3 (3.7M 6k)', zhCer: 11.03, enWer: 3.32, meanErr: 7.18, l24: 0.8708, spk: 0.9126 },
   ],
 
-  /** USC-TIMIT human EMA sensor validation (20 unseen test files) */
-  emaRadar: [
-    { axis: '唇开口 LD', pcc: 0.6956 },
-    { axis: '舌尖前后 TTX', pcc: 0.6743 },
-    { axis: '舌体高低 TCY', pcc: 0.5958 },
-    { axis: '舌尖高低 TTY', pcc: 0.5159 },
-    { axis: '舌体前后 TCX', pcc: 0.3583 },
-    { axis: '下颌开口 JA', pcc: 0.3335 },
-    { axis: '唇突度 LP', pcc: 0.3035 },
+  /** Text2Prosody-Lite v4 (32D) 5-domain accuracy including arbitrary [IPA] */
+  prosodyV4Domains: [
+    { domain: '普通话朗读 (ZH)', durMaeMs: 22.55, f0MaeSt: 1.185, f0Pcc: 0.7786 },
+    { domain: '英语朗读 (EN)', durMaeMs: 17.33, f0MaeSt: 1.210, f0Pcc: 0.6728 },
+    { domain: '中英混排 (CS)', durMaeMs: 22.70, f0MaeSt: 1.600, f0Pcc: 0.6202 },
+    { domain: '任意国际音标 (IPA)', durMaeMs: 21.44, f0MaeSt: 1.651, f0Pcc: 0.5883 },
+    { domain: '孤立单字 (ISO)', durMaeMs: 45.06, f0MaeSt: 1.177, f0Pcc: 0.5600 },
   ],
 
-  /** Vox2Align-Lite v2 convergence (2k -> 20k) */
-  alignV2Steps: [2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000],
-  alignV2ZhSyl: [77.42, 83.62, 84.97, 85.55, 86.01, 88.52, 88.59, 89.79, 90.21, 90.02],
-  alignV2ZhFrame: [82.21, 85.22, 85.79, 86.34, 86.99, 87.81, 87.85, 88.20, 88.50, 88.49],
-  alignV2EnFrame: [76.34, 78.53, 80.43, 81.27, 81.93, 82.45, 82.66, 82.76, 82.97, 83.04],
-  alignV2ZhBnd20: [90.71, 91.79, 90.76, 92.59, 92.90, 93.39, 93.46, 93.75, 93.69, 93.67],
-  alignV2EnBnd20: [92.69, 93.93, 94.22, 94.61, 95.05, 94.82, 95.17, 95.19, 95.29, 95.46],
-  alignV2MaskF1: [98.55, 98.77, 98.81, 98.86, 98.88, 98.85, 98.91, 98.91, 98.94, 98.94],
-
-  /** Text2Prosody-Lite best @7.5k across 4 domains */
-  prosodyDomains: [
-    { domain: '普通话朗读 (ZH)', durMaeMs: 22.94, f0MaeSt: 1.198, f0Pcc: 0.7743 },
-    { domain: '英语朗读 (EN)', durMaeMs: 17.37, f0MaeSt: 1.203, f0Pcc: 0.6781 },
-    { domain: '中英混排 (CS)', durMaeMs: 23.27, f0MaeSt: 1.581, f0Pcc: 0.6357 },
-    { domain: '孤立单字 (ISO)', durMaeMs: 38.59, f0MaeSt: 1.158, f0Pcc: 0.5592 },
+  /** IPA2Tract-Lite v4 (32D) USC-TIMIT human EMA 7-articulator blind test */
+  emaRadarV4: [
+    { axis: '唇开口 LD', pcc: 0.7013 },
+    { axis: '舌尖前后 TTX', pcc: 0.6674 },
+    { axis: '舌体高低 TCY', pcc: 0.5865 },
+    { axis: '舌尖高低 TTY', pcc: 0.5025 },
+    { axis: '舌体前后 TCX', pcc: 0.3577 },
+    { axis: '下颌开口 JA', pcc: 0.3554 },
+    { axis: '唇突度 LP', pcc: 0.3214 },
   ],
 
-  /** 8-clip end-to-end audition benchmark (Teacher vs Tract2Vox-Lite vs Full Lite E2E) */
-  audition8Clips: [
-    { label: '四声连读', teacherL24: 0.8728, liteL24: 0.8541, e2eL24: 0.8223, e2eSpk: 0.7481 },
-    { label: '普通话自然', teacherL24: 0.8860, liteL24: 0.8801, e2eL24: 0.8474, e2eSpk: 0.8716 },
-    { label: '英语自然', teacherL24: 0.9073, liteL24: 0.9011, e2eL24: 0.8526, e2eSpk: 0.9187 },
-    { label: '气声', teacherL24: 0.8346, liteL24: 0.8288, e2eL24: 0.7455, e2eSpk: 0.9411 },
-    { label: '紧嗓', teacherL24: 0.8425, liteL24: 0.8374, e2eL24: 0.8157, e2eSpk: 0.7368 },
-    { label: '嘎裂', teacherL24: 0.8386, liteL24: 0.8097, e2eL24: 0.7813, e2eSpk: 0.8334 },
-    { label: '假声', teacherL24: 0.8461, liteL24: 0.8222, e2eL24: 0.7651, e2eSpk: 0.8446 },
-    { label: '五态渐变', teacherL24: 0.8209, liteL24: 0.8491, e2eL24: 0.8115, e2eSpk: 0.8815 },
+  /** Vox2Spk-v2.1 vs v2 vs v1 vs WavLM-SV teacher comparison */
+  vox2spkCompare: [
+    { name: '旧版 v1 (2.9M)', spCos: 0.9172, femGap: 0.2614, femTop1: 0.2573, tts165Cos: 0.7978, ttsMargin: 0.0503 },
+    { name: 'Batch-2 v2 (4.6M)', spCos: 0.9423, femGap: 0.2965, femTop1: 0.4444, tts165Cos: 0.7925, ttsMargin: 0.0589 },
+    { name: 'Batch-2 v2.1 (4.6M)', spCos: 0.9422, femGap: 0.3531, femTop1: 0.4620, tts165Cos: 0.8013, ttsMargin: 0.0649 },
+    { name: 'WavLM-SV 教师', spCos: 1.0000, femGap: 0.2433, femTop1: 0.5000, tts165Cos: 0.8020, ttsMargin: 0.0722 },
   ],
 } as const;
 
@@ -596,32 +745,17 @@ export interface OnnxSlotContractRow {
   outputs: string;
   patterns: string;
   fallback: string;
+  optionalNote?: string;
 }
 
 export const ONNX_SLOT_CONTRACTS: readonly OnnxSlotContractRow[] = [
   {
     name: 'Vox2Tract-Lite',
     slug: 'vox2tract_lite',
-    inputs: 'mel_feats (B,T,163) float32 + vq_cues (B,T,3) float32 + f0_norm (B,T) float32',
-    outputs: 'tract17 (B,T,17), pr1 (B,T,1), glot8 (B,T,8), h_backbone (B,T,192)',
+    inputs: 'mel_feats (B,T,163) + vq_cues (B,T,3) + f0_norm (B,T) float32',
+    outputs: 'tract17 (B,T,17), pr1 (B,T,1), glot8 (B,T,8), h_backbone (B,T,192) [+ 联合版 7 路对齐头]',
     patterns: 'vox2tract / inverter / m27_invert',
     fallback: '卸载后声道重建接口返回 503 model_unloaded',
-  },
-  {
-    name: 'Vox2Align-Lite v2',
-    slug: 'vox2align_lite_v2',
-    inputs: 'mel_feats (B,T,163) float32 + h_backbone (B,T,192) float32 + m27_norm (B,T,27) float32',
-    outputs: 'zh_syl_ctc_logits (B,T,415), phone_frame_logits (B,T,65), phone_ctc_logits (B,T,65), boundary_logits (B,T,2), speech_mask_logit (B,T), tone_logits (B,T,8), lang_logits (B,T,3)',
-    patterns: 'vox2align / align_v2 / aligner',
-    fallback: '卸载后强制对齐与静音门控停用',
-  },
-  {
-    name: 'IPA2Tract-Lite',
-    slug: 'ipa2tract_lite',
-    inputs: 'cond (B,T,111) float32 + x_base (B,T,26) float32 + alpha (1,) float32',
-    outputs: 'x_hat (B,T,26) float32（输出裁剪至 [-1, 1]）',
-    patterns: 'ipa2tract / kf2tract / keyframe_tract',
-    fallback: '卸载后协同构音自动退回异步 3 阶 qTA 物理基线',
   },
   {
     name: 'Tract2Vox-Lite',
@@ -640,9 +774,17 @@ export const ONNX_SLOT_CONTRACTS: readonly OnnxSlotContractRow[] = [
     fallback: '卸载后仅可使用内置 .spk.json 声纹档案',
   },
   {
+    name: 'IPA2Tract-Lite',
+    slug: 'ipa2tract_lite',
+    inputs: 'cond (B,T,121 或 111) + x_base (B,T,26) + alpha (1,) float32',
+    outputs: 'x_hat (B,T,26) float32（输出裁剪至 [-1, 1]）',
+    patterns: 'ipa2tract / kf2tract / keyframe_tract',
+    fallback: '卸载后协同构音自动退回异步 3 阶 qTA 物理基线',
+  },
+  {
     name: 'DPDFNet',
     slug: 'dpdfnet',
-    inputs: 'spec (1,1,481,2) float32 + state_in (56436,) float32（校验器检验 1D 浮点张量）',
+    inputs: 'spec (1,1,481,2) float32 + state_in (56436,) float32',
     outputs: 'spec_e (1,1,481,2) float32 + state_out (56436,) float32',
     patterns: 'dpdfnet / denoise',
     fallback: '卸载后跳过实录前端宽带降噪',
@@ -650,7 +792,7 @@ export const ONNX_SLOT_CONTRACTS: readonly OnnxSlotContractRow[] = [
   {
     name: 'Text2Prosody-Lite',
     slug: 'text2prosody_lite',
-    inputs: 'phon_feat (B,L,22) + pos_struct (B,L,10) float32 + lang_id, tone_stress_id, punct_id, role_id (B,L) int64',
+    inputs: 'phon_feat (B,L,32 或 22) + pos_struct (B,L,10) float32 + lang_id, tone_stress_id, punct_id, role_id (B,L) int64',
     outputs: 'log_dur (B,L), f0_st3 (B,L,3), voiced_logit (B,L), pause_logit (B,L), log_pause_dur (B,L)',
     patterns: 'text2prosody / prosody',
     fallback: '卸载后文本编译自动切换至规则时长与韵律',
@@ -671,113 +813,21 @@ export const ONNX_SLOT_CONTRACTS: readonly OnnxSlotContractRow[] = [
     patterns: 'swift-f0 / swift_f0 / swiftf0',
     fallback: '卸载后反演与方言提取无法自动测 F0',
   },
-];
-
-export interface TrainingLessonItem {
-  id: string;
-  category: string;
-  title: string;
-  finding: string;
-  remedy: string;
-}
-
-export const TRAINING_EXPERIENCE_HIGHLIGHTS: readonly TrainingLessonItem[] = [
   {
-    id: 'les-wavlm-ln',
-    category: '底座数值尺度',
-    title: 'WavLM 第 24 层未过最终 LayerNorm 引发百万级梯度爆炸',
-    finding:
-      'transformers 的 outputs.hidden_states[-1] 位于最终 LayerNorm 之前，实测标准差高达 ~43，而 last_hidden_state 仅 ~0.23，导致初版反演损失升至 1,849,684。',
-    remedy:
-      '用 last_hidden_state 替换末尾层，对全部 25 层先做无参 LayerNorm 再 Softmax 加权，并将第 6 层显式缩放 0.25 与第 24 层对齐，验证损失回到正常量级。',
-  },
-  {
-    id: 'les-inverter-anchor',
-    category: '物理锚定防漂移',
-    title: 'Vox2Tract-Large 脱离合成锚定在 5,500 步内出现物理坍塌',
-    finding:
-      '仅靠真实语音加冻结声学代理续训时，验证声学损失表面下降（0.0385 → 0.0357），但模型会利用代理盲区偏离解剖空间，tract17_pcc 从 0.6299 跌至 0.4076，glottis8_pcc 跌至 0.5435。',
-    remedy:
-      '每步增加 Pass 2（混合一批 180 小时纯合成物理真值，权重 0.045）执行参数域与声学双锚定，逆转漂移并将 tract17_pcc 提升至 0.8200、glottis8_pcc 提升至 0.9040。',
-  },
-  {
-    id: 'les-gan-cosine',
-    category: '声码器调度',
-    title: '慢指数衰减引发晚期振荡，4,000 步低 LR 余弦精调收敛稳定',
-    finding:
-      '传统 HiFi-GAN 衰减率 0.999^(1/500) 跑至 28,000 步时学习率仍停留在 1.89e-4，导致 val_mel_l1 在 0.714–0.790 间锯齿震荡。',
-    remedy:
-      '在 28,000 步切入低学习率余弦精调（5e-5 → 1e-5 仅 4,000 步），在 1,000 步内 val_score 从 0.05310 降至 0.03534，L24 升至 0.8895。',
-  },
-  {
-    id: 'les-perceptual-distill',
-    category: '端侧感知蒸馏',
-    title: '纯 L1 参数蒸馏会出现参数接近但听感发糊的现象',
-    finding:
-      '对 27 维物理参数等权回归时，双唇闭塞 LD、鼻咽开度 VO 等窄缝敏感维度的微小误差会引发共振峰偏移，纯 L1 蒸馏版物理重合成 L24 仅 0.7642。',
-    remedy:
-      '复用冻结的 Tract2Feat-Proxy 双头解码器作为感知教师（8×L24 + 6×L6），约束 7.64M 学生在声学流形对齐，8 句物理重合成均值升至 0.8235（8 句均值 3.06 s PyTorch CPU FP16 4 线程评测耗时 80.2 ms；导出 ONNX Runtime 3.0 s 前向均值 22.5 ms）。',
-  },
-  {
-    id: 'les-legacy-detach',
-    category: '多代语料融合',
-    title: '旧版固定声门语料回传梯度会干扰 8 维发声态分化',
-    finding:
-      '早期 90h 22 维语料将 XT/LAG/PS/FL/SHIM 固定为常数，直接与 180h 联合送入声学解码器会诱导声门分支学会平庸均值。',
-    remedy:
-      '对旧语料声门损失施加选择性掩码 [0.25, 0, 0.25, 0, 0.25, 0, 0, 0]，并在送入冻结解码器前对旧语料预测的声门向量执行 .detach() 阻断梯度回传。',
-  },
-  {
-    id: 'les-bn-freeze',
-    category: '冻结分支保护',
-    title: '冻结分支的 BatchNorm 滑动统计量会在 train() 下发生漂移',
-    finding:
-      'ConformerConvModule 含 BatchNorm1d，对混合模型调用 .train() 会把已冻结子分支切回训练态并持续覆盖 running_mean / running_var。',
-    remedy:
-      '覆写模型的 train() 方法锁定冻结分支处于 eval() 状态；同时在消融实验证实冻声道专训声门为负收益后于 3,550 步及时止损。',
-  },
-  {
-    id: 'les-ja-clamp',
-    category: '协同构音防扁平',
-    title: '限制下颌张度残差上界防止舌体代偿压扁开口度',
-    finding:
-      '由于下颌与舌体存在多对一补偿效应，教师反演模型偏爱保守的下颌波动，直接照搬会使合成开口偏小。',
-    remedy:
-      '在 IPA2Tract-Lite 零初始化残差头中将下颌张度 JA 最大残差单独限幅在 0.35（其余维度 0.85），保留协同柔顺度的同时守住标准开合幅度。',
-  },
-  {
-    id: 'les-static-pcc',
-    category: '评测指标陷阱',
-    title: '极低方差静态持续音会导致皮尔逊相关系数 PCC 假性偏低',
-    finding:
-      '五态连续渐变长元音 /a/ 的物理重合成声学 L24 达 0.8643、L6 达 0.8429，但固定舌位导致教师轨迹方差近零，tract17_pcc 账面仅 0.1638。',
-    remedy:
-      '对静止或准静止测试片段不可单凭帧间线性相关下结论，需联合核验物理 RMSE、物理/神经重合成声学余弦与听感评测。',
-  },
-  {
-    id: 'les-high-f0',
-    category: '声乐极高音边界',
-    title: '女高音花腔越过 600 Hz 物理上界引发截断与相位外推失真',
-    finding:
-      'GTSinger、M4Singer 与 VocalSet 中存在大量 550–800+ Hz 哨音切片，直接送入 27 维物理契约会产生基频饱和截断。',
-    remedy:
-      '在流式采样池、共享缓存与神经声码器训练中统一滤除 P95(F0) > 550 Hz 的切片（跳过 3,604 / 1,328 条），同时在科研工作台用独立高音试听接口承载 550–800 Hz 移调。',
-  },
-  {
-    id: 'les-render-flow',
-    category: '物理渲染与防爆音',
-    title: '梯形累计流积分防止气流倒流，软门控避免清辅音误带声',
-    finding:
-      '直接用瞬时声门压乘时间计算粒子位置在句末肺压骤降时会出现视觉气流倒流；节点突变与无门控调制会引起清擦音带声或咔嗒瞬态。',
-    remedy:
-      '改用单调递增梯形累计流函数驱动气流粒子；调音台默认开启清浊音软门控与 25 ms 高斯平滑，双人器官移植中舌颌与喉位采用相对中位偏移移植。',
+    name: 'Vox2Align-Lite v2',
+    slug: 'vox2align_lite_v2',
+    inputs: 'mel_feats (B,T,163) + h_backbone (B,T,192) + m27_norm (B,T,27) float32',
+    outputs: 'zh_syl_ctc_logits (B,T,415), phone_frame_logits (B,T,65), phone_ctc_logits (B,T,65), boundary_logits (B,T,2), speech_mask_logit (B,T), tone_logits (B,T,8), lang_logits (B,T,3)',
+    patterns: 'vox2align / align_v2 / aligner',
+    fallback: '默认隐藏不装载（由联合 Vox2Tract-Lite 内置对齐）；用户自训外置挂载后自动接管对齐',
+    optionalNote: '可选方言/多语种自训兼容槽位',
   },
 ];
 
 export interface RetrainingRecipe {
   id: string;
   scenario: string;
-  difficulty: '推荐入门 · 小时级' | '进阶扩展 · 半天级' | '全流程复现 · 多日级';
+  difficulty: '推荐入门 · 小时级' | '进阶扩展 · 半天级';
   targetModels: string;
   corpusReq: string;
   steps: string[];
@@ -786,45 +836,40 @@ export interface RetrainingRecipe {
 
 export const RETRAINING_RECIPES: readonly RetrainingRecipe[] = [
   {
-    id: 'rec-align-prosody',
-    scenario: '场景 A · 扩展新方言、新语种或专业朗读风格（对齐与韵律微调）',
+    id: 'rec-dialect-align',
+    scenario: '场景 A · 针对其他语言或方言自行训练独立对齐与韵律模型',
     difficulty: '推荐入门 · 小时级',
-    targetModels: 'Text2Prosody-Lite (1.98M) + Vox2Align-Lite v2 (4.33M)',
-    corpusReq: '16 kHz 单声道 WAV + 对应 Praat TextGrid（音素与音节层），建议 3–20 小时，单卡 8–16 GB VRAM 即可。',
+    targetModels: 'Vox2Align-Lite v2 (4.33M 可选兼容槽位) + Text2Prosody-Lite v4 (1.98M)',
+    corpusReq: '16 kHz 单声道 WAV + 对应 Praat TextGrid（3–20 小时），单卡 8–16 GB VRAM 即可微调。',
     steps: [
-      '将新语料的音素映射至 65 维统一双语/扩展 IPA 词表（或按需扩充映射表），并用 SwiftF0 提取 50 Hz 基频。',
-      '执行质量门控过滤漂移标注（剔除元音无声段漂移、异常语速与过短塌缩音段），保持约 15% 跨语种拼接与 45% 首尾底噪增广。',
-      '以现有权重热启动微调（学习率 1e-4 余弦退火，5,000–10,000 步），完成后运行 scripts/export_onnx_models.py 导出动态轴 ONNX。',
-      '在设置页「本地轻量化模型矩阵」点击对应卡片的「换模」，系统自动核验张量契约并即时生效。',
+      '将目标方言或语种的音素映射到 32 维通用 IPA 特征（韵律）及对齐词表，并用 SwiftF0 提取 50 Hz 基频。',
+      '以现有权重热启动微调并导出动态轴 ONNX（保持契约维度与张量名一致）。',
+      '在设置页「本地轻量化模型矩阵」底部展开「独立对齐槽位 (Vox2Align-Lite v2)」并点击「换模」，外置权重生效后将自动优先接管该语种的对齐与静音门控。',
     ],
-    commands: `# 1. 构建/追加双语对齐与韵律数据索引\npython -B scripts/prepare_vox2align_v2_dataset.py\npython -B scripts/filter_mfa_and_build_prosody.py\n\n# 2. 微调 Text2Prosody-Lite 与 Vox2Align-Lite v2（支持 --resume）\npython -B scripts/train_text2prosody.py --steps 12000 --batch-size 64 --resume\npython -B scripts/train_vox2align_v2.py --steps 20000 --batch-size 48 --resume\n\n# 3. 导出纯 ONNX 并自检数值精度（可先用 --mode benchmark 对比耗时）\npython -B scripts/export_onnx_models.py --mode finalize`,
+    commands: `# 1. 准备目标语种/方言对齐与 32D 韵律索引
+python -B scripts/prepare_vox2align_v2_dataset.py
+python -B scripts/train_stage2_prosody_ipa_joint.py --steps 8000 --resume
+
+# 2. 若需独立方言对齐小模型（兼容 Vox2Align-Lite v2 槽位）
+python -B scripts/train_vox2align_v2.py --steps 12000 --batch-size 48 --resume
+python -B scripts/export_onnx_models.py --mode finalize`,
   },
   {
-    id: 'rec-lite-distill',
-    scenario: '场景 B · 用更多歌唱/方言/特殊发声态语料扩训反演器与神经声码器',
+    id: 'rec-batch2-retrain',
+    scenario: '场景 B · 扩展更多歌唱/发声态语料精调声纹与神经声码器',
     difficulty: '进阶扩展 · 半天级',
-    targetModels: 'Vox2Tract-Lite (7.64M) + Vox2Spk-Lite (2.90M) + Tract2Vox-Lite (3.72M)',
-    corpusReq: '16 kHz 干声语料（自动过滤 P95(F0) > 550 Hz），强烈建议保留 ≥12%（声码器）至 35%（反演器）的 VTL 180h 合成真值作为物理锚定！',
+    targetModels: 'Vox2Spk-v2.1 (4.60M) + Tract2Vox-Large v2.1 (14.39M) / Lite v3 (3.73M)',
+    corpusReq: '16 kHz 洁净单人干声（单人独唱/配音），单卡 16–24 GB VRAM；建议保留 12%–35% VTL 物理真值锚定。',
     steps: [
-      '使用 Vox2Tract-Large + Vox2Tract-PR 离线为新语料生成共享 50 Hz 27 维伪标签与 512 维声纹分片缓存（避免训练期加载 1.2 GB WavLM）。',
-      '在 Vox2Tract-Lite 蒸馏中保留冻结 Tract2Feat-Proxy 感知损失（8×L24 + 6×L6）与 35% 物理合成锚定，防止反演器遗忘物理几何。',
-      '在 Tract2Vox-Lite 训练后期（约 15k–20k 步后）切入低学习率余弦精调（5e-5 → 1e-5），并在导出前执行 remove_weight_norm() 与噪声外置化。',
-      '导出后的 vox2tract_lite.onnx / vox2spk_lite.onnx / tract2vox_lite.onnx 放入同一目录，点击界面「从文件夹装载」即可整套热切换。',
+      '使用关系矩阵蒸馏与非对称负对排斥精调 Vox2Spk-v2.1，在对齐 WavLM-SV 空间的同时拉大不同说话人夹角。',
+      '在 Tract2Vox 训练中联合 180h 合成、宽域 F0、多情感/戏曲/歌唱干声与飞轮闭环数据，按需导出 14.4M Large 档或 3.7M Lite 极速档。',
+      '将导出的 .onnx 放入同一目录，在设置页点击「从文件夹装载」即可自动按契约热切换。',
     ],
-    commands: `# 1. 一键更新共享教师缓存并串行蒸馏端侧三件套\npowershell -ExecutionPolicy Bypass -File .\\run_browser_m27_overnight.ps1 \`\n  -NatShards 120 -Stage4Steps 55000 -SpkSteps 30000 -Stage5Steps 25000 -Resume\n\n# 2. 若需单独微调声码器并执行基准对比与最终导出\npython -B scripts/train_browser_m27_stage5.py --steps 25000 --resume\npython -B scripts/export_onnx_models.py --mode benchmark\npython -B scripts/export_onnx_models.py --mode finalize`,
-  },
-  {
-    id: 'rec-full-scratch',
-    scenario: '场景 C · 从零构建 VTL 物理语料与教师大模型体系',
-    difficulty: '全流程复现 · 多日级',
-    targetModels: '关联体系（原型状态库 → 180h 合成 → 教师链 4 模 → 端侧 7 模）',
-    corpusReq: '24 GB VRAM GPU（如 RTX 4090 / 5090）+ 64 GB 系统内存 + 100 GB 可用磁盘；第三方公开语料按原协议自行下载。',
-    steps: [
-      '运行 build_states.py 生成 459 个 JD2 R21 声道原型，并用 generate_synth_m27.py 20 进程生成 180 小时 8 发声态全原生 27 维合成语料。',
-      '依次完成 Vox2Tract-PR 肺压编码器（30k）→ Tract2Feat-Proxy 双头声学代理（50k）→ Vox2Tract-Large 合成预热（45k）。',
-      '执行 Vox2Tract-Large 双通物理锚定微调（32k）与 Tract2Vox-Large Glottis-NSF v3 声码器（28k 主训 + 4k 低 LR 余弦精调），再用 train_tube_proxy.py 与 run_train_kf.ps1 完成协同动腔规划链路。',
-    ],
-    commands: `# 1. 构造状态库与 180h 多发声态物理合成库\npython -B scripts/build_states.py --out data/states/states_jd2_r21.npz\npowershell -ExecutionPolicy Bypass -File .\\run_generate_m27.ps1 -Hours 180 -Workers 20 -TubeHz 100\n\n# 2. 教师五阶段主链路（肺压 -> 声学代理 -> 合成预热 -> 双通锚定 -> 神经声码器）\npython -B scripts/train_m27_pipeline.py --stage pr --batch-size 64 --pr-steps 30000\npython -B scripts/train_m27_pipeline.py --stage decoder --batch-size 64 --decoder-steps 50000\npython -B scripts/train_m27_pipeline.py --stage motor-synth --batch-size 64 --motor-steps 45000\n# Vox2Tract-Large 双通锚定微调与 Tract2Vox-Large 低学习率余弦精调\npowershell -ExecutionPolicy Bypass -File .\\run_train_m27.ps1 -Stage motor-natural -NaturalSteps 32000 -ResetNaturalSchedule\npowershell -ExecutionPolicy Bypass -File .\\run_train_m27_neural_synth.ps1 -MaxSteps 32000 -Lr 5e-5 -OverrideLr\n\n# 3. 管面积代理与 IPA2Tract-Lite 协同动腔规划\npython -B scripts/train_tube_proxy.py --num-samples 300000 --workers 16\npowershell -ExecutionPolicy Bypass -File .\\run_train_kf.ps1 -Step k1 -K1Steps 15000\npowershell -ExecutionPolicy Bypass -File .\\run_expand_k2_v2.ps1`,
+    commands: `# 1. 区分度强化声纹微调（约 13 min）
+python -B scripts/train_vox2spk_v2.py --steps 7000 --rel-weight 3.0 --neg-weight 10.0 --score-mode discriminative
+
+# 2. 导出 Batch-2 全套纯 ONNX 并做双长度精度自检
+python -B scripts/export_batch2_web_onnx.py`,
   },
 ];
 
@@ -839,7 +884,7 @@ export const ENGINE_LOADING_ENDPOINTS: readonly EngineEndpointSpec[] = [
   {
     method: 'GET',
     path: '/api/models/local',
-    purpose: '查询全部 9 个 ONNX 模型槽位状态、参数量、内存驻留与外置来源',
+    purpose: '查询本地 ONNX 模型槽位状态、参数量、内存驻留与外置来源',
     payload: '返回 runtime_providers、cuda_available 与逐槽位 loaded/in_memory/load_ms',
   },
   {
@@ -852,25 +897,25 @@ export const ENGINE_LOADING_ENDPOINTS: readonly EngineEndpointSpec[] = [
     method: 'POST',
     path: '/api/models/local/unload',
     purpose: '释放 InferenceSession 并立即触发 GC 回收内存，停用对应槽位',
-    payload: '{ "name": "Tract2Vox-Lite" } 或 { "all": true }',
+    payload: '{ "name": "Vox2Align-Lite v2" } 或 { "all": true }',
   },
   {
     method: 'POST',
     path: '/api/models/local/mount',
-    purpose: '按本机磁盘路径挂载单个 .onnx 或递归扫描目录（最大深度 2）批量匹配装载（上限 256 MiB）',
+    purpose: '按本机磁盘路径挂载单个 .onnx 或扫描目录（最大深度 2）批量匹配装载（上限 256 MiB）',
     payload: '单文件：{ "path": "D:\\\\m.onnx", "name"?: "slot" }；目录：{ "folder": "D:\\\\models", "mount": true }',
   },
   {
     method: 'POST',
     path: '/api/models/local/mount-binary',
-    purpose: '接收浏览器上传的 .onnx 二进制流，自动校验契约并暂存至 .cache/custom-models/（受 HTTP 代理包体限制）',
-    payload: 'Query: ?filename=custom.onnx&name=<slot>（name 可选，缺省按契约自动匹配），Body: octet-stream（1 KB – 64 MiB）',
+    purpose: '接收浏览器上传的 .onnx 二进制流，自动校验契约并暂存至 .cache/custom-models/',
+    payload: 'Query: ?filename=custom.onnx&name=<slot>，Body: octet-stream（1 KB – 64 MiB）',
   },
   {
     method: 'POST',
     path: '/api/models/local/reset',
-    purpose: '解除外置覆盖，恢复对应槽位或全部 9 槽位为随包内置默认 ONNX 权重',
-    payload: '{ "name": "Vox2Tract-Lite" } 或 { "all": true }',
+    purpose: '解除外置覆盖，恢复对应槽位或全部槽位为随包内置默认 ONNX 权重',
+    payload: '{ "name": "Vox2Spk-Lite" } 或 { "all": true }',
   },
 ];
 
@@ -880,22 +925,29 @@ export function buildTrainingReportMarkdown(): string {
     '',
     `> 文档版本：${MODEL_TRAINING_REPORT_META.version}`,
     `> 模型体系：${MODEL_TRAINING_REPORT_META.suiteName}`,
-    `> ${MODEL_TRAINING_REPORT_META.flagshipLineage}`,
     `> 统一解剖基准：${MODEL_TRAINING_REPORT_META.geometryStandard}`,
     `> 计算与推理环境：${MODEL_TRAINING_REPORT_META.hardwareEnv}`,
     '',
-    '## 1. 关联模型总表（Model Zoo · 14 项）',
+    '## 1. 最新 8 模型核心体系与扩展档位',
     '',
-    '| 官方模型名 | 层级 | 核心架构 | 参数量 | 权重体积 | 训练步数与周期 | 核心实测指标 |',
+    '| 模型名 | 定位 | 核心网络结构 | 参数量 | 权重体积 | 训练周期 | 核心实测指标 |',
     '| --- | --- | --- | --- | --- | --- | --- |',
     ...FULL_MODEL_ZOO.map(
       (m) => `| ${m.name} | ${m.tier} | ${m.arch} | ${m.params} | ${m.weightSize} | ${m.schedule} | ${m.metrics} |`,
     ),
     '',
-    `> 本地纯 ONNX 运行时矩阵共 ${LOCAL_MODEL_TOTALS.count} 个模型，合计 **${LOCAL_MODEL_TOTALS.totalParamsText}** 参数（ONNX initializer 实测 27.62 M）、**${LOCAL_MODEL_TOTALS.totalSizeText}**（十进制约 61.82 MB），无 PyTorch 运行时依赖。`,
+    `> 默认运行矩阵共 ${LOCAL_MODEL_TOTALS.count} 个模型，合计 **${LOCAL_MODEL_TOTALS.totalParamsText}** 参数、**${LOCAL_MODEL_TOTALS.totalSizeText}**，零 PyTorch 运行时依赖；独立对齐槽位 \`Vox2Align-Lite v2\` 默认隐藏不装载，保留供用户针对其他语种/方言自行训练扩展。`,
     `> 延迟测量口径：${MODEL_TRAINING_REPORT_META.cpuBenchmarkProtocol}`,
     '',
-    '## 2. 27 维声道—声门物理控制空间契约（Native 27D v1）',
+    '## 2. 神经网络架构分层拆解（CNN / Conformer / RNN）',
+    '',
+    '| 模型 | 阶段 | 参数量 | 架构家族 | CNN 层 | RNN 层 | Attention / Conformer | Linear 层 | 核心特点 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...MODEL_ARCHITECTURE_LAYERS.map(
+      (a) => `| ${a.name} | ${a.stage} | ${a.params} | ${a.family} | ${a.cnn} | ${a.rnn} | ${a.attention} | ${a.linear} | ${a.highlight} |`,
+    ),
+    '',
+    '## 3. 27 维声道—声门物理控制空间契约（Native 27D）',
     '',
     '| 下标 | 参数 | 分组 | 下界 | 上界 | 单位 | 归一化 | 生理与声学意义 |',
     '| --- | --- | --- | --- | --- | --- | --- | --- |',
@@ -903,7 +955,15 @@ export function buildTrainingReportMarkdown(): string {
       (p) => `| ${p.idx} | ${p.code} | ${p.group} | ${p.min} | ${p.max} | ${p.unit} | ${p.norm} | ${p.meaning} |`,
     ),
     '',
-    '## 3. 全量训练数据集清单',
+    '## 4. 32 维通用国际音标发音特征体系（PHON_FEAT_NAMES_32）',
+    '',
+    '| 下标 | 特征名 | 分组 | 取值范围 | 代表音标 | 语音学意义 |',
+    '| --- | --- | --- | --- | --- | --- |',
+    ...IPA32_FEATURE_SPECS.map(
+      (f) => `| ${f.idx} | ${f.key} | ${f.group} | ${f.range} | ${f.examples} | ${f.meaning} |`,
+    ),
+    '',
+    '## 5. 扩充后训练与评测语料清单（18 项数据源）',
     '',
     '| 语料/数据集 | 类别 | 规模 | 时长 / 构成 | 使用模型 | 说明 |',
     '| --- | --- | --- | --- | --- | --- |',
@@ -911,22 +971,13 @@ export function buildTrainingReportMarkdown(): string {
       (c) => `| ${c.name} | ${c.category} | ${c.scale} | ${c.durationOrSpk} | ${c.usedBy} | ${c.notes} |`,
     ),
     '',
-    '## 4. 关键训练经验与工程复盘（10 项记录）',
+    '## 6. ONNX 槽位输入输出张量契约与二次训练扩展',
     '',
-    ...TRAINING_EXPERIENCE_HIGHLIGHTS.map(
-      (item, idx) =>
-        `${idx + 1}. **【${item.category}】${item.title}**\n   - 现象与根因：${item.finding}\n   - 解决策略：${item.remedy}`,
-    ),
-    '',
-    '## 5. 9 个 ONNX 槽位输入输出张量契约',
-    '',
-    '| 槽位名称 | 输入张量契约 | 输出张量契约 | 文件名匹配关键词 | 卸载降级行为 |',
+    '| 槽位名称 | 输入张量契约 | 输出张量契约 | 文件名匹配关键词 | 卸载降级 / 扩展说明 |',
     '| --- | --- | --- | --- | --- |',
     ...ONNX_SLOT_CONTRACTS.map(
-      (c) => `| ${c.name} | \`${c.inputs}\` | \`${c.outputs}\` | \`${c.patterns}\` | ${c.fallback} |`,
+      (c) => `| ${c.name}${c.optionalNote ? ` (${c.optionalNote})` : ''} | \`${c.inputs}\` | \`${c.outputs}\` | \`${c.patterns}\` | ${c.fallback} |`,
     ),
-    '',
-    '## 6. 使用更多语料二次训练与自定义换模指南',
     '',
     ...RETRAINING_RECIPES.flatMap((r) => [
       `### ${r.scenario}（${r.difficulty}）`,
@@ -940,7 +991,7 @@ export function buildTrainingReportMarkdown(): string {
       '```',
       '',
     ]),
-    '## 7. 生成引擎与本地 ONNX 热插拔装载接口',
+    '## 7. 热插拔与外置模型装载 HTTP API',
     '',
     '| 方法 | 端点 | 用途 | 请求/响应说明 |',
     '| --- | --- | --- | --- |',

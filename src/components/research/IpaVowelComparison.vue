@@ -1,17 +1,21 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import IconSvg from '@/components/common/IconSvg.vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import { ipaReferenceUrl } from '@/data/ipa-reference-library';
 import { measureRecordingSilence, type RecordingSilence } from '@/data/recording-silence.js';
 import {
   VOWEL_GAUSSIAN_STOPS,
   formatVowelChartLabel,
+  interpolateVowelTrackAt,
   isRoundedVowelSymbol,
   loadVowelMeasurements,
   measureSavedVowelPoses,
+  measureVowelFormantTrack,
   vowelSymbolKey,
   type RecordedVowelFormants,
   type VowelReferenceMode,
+  type VowelTrackFrame,
 } from '@/data/ipa-vowel-measurements';
 import { vowelAxisFraction, vowelAxisTicks, type VowelCoordinateScale } from './ptb-physics-charts';
 import '@/styles/acoustic-charts.css';
@@ -24,6 +28,11 @@ const props = defineProps<{
   symbol: string;
   recording?: string;
   pose: Omit<Pose, 'symbol'> | null;
+  trackRows?: readonly (readonly number[])[] | null;
+  trackKey?: string;
+  playing?: boolean;
+  playbackTime?: number;
+  dynamicActive?: boolean;
 }>();
 
 const emit = defineEmits<{ selectRecording: [id: string] }>();
@@ -47,6 +56,10 @@ const VIEW_LIMITS = {
 
 const view = ref<VowelViewport>({ ...DEFAULT_VIEW });
 const coordinateScale = ref<VowelCoordinateScale>('logarithmic');
+const scaleOptions: ReadonlyArray<SelectOption<VowelCoordinateScale>> = [
+  { value: 'logarithmic', label: '对数' },
+  { value: 'linear', label: '线性' },
+];
 const isCustomView = computed(
   () =>
     Math.abs(view.value.f2Hi - DEFAULT_VIEW.f2Hi) > 1 ||
@@ -79,9 +92,20 @@ const silence = shallowRef<RecordingSilence | null>(null);
 const silenceStatus = ref('');
 const recordedRecords = shallowRef<RecordedVowelFormants[]>([]);
 const transferRecords = shallowRef<RecordedVowelFormants[]>([]);
-const message = ref('');
+const recordsLoading = ref(false);
+const recordsLoaded = ref(false);
+const message = computed(() => {
+  if (recordsLoading.value) return '正在读取元音实测与重建共振峰…';
+  if (!recordsLoaded.value) return '';
+  const activeSet = mode.value === 'recorded' ? recordedRecords.value : transferRecords.value;
+  if (!recordedRecords.value.length && !transferRecords.value.length) return '元音参考点暂未载入';
+  if (!activeSet.length) return '当前来源暂无可用元音参考点';
+  return '';
+});
 const live = shallowRef<LivePoint | null>(null);
 const liveMessage = ref('');
+const trackFrames = shallowRef<Array<VowelTrackFrame | null>>([]);
+const trackFps = ref(50);
 const retry = ref(0);
 const hoveredId = ref<string | null>(null);
 
@@ -162,7 +186,23 @@ const referenceReadout = computed(() => {
     pair.rec && pair.tr && `Δ(${fmtSigned(pair.dF1)}, ${fmtSigned(pair.dF2)}, ${fmtSigned(pair.dF3)})`,
   ].filter(Boolean).join(' · ');
 });
-const liveReadout = computed(() => live.value ? `当前构型 ${formatF123(live.value, true)}` : liveMessage.value);
+const dynamicLive = computed<LivePoint | null>(() => {
+  if (!props.dynamicActive || !trackFrames.value.length) return null;
+  const pt = interpolateVowelTrackAt(trackFrames.value, props.playbackTime ?? 0, trackFps.value);
+  if (!pt) return null;
+  return { symbol: props.symbol, ...pt };
+});
+
+const displayedLive = computed<LivePoint | null>(() =>
+  props.dynamicActive ? (dynamicLive.value ?? live.value) : live.value,
+);
+
+const liveReadout = computed(() => {
+  if (props.dynamicActive && dynamicLive.value) {
+    return `动态帧 (${(props.playbackTime ?? 0).toFixed(2)}s) ${formatF123(dynamicLive.value, true)}`;
+  }
+  return displayedLive.value ? `当前构型 ${formatF123(displayedLive.value, true)}` : liveMessage.value;
+});
 
 watch([showSilence, () => props.recording ?? selected.value?.id], async ([show, id], _, cleanup) => {
   silence.value = null;
@@ -198,7 +238,7 @@ watch(
     cleanup(() => {
       active = false;
     });
-    message.value = '正在读取元音实测与重建共振峰…';
+    recordsLoading.value = true;
     const [recRes, trRes] = await Promise.allSettled([
       loadVowelMeasurements('recorded', ''),
       loadVowelMeasurements('transfer', speaker),
@@ -206,14 +246,8 @@ watch(
     if (!active) return;
     recordedRecords.value = recRes.status === 'fulfilled' ? recRes.value.records : [];
     transferRecords.value = trRes.status === 'fulfilled' ? trRes.value.records : [];
-    const activeSet = mode.value === 'recorded' ? recordedRecords.value : transferRecords.value;
-    if (!recordedRecords.value.length && !transferRecords.value.length) {
-      message.value = '元音参考点暂未载入';
-    } else if (!activeSet.length) {
-      message.value = '当前来源暂无可用元音参考点';
-    } else {
-      message.value = '';
-    }
+    recordsLoaded.value = true;
+    recordsLoading.value = false;
   },
   { immediate: true },
 );
@@ -270,6 +304,32 @@ watch(
       controller.abort();
       clearTimeout(timer);
     });
+  },
+  { immediate: true },
+);
+
+// Preload cached 50 Hz formant trajectory for silky 60 fps live tracking during playback & scrubbing
+watch(
+  [() => props.speaker, () => props.symbol, () => props.trackKey, () => props.trackRows, visible, retry],
+  async ([speaker, symbol, trackKey, rows, show], _, cleanup) => {
+    trackFrames.value = [];
+    trackFps.value = 50;
+    if (!show || !symbol || !rows?.length || !trackKey) return;
+    const controller = new AbortController();
+    let active = true;
+    cleanup(() => {
+      active = false;
+      controller.abort();
+    });
+    try {
+      const result = await measureVowelFormantTrack(speaker, symbol, trackKey, rows, controller.signal);
+      if (active && !controller.signal.aborted) {
+        trackFrames.value = result.frames;
+        trackFps.value = result.fps;
+      }
+    } catch {
+      if (active) trackFrames.value = [];
+    }
   },
   { immediate: true },
 );
@@ -412,7 +472,7 @@ function tooltipText(id: string, fallbackPoint: RecordedVowelFormants) {
 
 const labels = computed(() => {
   const points = [...references.value].sort(
-    (a, b) => Number(b === selected.value) - Number(a === selected.value),
+    (a, b) => Number(a === selected.value) - Number(b === selected.value),
   );
   return points.map((point) => {
     const px = x(point.f2);
@@ -423,6 +483,24 @@ const labels = computed(() => {
       px >= PLOT.left - 2 && px <= PLOT.right + 2 && py >= PLOT.top - 2 && py <= PLOT.bottom + 2;
     return { point, px, py, inPlot, displaySymbol, rounded };
   });
+});
+
+const dynamicTrailPath = computed(() => {
+  if (!props.dynamicActive || trackFrames.value.length < 2) return '';
+  let d = '';
+  let penDown = false;
+  for (let i = 0; i < trackFrames.value.length; i++) {
+    const pt = trackFrames.value[i];
+    if (!pt || !Number.isFinite(pt.f1) || !Number.isFinite(pt.f2)) {
+      penDown = false;
+      continue;
+    }
+    const px = x(pt.f2).toFixed(1);
+    const py = y(pt.f1).toFixed(1);
+    d += `${penDown ? 'L' : 'M'}${px} ${py}`;
+    penDown = true;
+  }
+  return d;
 });
 
 const hoveredTooltip = computed(() => {
@@ -462,11 +540,16 @@ const hoveredTooltip = computed(() => {
             声道重建
           </button>
         </div>
-        <select v-model="coordinateScale" class="inp vowel-axis-select" aria-label="元音图坐标刻度"
-          title="F1 与 F2 可使用对数或线性坐标">
-          <option value="logarithmic">对数</option>
-          <option value="linear">线性</option>
-        </select>
+        <CustomSelect
+          class="vowel-axis-select"
+          size="sm"
+          aria-label="元音图坐标刻度"
+          title="F1 与 F2 可使用对数或线性坐标"
+          :min-menu-width="88"
+          :model-value="coordinateScale"
+          :options="scaleOptions"
+          @update:model-value="(v) => { coordinateScale = v as VowelCoordinateScale; }"
+        />
         <button
           type="button"
           class="btn sm"
@@ -521,7 +604,7 @@ const hoveredTooltip = computed(() => {
               v-for="[off, w] in VOWEL_GAUSSIAN_STOPS"
               :key="'gu-' + off"
               :offset="`${off * 100}%`"
-              stop-color="var(--vowel-unrounded, #0ea5e9)"
+              stop-color="var(--vowel-unrounded)"
               :stop-opacity="(0.44 * w).toFixed(3)"
             />
           </radialGradient>
@@ -530,7 +613,7 @@ const hoveredTooltip = computed(() => {
               v-for="[off, w] in VOWEL_GAUSSIAN_STOPS"
               :key="'gr-' + off"
               :offset="`${off * 100}%`"
-              stop-color="var(--vowel-rounded, #9333ea)"
+              stop-color="var(--vowel-rounded)"
               :stop-opacity="(0.44 * w).toFixed(3)"
             />
           </radialGradient>
@@ -616,12 +699,19 @@ const hoveredTooltip = computed(() => {
           </g>
 
           <path
-            v-if="live"
+            v-if="dynamicTrailPath"
+            class="live-trail"
+            :d="dynamicTrailPath"
+          />
+
+          <path
+            v-if="displayedLive"
             class="live-point"
-            :transform="`translate(${x(live.f2)},${y(live.f1)})`"
+            :class="{ playing: Boolean(props.playing && dynamicLive) }"
+            :transform="`translate(${x(displayedLive.f2)},${y(displayedLive.f1)})`"
             d="M0 -6L6 0 0 6 -6 0Z"
           >
-            <title>当前构型 · {{ formatF123(live, true) }}</title>
+            <title>{{ props.dynamicActive && dynamicLive ? `动态帧 (${(props.playbackTime ?? 0).toFixed(2)}s)` : '当前构型' }} · {{ formatF123(displayedLive, true) }}</title>
           </path>
         </g>
       </svg>
@@ -705,7 +795,7 @@ const hoveredTooltip = computed(() => {
       </div>
       <div class="vowel-readout-row">
         <span v-if="message" class="vowel-readout" role="status" :title="message">{{ message }}</span>
-        <span v-else class="vowel-readout" :class="live ? 'live-readout' : 'muted'" :title="liveReadout" translate="no">
+        <span v-else class="vowel-readout" :class="displayedLive ? 'live-readout' : 'muted'" :title="liveReadout" translate="no">
           {{ liveReadout }}
         </span>
         <button v-if="message.includes('暂未载入')" type="button" class="btn xs" @click="retry++">
@@ -754,10 +844,7 @@ const hoveredTooltip = computed(() => {
 }
 
 .vowel-axis-select {
-  width: 50px;
-  height: var(--control-height-sm);
-  padding: 0 4px;
-  font-size: var(--control-font-size-sm);
+  width: 66px;
 }
 
 .silence-row {
@@ -869,19 +956,19 @@ const hoveredTooltip = computed(() => {
 }
 
 .vowel-peak-node.is-unrounded {
-  color: var(--vowel-unrounded-text, #075985);
+  color: var(--vowel-unrounded-text);
 }
 
 .vowel-peak-node.is-unrounded .peak-glyph {
-  fill: var(--vowel-unrounded-text, #075985);
+  fill: var(--vowel-unrounded-text);
 }
 
 .vowel-peak-node.is-rounded {
-  color: var(--vowel-rounded-text, #6b21a8);
+  color: var(--vowel-rounded-text);
 }
 
 .vowel-peak-node.is-rounded .peak-glyph {
-  fill: var(--vowel-rounded-text, #6b21a8);
+  fill: var(--vowel-rounded-text);
 }
 
 .vowel-peak-node:focus-visible .hit {
@@ -892,19 +979,19 @@ const hoveredTooltip = computed(() => {
 .tip-lip-pill {
   padding: 0 5px;
   border-radius: 999px;
-  font-family: var(--font-sans, sans-serif);
+  font-family: var(--font-ui);
   font-size: 0.72rem;
   font-weight: 600;
 }
 
 .tip-lip-pill.unrounded {
-  color: var(--vowel-unrounded-text, #075985);
-  background: color-mix(in srgb, var(--vowel-unrounded, #0ea5e9) 16%, transparent);
+  color: var(--vowel-unrounded-text);
+  background: color-mix(in srgb, var(--vowel-unrounded) 16%, transparent);
 }
 
 .tip-lip-pill.rounded {
-  color: var(--vowel-rounded-text, #6b21a8);
-  background: color-mix(in srgb, var(--vowel-rounded, #9333ea) 16%, transparent);
+  color: var(--vowel-rounded-text);
+  background: color-mix(in srgb, var(--vowel-rounded) 16%, transparent);
 }
 
 .vowel-foot-top {
@@ -919,7 +1006,7 @@ const hoveredTooltip = computed(() => {
   flex: none;
   align-items: center;
   gap: 7px;
-  font-family: var(--font-sans, sans-serif);
+  font-family: var(--font-ui);
   color: var(--muted);
 }
 
@@ -938,11 +1025,21 @@ const hoveredTooltip = computed(() => {
 }
 
 .gauss-swatch.unrounded {
-  background: radial-gradient(circle, var(--vowel-unrounded, #0ea5e9) 0%, color-mix(in srgb, var(--vowel-unrounded, #0ea5e9) 38%, transparent) 55%, transparent 100%);
+  background: radial-gradient(circle, var(--vowel-unrounded) 0%, color-mix(in srgb, var(--vowel-unrounded) 38%, transparent) 55%, transparent 100%);
 }
 
 .gauss-swatch.rounded {
-  background: radial-gradient(circle, var(--vowel-rounded, #9333ea) 0%, color-mix(in srgb, var(--vowel-rounded, #9333ea) 38%, transparent) 55%, transparent 100%);
+  background: radial-gradient(circle, var(--vowel-rounded) 0%, color-mix(in srgb, var(--vowel-rounded) 38%, transparent) 55%, transparent 100%);
+}
+
+.live-trail {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 48%, transparent);
+  stroke-width: 1.35px;
+  stroke-dasharray: 2.5 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 
 .live-point {
@@ -952,16 +1049,21 @@ const hoveredTooltip = computed(() => {
   pointer-events: none;
 }
 
+.live-point.playing {
+  fill: color-mix(in srgb, var(--accent) 28%, transparent);
+  stroke-width: 2.25px;
+}
+
 .vowel-float-tip {
   position: absolute;
-  z-index: 8;
+  z-index: var(--z-sticky);
   pointer-events: none;
   max-width: 260px;
   padding: 5px 8px;
   border-radius: var(--r-ctrl);
-  background: var(--popover-bg, var(--panel));
-  border: 1px solid var(--panel-border, var(--chart-outline));
-  box-shadow: var(--popover-shadow, 0 6px 18px rgba(0, 0, 0, 0.2));
+  background: var(--popover-bg);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--popover-shadow);
   color: var(--text);
   font-size: 0.816667rem;
   line-height: 1.45;

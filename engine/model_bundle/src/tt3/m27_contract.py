@@ -50,12 +50,14 @@ LEGACY_GLOTTIS8_MASK = np.array([0.25, 0.0, 0.25, 0.0, 0.25, 0.0, 0.0, 0.0], dty
 
 
 def normalize_f0_m27(f0_hz: np.ndarray) -> np.ndarray:
-    arr = np.clip(np.asarray(f0_hz, dtype=np.float32), F0_MIN_M27, F0_MAX_M27)
+    """Affine log-F0 normalization anchored at 40 Hz -> -1.0 and 600 Hz -> +1.0 (unclamped > 0 Hz)."""
+    arr = np.maximum(np.asarray(f0_hz, dtype=np.float32), np.float32(1e-3))
     return (2.0 * (np.log(arr) - LOG_F0_MIN_M27) / (LOG_F0_MAX_M27 - LOG_F0_MIN_M27) - 1.0).astype(np.float32)
 
 
 def denormalize_f0_m27(f0_norm: np.ndarray) -> np.ndarray:
-    arr = np.clip(np.asarray(f0_norm, dtype=np.float32), -1.0, 1.0)
+    """Inverse affine log-F0 mapping preserving unclamped wide F0 outside [-1, 1]."""
+    arr = np.clip(np.asarray(f0_norm, dtype=np.float32), np.float32(-10.0), np.float32(10.0))
     return np.exp(0.5 * (arr + 1.0) * (LOG_F0_MAX_M27 - LOG_F0_MIN_M27) + LOG_F0_MIN_M27).astype(np.float32)
 
 
@@ -70,18 +72,20 @@ def denormalize_pr_m27(pr_norm: np.ndarray) -> np.ndarray:
 
 
 def normalize_m27(m27: np.ndarray) -> np.ndarray:
-    """Normalize physical (..., 27) control array to [-1, 1], with log scaling on F0 (col 17)."""
-    arr = np.clip(np.asarray(m27, dtype=np.float32), M27_MIN, M27_MAX)
+    """Normalize physical (..., 27) control array to [-1, 1], with unclamped log scaling on F0 (col 17)."""
+    raw = np.asarray(m27, dtype=np.float32)
+    arr = np.clip(raw, M27_MIN, M27_MAX)
     out = 2.0 * (arr - M27_MIN) / (M27_MAX - M27_MIN) - 1.0
-    out[..., F0_IDX] = normalize_f0_m27(arr[..., F0_IDX])
+    out[..., F0_IDX] = normalize_f0_m27(raw[..., F0_IDX])
     return out.astype(np.float32)
 
 
 def denormalize_m27(m27_norm: np.ndarray) -> np.ndarray:
-    """Restore [-1, 1] normalized (..., 27) controls back to native JD2 physical units."""
-    arr = np.clip(np.asarray(m27_norm, dtype=np.float32), -1.0, 1.0)
+    """Restore normalized (..., 27) controls back to physical units (unclamped F0 on col 17)."""
+    raw = np.asarray(m27_norm, dtype=np.float32)
+    arr = np.clip(raw, -1.0, 1.0)
     out = 0.5 * (arr + 1.0) * (M27_MAX - M27_MIN) + M27_MIN
-    out[..., F0_IDX] = denormalize_f0_m27(arr[..., F0_IDX])
+    out[..., F0_IDX] = denormalize_f0_m27(raw[..., F0_IDX])
     return out.astype(np.float32)
 
 

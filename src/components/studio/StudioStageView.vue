@@ -2,9 +2,9 @@
 import AudioFormatExport from "./AudioFormatExport.vue";
 import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
 import { fetchOnboardingAudioFile, ONBOARDING_AUDIO_SLOTS } from '@/data/onboarding-samples';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from 'vue';
 import {
-  F0_LIMIT_HZ,
+  F0_UI_SLIDER_HZ,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
   msToSamples,
@@ -14,6 +14,7 @@ import {
   type Clip,
   type SubtitleStyleConfig,
   type SubtitleJitterConfig,
+  type SubtitleAngleJitterConfig,
   type VcProject,
   type PhonationAnchor,
   type SegmentAnchor,
@@ -35,7 +36,7 @@ import {
   type TractPoseExtras,
 } from '@/data/ptb-ipa-presets';
 import { getCurrentPageScale } from '@/styles/skin-registry';
-import { interpolateTrackFrame, trackFrameAt, withImportedTractFrames } from '@/components/research/annotation-edit';
+import { interpolateTrackFrame, withImportedTractFrames } from '@/components/research/annotation-edit';
 import { writeRecordedVoqs } from '@/components/research/voqs-actions';
 import type { VoqsProfile, VoqsTake } from '@/data/voqs-library';
 import VoqsAnchorPicker from '@/components/research/VoqsAnchorPicker.vue';
@@ -52,9 +53,40 @@ import { openStageDirectory, STAGE_DIRECTORY_DRAG_TYPE, stageFolderFromFiles, su
 import { readTextGridFile,clipFromTextGrid } from '@/data/textgrid-alignment';
 import { denoiseFile } from '@/data/denoise';
 import { importMedia, mediaUrl, pruneSessionMedia, studioAudioContext, sessionMedia } from './studio-media';
-import { baseLayerTransform, DEFAULT_TRANSFORMS, drawScene, visualLimit } from './stage-scene';
+import { baseLayerTransform, DEFAULT_TRANSFORMS, drawScene, readSubtitleKaraokeFill, visualLimit } from './stage-scene';
+import {
+  EASING_OPTIONS,
+  encodeKeyframeEasing,
+  parseKeyframeEasing,
+  resolveEasing,
+  type EasingName,
+} from './stage-motion';
+import {
+  CAMERA_PRESET_OPTIONS,
+  DEFAULT_STAGE_CINEMA,
+  OUTRO_PRESET_OPTIONS,
+  RHYTHM_FX_OPTIONS,
+  STAGE_LOOK_OPTIONS,
+  readStageCinemaConfig,
+  stageCinemaKeys,
+  type StageCinemaConfig,
+} from './stage-fx';
+import {
+  DEFAULT_LAYER_TRANSITION,
+  TRANSITION_OPTIONS,
+  layerTransitionKeys,
+  readLayerTransition,
+  type LayerTransitionConfig,
+} from './stage-transitions';
+import {
+  detectBeatGridFromAudioBuffer,
+  readStageBeatGrid,
+  snapSmpToBeatGrid,
+  stageBeatGridKeys,
+  type StageBeatGrid,
+} from './stage-beat-sync';
 import { getStagePhrase, prepareStageAudio, scheduleStageAudio, stageSoundForClip, visualSynthesisMotion } from './stage-audio';
-import { applyDuetScorebook, importLegacyDuet } from './legacy-duet';
+import { applyDuetScorebook, importLegacyDuet, pruneDuetScenes } from './legacy-duet';
 import AudioWaveform from './AudioWaveform.vue';
 import StageClipGain from './StageClipGain.vue';
 import { visibleStageGainPoints } from './stage-gain';
@@ -63,8 +95,24 @@ import StudioVideoThumbnail from './StudioVideoThumbnail.vue';
 import VoiceTransferPanel from './VoiceTransferPanel.vue';
 import type { TransferChoice, VoiceTransferResult } from './voice-transfer';
 import StageVideo from './StageVideo.vue';
-import { TRACT_STYLE_OPTIONS } from './stage-tract-renderer';
-import { DEFAULT_SUBTITLE_JITTER, SUBTITLE_MAX_FONT_PX, SUBTITLE_MAX_JITTER_PCT, SUBTITLE_MIN_JITTER_PCT, type StageCaptionBounds } from './stage-caption';
+import {
+  DEFAULT_STAGE_TRACT_VIEW,
+  TRACT_3D_ANGLE_OPTIONS,
+  TRACT_STYLE_OPTIONS,
+  readStageTractViewConfig,
+  stageTractViewKeys,
+  type StageTractViewConfig,
+} from './stage-tract-renderer';
+import {
+  DEFAULT_SUBTITLE_ANGLE_JITTER,
+  DEFAULT_SUBTITLE_JITTER,
+  SUBTITLE_MAX_ANGLE_JITTER_DEG,
+  SUBTITLE_MAX_FONT_PX,
+  SUBTITLE_MAX_JITTER_PCT,
+  SUBTITLE_MIN_ANGLE_JITTER_DEG,
+  SUBTITLE_MIN_JITTER_PCT,
+  type StageCaptionBounds,
+} from './stage-caption';
 import CustomSelect from '@/components/common/CustomSelect.vue';
 import VoiceRenderSelect from '@/components/common/VoiceRenderSelect.vue';
 import { synthesisGainMode, voiceRenderLabels, voiceRenderMode } from '@/data/voice-renderer';
@@ -82,11 +130,13 @@ import {
 const store = useWorkbenchStore();
 const activeSpeaker = computed(() => store.project.value.voices[store.activeVoiceId.value]?.speaker ?? 'JD2');
 
-// Resizable panes (stage grows flexibly to fill viewport; NLE defaults snugly to 6 tracks = 226px with zero empty void)
-const directoryW = ref(206);
-const mediaW = ref(360);
-const rightW = ref(294);
-const nleH = ref(330);
+// Resizable panes (local directory starts collapsed so 1440x900 16:10 fits cleanly with zero horizontal scroll)
+const directoryOpen = ref(false);
+const directoryW = ref(200);
+const mediaW = ref(268);
+const rightW = ref(276);
+const nleH = ref(316);
+const TRACK_HDR_W = 206;
 
 type StudioAssetKind = 'jianpu' | 'audio' | 'sprite' | 'video';
 interface StudioAssetItem {
@@ -150,7 +200,10 @@ async function browseLocalDirectory() {
   directoryOpening.value = true;
   try {
     const chosen = await openStageDirectory();
-    if (chosen) directoryRoot.value = chosen;
+    if (chosen) {
+      directoryRoot.value = chosen;
+      directoryOpen.value = true;
+    }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return;
     directoryFallback.value = true;
@@ -160,8 +213,12 @@ async function browseLocalDirectory() {
 function chooseFallbackDirectory(event: Event) {
   const input = event.target as HTMLInputElement;
   const chosen = input.files ? stageFolderFromFiles(input.files) : null;
-  if (chosen) directoryRoot.value = chosen;
-  else store.pushToast('此文件夹中没有可读取的文件。', 'info');
+  if (chosen) {
+    directoryRoot.value = chosen;
+    directoryOpen.value = true;
+  } else {
+    store.pushToast('此文件夹中没有可读取的文件。', 'info');
+  }
   input.value = '';
 }
 
@@ -217,6 +274,7 @@ interface TransformKeyframe {
   y: number;
   scale: number;
   opacity: number;
+  ease?: EasingName;
 }
 
 const KEYFRAME_SNAP_SMP = msToSamples(45);
@@ -239,13 +297,25 @@ const v3Sub = ref<ActorTransform & { reveal: SubtitleStyleConfig['reveal_mode'];
 });
 
 const subtitleJitter = ref<SubtitleJitterConfig>({ ...DEFAULT_SUBTITLE_JITTER });
+const subtitleAngleJitter = ref<SubtitleAngleJitterConfig>({ ...DEFAULT_SUBTITLE_ANGLE_JITTER });
 const tractRenderStyle = computed(() => stageLayer(store.project.value, 'v1')?.tract_render_style ?? 'natural');
+const tractViewConfig = ref<StageTractViewConfig>({ ...DEFAULT_STAGE_TRACT_VIEW });
 
 const layerKeyframes = ref<Record<KeyframedTrackId, TransformKeyframe[]>>({ v1: [], v2: [], v3: [] });
 
 const activeTransformDragTarget = ref<KeyframedTrackId | null>(null);
 
 const v0Video = ref({ visible: true, muted: true, opacity: 1, scale: 1 });
+const cinemaFx = ref<StageCinemaConfig>({ ...DEFAULT_STAGE_CINEMA });
+const layerTransitions = ref<Record<KeyframedTrackId, LayerTransitionConfig>>({
+  v1: { ...DEFAULT_LAYER_TRANSITION },
+  v2: { ...DEFAULT_LAYER_TRANSITION },
+  v3: { ...DEFAULT_LAYER_TRANSITION },
+});
+const subtitleKaraokeFill = ref(false);
+const beatGrid = shallowRef<StageBeatGrid | null>(null);
+const beatSnapEnabled = ref(false);
+const analyzingBeats = ref(false);
 function getStageActor(target: KeyframedTrackId): ActorTransform {
   return target === 'v1' ? v1Tract.value : target === 'v2' ? v2Sprite.value : v3Sub.value;
 }
@@ -279,7 +349,7 @@ function evalLayerTransformAt(
     if (tSmp >= a.t_smp && tSmp <= b.t_smp) {
       const span = b.t_smp - a.t_smp;
       if (span <= 0) return { x: b.x, y: b.y, scale: b.scale, opacity: b.opacity };
-      const u = (tSmp - a.t_smp) / span;
+      const u = resolveEasing(b.ease)((tSmp - a.t_smp) / span);
       return {
         x: Math.round((a.x + (b.x - a.x) * u) * 10) / 10,
         y: Math.round((a.y + (b.y - a.y) * u) * 10) / 10,
@@ -305,6 +375,7 @@ function parseProjectTransformKeyframes(
       y: typeof k.y === 'number' && Number.isFinite(k.y) ? k.y : fallback.y,
       scale: typeof k.scale === 'number' && Number.isFinite(k.scale) ? k.scale : fallback.scale,
       opacity: typeof k.opacity === 'number' && Number.isFinite(k.opacity) ? k.opacity : fallback.opacity,
+      ease: parseKeyframeEasing(k.frame),
     }))
     .sort((a, b) => a.t_smp - b.t_smp);
 }
@@ -344,11 +415,21 @@ function hydrateLayersFromProject(): void {
   v0Video.value.visible = bg?.visible ?? true;
   v0Video.value.opacity = bg?.keys?.transform?.[0]?.opacity ?? 1;
   v0Video.value.scale = bg?.keys?.transform?.[0]?.scale ?? 1;
+  cinemaFx.value = readStageCinemaConfig(project);
+  beatGrid.value = readStageBeatGrid(project);
+  tractViewConfig.value = readStageTractViewConfig(stageLayer(project, 'v1'));
+  layerTransitions.value = {
+    v1: readLayerTransition(stageLayer(project, 'v1')),
+    v2: readLayerTransition(stageLayer(project, 'v2')),
+    v3: readLayerTransition(stageLayer(project, 'v3')),
+  };
   const subtitle = stageLayer(project, 'v3');
+  subtitleKaraokeFill.value = readSubtitleKaraokeFill(subtitle);
   if (subtitle) {
     v3Sub.value.visible = subtitle.visible;
     const subStyle = subtitle.style;
     subtitleJitter.value = { ...DEFAULT_SUBTITLE_JITTER, ...subStyle?.size_jitter };
+    subtitleAngleJitter.value = { ...DEFAULT_SUBTITLE_ANGLE_JITTER, ...subStyle?.angle_jitter };
     if (subStyle) {
       v3Sub.value.reveal = subStyle.reveal_mode;
       v3Sub.value.showIpa = subStyle.show_ipa;
@@ -441,6 +522,7 @@ function commitLayerKeyframes(
       y: Math.round(k.y * 10) / 10,
       scale: Math.round(k.scale * 100) / 100,
       opacity: Math.round(k.opacity * 100) / 100,
+      ease: k.ease ?? 'linear',
     }))
     .sort((a, b) => a.t_smp - b.t_smp);
   layerKeyframes.value = { ...layerKeyframes.value, [target]: sorted };
@@ -452,10 +534,21 @@ function commitLayerKeyframes(
       layer_id: getStageLayerId(target),
       visible: actor.visible,
       keys: {
-        transform: sorted,
+        transform: sorted.map(({ ease, ...rest }) => {
+          const frame = encodeKeyframeEasing(ease);
+          return frame ? { ...rest, frame } : rest;
+        }),
       },
     },
   });
+}
+
+function updateActiveKeyframeEasing(target: KeyframedTrackId, value: string | number): void {
+  const near = findKeyframeNearPlayhead(target);
+  if (!near) return;
+  const ease = String(value) as EasingName;
+  const list = layerKeyframes.value[target].map((k, idx) => idx === near.index ? { ...k, ease } : { ...k });
+  commitLayerKeyframes(target, list, `设置 ${target.toUpperCase()} 关键帧缓动`);
 }
 
 function commitLayerVisibility(target: KeyframedTrackId): void {
@@ -483,6 +576,7 @@ function upsertKeyframeAtPlayhead(
       y: actor.y,
       scale: actor.scale,
       opacity: actor.opacity,
+      ease: near.kf.ease ?? 'linear',
     };
     commitLayerKeyframes(
       target,
@@ -511,6 +605,8 @@ function upsertKeyframeAtPlayhead(
   }
 }
 
+const autoKeyframe = ref(true);
+
 function commitTransformEdit(target: KeyframedTrackId, label = `调整 ${target.toUpperCase()} 变换`) {
   const keys = layerKeyframes.value[target];
   if (!keys.length) {
@@ -523,12 +619,22 @@ function commitTransformEdit(target: KeyframedTrackId, label = `调整 ${target.
   } else if (keys.length === 1 && keys[0].t_smp === 0) {
     const { x, y, scale, opacity } = getStageActor(target);
     commitLayerKeyframes(target, [{ t_smp: 0, x, y, scale, opacity }], label);
-  } else if (findKeyframeNearPlayhead(target)) {
+  } else if (findKeyframeNearPlayhead(target) || autoKeyframe.value) {
     upsertKeyframeAtPlayhead(target, label);
   } else {
     syncActorTransformFromPlayhead(target);
-    store.pushToast('此处没有变换关键帧。可先点击「打关键帧」再调整。', 'info');
+    store.pushToast('此处没有变换关键帧。可开启「自动插帧」或点击「打关键帧」再调整。', 'info');
   }
+}
+
+function resetActorTransform(target: KeyframedTrackId): void {
+  const def = DEFAULT_ACTOR_TRANSFORM[target];
+  const actor = getStageActor(target);
+  actor.x = def.x;
+  actor.y = def.y;
+  actor.scale = def.scale;
+  actor.opacity = def.opacity;
+  commitTransformEdit(target, `重置 ${target.toUpperCase()} 变换`);
 }
 
 function deleteKeyframeAtPlayhead(target: KeyframedTrackId): void {
@@ -566,6 +672,18 @@ function commitTractRenderStyle(value: string | number): void {
   store.executeCommand({ type: 'project.replace', label: '更改 V1 声道画风', payload: { project } });
 }
 
+function commitTractViewConfig(patch: Partial<StageTractViewConfig>, label = '调整 V1 声道与人头模型'): void {
+  const next: StageTractViewConfig = { ...tractViewConfig.value, ...patch };
+  tractViewConfig.value = next;
+  const layer = stageLayer(store.project.value, 'v1');
+  if (!layer) return;
+  store.executeCommand({
+    type: 'visual.set_keys',
+    label,
+    payload: { layer_id: layer.id, keys: { tract_view: stageTractViewKeys(next) } },
+  });
+}
+
 function commitSubtitleStyle(style: Partial<SubtitleStyleConfig>): void {
   store.executeCommand({ type: 'subtitle.style', label: '更新 V3 字幕样式', payload: style });
 }
@@ -581,9 +699,123 @@ function commitSubtitleJitter(): void {
   commitSubtitleStyle({ size_jitter: jitter });
 }
 
+function commitSubtitleAngleJitter(): void {
+  const jitter = { ...subtitleAngleJitter.value };
+  if (!Number.isFinite(jitter.min_deg) || !Number.isFinite(jitter.max_deg) || !Number.isSafeInteger(jitter.seed)
+      || jitter.min_deg < SUBTITLE_MIN_ANGLE_JITTER_DEG || jitter.max_deg > SUBTITLE_MAX_ANGLE_JITTER_DEG || jitter.min_deg > jitter.max_deg) {
+    store.pushToast('字幕角度抖动范围为 -90° 至 90°，下限需小于等于上限，种子需为整数。', 'warning');
+    subtitleAngleJitter.value = { ...DEFAULT_SUBTITLE_ANGLE_JITTER, ...stageLayer(store.project.value, 'v3')?.style?.angle_jitter };
+    return;
+  }
+  commitSubtitleStyle({ angle_jitter: jitter });
+}
+
 function commitBackground(): void {
   const bg = stageLayer(store.project.value, 'v0');
   if (bg) store.executeCommand({ type: 'visual.set_keys', label: '调整背景', payload: { layer_id: bg.id, visible: v0Video.value.visible, keys: { transform: [{ t_smp: 0, opacity: v0Video.value.opacity, scale: v0Video.value.scale }] } } });
+}
+
+function commitCinemaFx(patch: Partial<StageCinemaConfig>, label = '更新舞台运镜与质感'): void {
+  const next: StageCinemaConfig = { ...cinemaFx.value, ...patch };
+  cinemaFx.value = next;
+  const bg = stageLayer(store.project.value, 'v0');
+  if (!bg) return;
+  store.executeCommand({
+    type: 'visual.set_keys',
+    label,
+    payload: { layer_id: bg.id, keys: { cinema_fx: stageCinemaKeys(next) } },
+  });
+}
+
+function commitLayerTransition(target: KeyframedTrackId, patch: Partial<LayerTransitionConfig>): void {
+  const next: LayerTransitionConfig = { ...layerTransitions.value[target], ...patch };
+  layerTransitions.value = { ...layerTransitions.value, [target]: next };
+  const layerId = getStageLayerId(target);
+  if (!layerId) return;
+  store.executeCommand({
+    type: 'visual.set_keys',
+    label: `设置 ${target.toUpperCase()} 镜头转场`,
+    payload: { layer_id: layerId, keys: { transition_fx: layerTransitionKeys(next) } },
+  });
+}
+
+function commitSubtitleKaraokeFill(): void {
+  const layerId = getStageLayerId('v3');
+  if (!layerId) return;
+  store.executeCommand({
+    type: 'visual.set_keys',
+    label: subtitleKaraokeFill.value ? '开启卡拉 OK 柔边随读' : '关闭卡拉 OK 柔边随读',
+    payload: {
+      layer_id: layerId,
+      keys: {
+        caption_fx: subtitleKaraokeFill.value ? [{ t_smp: 0, frame: JSON.stringify({ karaokeFill: true }) }] : [],
+      },
+    },
+  });
+}
+
+async function analyzeTimelineBeats(): Promise<void> {
+  if (analyzingBeats.value) return;
+  const selected = selectedNleClip.value;
+  const candidate = (selected && isStageAudioTrack(selected.track) && selected.assetId && sessionMedia.get(selected.assetId)?.audio)
+    ? selected
+    : nleClips.value.find(c => c.track === 'a3' && c.assetId && sessionMedia.get(c.assetId)?.audio)
+      ?? nleClips.value.find(c => isStageAudioTrack(c.track) && c.assetId && sessionMedia.get(c.assetId)?.audio)
+      ?? nleClips.value.find(c => isStageVocalTrack(c.track));
+  if (!candidate) {
+    store.pushToast('时间线暂无可供分析节拍的音频片段，请先导入伴奏或人声。', 'info');
+    return;
+  }
+  analyzingBeats.value = true;
+  try {
+    let buffer = candidate.assetId ? sessionMedia.get(candidate.assetId)?.audio : undefined;
+    let offsetSmp = candidate.startSmp - candidate.sourceStartSmp;
+    if (!buffer) {
+      const resolved = await stageSoundForClip(store, candidate);
+      buffer = resolved.buffer;
+      offsetSmp = candidate.startSmp + resolved.sourceOriginSmp - candidate.sourceStartSmp;
+    }
+    const grid = detectBeatGridFromAudioBuffer(buffer, {
+      offsetSmp: Math.max(0, offsetSmp),
+      sourceLabel: candidate.label,
+    });
+    if (!grid.beatsSmp.length) {
+      store.pushToast('音频过短或缺少明显瞬态，未能提取节拍网格。', 'warning');
+      return;
+    }
+    const bg = stageLayer(store.project.value, 'v0');
+    if (bg) {
+      store.executeCommand({
+        type: 'visual.set_keys',
+        label: `识别节拍网格 (${grid.bpm} BPM)`,
+        payload: { layer_id: bg.id, keys: { beat_grid: stageBeatGridKeys(grid) } },
+      });
+    }
+    beatGrid.value = grid;
+    beatSnapEnabled.value = true;
+    store.pushToast(
+      `已从「${candidate.label}」识别节拍：${grid.bpm} BPM · ${grid.beatsSmp.length} 个拍点（置信度 ${Math.round(grid.confidence * 100)}%）`,
+      'success',
+      3200,
+    );
+  } catch (error) {
+    store.pushToast(error instanceof Error ? error.message : '节拍分析失败', 'warning');
+  } finally {
+    analyzingBeats.value = false;
+  }
+}
+
+function clearTimelineBeats(): void {
+  const bg = stageLayer(store.project.value, 'v0');
+  if (bg) {
+    store.executeCommand({
+      type: 'visual.set_keys',
+      label: '清除节拍网格',
+      payload: { layer_id: bg.id, keys: { beat_grid: [] } },
+    });
+  }
+  beatGrid.value = null;
+  beatSnapEnabled.value = false;
 }
 
 function onStageBackdropClick(e: MouseEvent): void {
@@ -618,18 +850,23 @@ function startStageActorDrag(target: KeyframedTrackId, e: PointerEvent, clipId?:
     const dxPct = (((ev.clientX - startX) / scale) / unscaledW) * 100;
     const dyPct = (((ev.clientY - startY) / scale) / unscaledH) * 100;
     actor.x = Math.round(Math.max(5, Math.min(95, origX + dxPct)) * 10) / 10;
-    actor.y = Math.round(Math.max(8, Math.min(95, origY + dyPct)) * 10) / 10;
+    actor.y = Math.round(Math.max(8, Math.min(94, origY + dyPct)) * 10) / 10;
   };
+  const captureEl = e.currentTarget as HTMLElement | null;
+  try { captureEl?.setPointerCapture?.(e.pointerId); } catch { /* noop */ }
   const onUp = () => {
+    try { captureEl?.releasePointerCapture?.(e.pointerId); } catch { /* noop */ }
     activeTransformDragTarget.value = null;
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
     if (actor.x !== origX || actor.y !== origY) {
       commitTransformEdit(target, `拖拽 ${target.toUpperCase()} 位置 (${actor.x}%, ${actor.y}%)`);
     }
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
 }
 
 function startStageActorResize(target: KeyframedTrackId, _corner: ResizeCorner, e: PointerEvent, clipId?: string): void {
@@ -641,9 +878,13 @@ function startStageActorResize(target: KeyframedTrackId, _corner: ResizeCorner, 
   const actor = getStageActor(target);
   const origScale = actor.scale;
   const pageScale = getCurrentPageScale();
+  const actorBoxEl = (e.currentTarget as HTMLElement | null)?.closest('.stage-actor') as HTMLElement | null;
   const rect = stageEl.getBoundingClientRect();
-  const cx = rect.left + (actor.x / 100) * rect.width;
-  const cy = rect.top + (actor.y / 100) * rect.height;
+  const boxRect = actorBoxEl?.getBoundingClientRect();
+  const cxRatio = boxRect && rect.width > 0 ? (boxRect.left + boxRect.width / 2 - rect.left) / rect.width : actor.x / 100;
+  const cyRatio = boxRect && rect.height > 0 ? (boxRect.top + boxRect.height / 2 - rect.top) / rect.height : actor.y / 100;
+  const cx = rect.left + cxRatio * rect.width;
+  const cy = rect.top + cyRatio * rect.height;
   const d0 = Math.max(12, Math.hypot((e.clientX - cx) / pageScale, (e.clientY - cy) / pageScale));
 
   resizingTarget.value = target;
@@ -652,23 +893,28 @@ function startStageActorResize(target: KeyframedTrackId, _corner: ResizeCorner, 
   const onMove = (ev: PointerEvent) => {
     const s = getCurrentPageScale();
     const curRect = stageEl.getBoundingClientRect();
-    const curCx = curRect.left + (actor.x / 100) * curRect.width;
-    const curCy = curRect.top + (actor.y / 100) * curRect.height;
+    const curCx = curRect.left + cxRatio * curRect.width;
+    const curCy = curRect.top + cyRatio * curRect.height;
     const d1 = Math.max(4, Math.hypot((ev.clientX - curCx) / s, (ev.clientY - curCy) / s));
     const nextScale = Math.max(0.25, Math.min(2.6, origScale * (d1 / d0)));
     actor.scale = Math.round(nextScale * 100) / 100;
   };
+  const captureEl = e.currentTarget as HTMLElement | null;
+  try { captureEl?.setPointerCapture?.(e.pointerId); } catch { /* noop */ }
   const onUp = () => {
+    try { captureEl?.releasePointerCapture?.(e.pointerId); } catch { /* noop */ }
     resizingTarget.value = null;
     activeTransformDragTarget.value = null;
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
     if (actor.scale !== origScale) {
       commitTransformEdit(target, `缩放 ${target.toUpperCase()} 至 ${Math.round(actor.scale * 100)}%`);
     }
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
 }
 
 const importingArrangement = ref(false);
@@ -696,7 +942,7 @@ async function receiveWorkspaceAudio() {
 async function applyArrangementStems(stems: NonNullable<WorkspaceAudio['stems']>) {
   const id=store.project.value.id;
   const start=store.playheadSmp.value;
-  if(stems.length>12) throw new Error('剪辑最多容纳 12 条音轨，请减少启用声部或导出分轨 ZIP');
+  if(stems.length>12) throw new Error('剪辑最多容纳 12 条音轨，请减少启用的轨道或导出分轨 ZIP');
   const assets=[];
   for(const stem of stems) assets.push(await importMedia(stem.file,stem.audio));
   if(!stageMounted || id!==store.project.value.id) return;
@@ -713,7 +959,7 @@ async function applyArrangementStems(stems: NonNullable<WorkspaceAudio['stems']>
     if (!length || asset.kind!=='audio') throw new Error('分轨音频不可读取');
     const candidates=Array.from({length:12},(_,n)=>('a'+(n+1)) as StageAudioTrack);
     const target=candidates.find(t=>!used.has(t) && (!stem.clip || t!=='a3') && !sequence.some(c=>c.track===t && c.startSmp<start+length && c.endSmp>start));
-    if(!target) throw new Error('播放头处没有足够的空闲音轨，请移动播放头或减少启用声部');
+    if(!target) throw new Error('播放头处没有足够的空闲音轨，请移动播放头或减少启用的轨道');
     used.add(target);
     if (!tracks.some(t=>t.id===target)) tracks.push({id:target,name:stem.label.slice(0,60),gain:1,muted:false});
     if(!project.assets[asset.id]) project.asset_order.push(asset.id);
@@ -726,7 +972,10 @@ async function applyArrangementStems(stems: NonNullable<WorkspaceAudio['stems']>
     sequence.push(...placeVisualCompanions(project,sequence,voiceCompanionClips(placement,phrase,stem.frames,undefined)));
   }
   const collision=placementCollision(before,sequence);
-  if(collision) throw new Error(collisionMessage(collision));
+  if(collision) {
+    pruneSessionMedia(store.getRestorableAssetIds());
+    throw new Error(collisionMessage(collision));
+  }
   layer.keys={...layer.keys,nle_audio_tracks:stageAudioTrackKeys(tracks,existingRemovedDefaultTracks(project)),nle_meta:timelineKeys(sequence)};
   const result=store.executeCommand({type:'project.replace',label:'接收编曲分轨',payload:{project}});
   if(!result.ok) throw new Error(result.error?.hint ?? '分轨导入失败');
@@ -875,7 +1124,10 @@ async function applyWorkspaceAudio(transfer: WorkspaceAudio) {
     });
   }
   const collision = placementCollision(sequence, final);
-  if (collision) throw new Error(collisionMessage(collision));
+  if (collision) {
+    pruneSessionMedia(store.getRestorableAssetIds());
+    throw new Error(collisionMessage(collision));
+  }
   layer.keys = { ...layer.keys, nle_meta: timelineKeys(final) };
   const result = store.executeCommand({ type: 'project.replace', label: (existing ? '更新原人声 · ' : '接收 ') + label, payload: { project } });
   if (!result.ok) throw new Error(result.error?.hint ?? '无法写入剪辑序列');
@@ -969,7 +1221,7 @@ async function replaceVoiceTransfer(transfer: VoiceTransferResult, target: Trans
     stageOrigin: { projectId: reference.projectId, clipId: clip.id },
   });
 }
-function appendAsset(asset: StudioAssetItem, at = store.playheadSmp.value, target?: StageTargetId, visualLane = 0) {
+function appendAsset(asset: StudioAssetItem, at = nleClips.value.length === 0 ? 0 : store.playheadSmp.value, target?: StageTargetId, visualLane = 0) {
   if (asset.kind === 'jianpu') return;
   if (!stageLayer(store.project.value, 'v0')) { store.pushToast('该工程缺少背景层，无法写入剪辑序列', 'warning'); return; }
   const clip = makeMediaClip(asset, at, target);
@@ -1095,9 +1347,7 @@ function onAssetClick(asset: StudioAssetItem) {
    focusedPhraseSource.value=Object.values(store.project.value.clips).find(c=>c.asset_id===asset.id)?.id??null;
    const media = sessionMedia.get(asset.id);
    if (media?.audio && !media.url) {
-     const prevUrl = media.url as string | undefined;
-     if (prevUrl?.startsWith('blob:')) URL.revokeObjectURL(prevUrl);
-     sessionMedia.set(asset.id,{ ...media, url: URL.createObjectURL(audioBufferFile(media.audio,asset.name+'.wav')) });
+     sessionMedia.set(asset.id, { ...media, url: URL.createObjectURL(audioBufferFile(media.audio, asset.name + '.wav')) });
    }
  }
 }
@@ -1345,7 +1595,7 @@ function updateTimelineViewport() {
   timelineViewportRaf = requestAnimationFrame(() => {
     timelineViewportRaf = 0;
     const el = timelineScroll.value;
-    if (el) timelineViewport.value = { left: el.scrollLeft, width: el.clientWidth };
+    if (el) timelineViewport.value = { left: el.scrollLeft, width: Math.max(200, el.clientWidth - TRACK_HDR_W) };
   });
 }
 
@@ -1458,7 +1708,7 @@ const timelineSyllables = computed(() => {
   return result;
 });
 const nleTotalSec = computed(() => {
-  let maxSmp = Math.max(SAMPLE_RATE_HZ, ...nleClips.value.map(c => c.endSmp));
+  let maxSmp: number = SAMPLE_RATE_HZ;
   for (const c of nleClips.value) if (c.endSmp > maxSmp) maxSmp = c.endSmp;
   for (const trackId of ['v1', 'v2', 'v3'] as const) {
     for (const kf of layerKeyframes.value[trackId]) {
@@ -1531,6 +1781,11 @@ const highlightedGroupRootId = computed<string | null>(() => {
   return focusId ? companionGroupMap.value.get(focusId)?.rootId ?? null : null;
 });
 const voiceTransferPanel = ref<InstanceType<typeof VoiceTransferPanel> | null>(null);
+const voiceTransferForcedOpen = ref(false);
+function openVoiceTransferForClip(clipId: string): void {
+  voiceTransferForcedOpen.value = true;
+  void nextTick(() => voiceTransferPanel.value?.openFor(clipId));
+}
 const selectedAudioTrackSettings = computed(() => audioTrackSettings.value.find(track => track.id === selectedStageTarget.value));
 const selectedTrackSpeaker = computed(() => {
   const row = selectedAudioTrackSettings.value;
@@ -1549,9 +1804,8 @@ function setTrackGain(track: StageAudioTrackSettings, event: Event) {
   if (Number.isFinite(value) && value >= 0 && value <= 200 && value / 100 !== track.gain) configureStageTrack(track.id, { gain: value / 100 });
   else input.value = String(Math.round(track.gain * 100));
 }
-function moveAudioClipToTrack(clip: NleClip, event: Event) {
-  const input = event.target as HTMLSelectElement;
-  const target = input.value;
+function moveAudioClipToTrack(clip: NleClip, targetValue: string | number) {
+  const target = String(targetValue);
   if (clip.track === target || !isStageAudioTrack(target) || !audioTrackSettings.value.some(track => track.id === target)) return;
   const moved = { ...clip, track: target };
   let next = nleClips.value.map(item => item.id === clip.id ? moved : item);
@@ -1561,7 +1815,7 @@ function moveAudioClipToTrack(clip: NleClip, event: Event) {
     next.push(...placeVisualCompanions(store.project.value, next,
       voiceCompanionClips(moved, stagePhrase(clip), media?.frames, media?.rowsPa)));
   }
-  if (!canPlaceTimeline(next)) { input.value = clip.track; return; }
+  if (!canPlaceTimeline(next)) return;
   nleClips.value = next;
   selectNleClip(moved);
   syncNleUndoCheckpoint('将片段移到 ' + target.toUpperCase());
@@ -1588,6 +1842,7 @@ const sharedScene = computed(() => { projectLoading.value; return !visualLimit(s
 const sceneCanvas = ref<HTMLCanvasElement | null>(null);
 const sceneError = ref('');
 const subtitleBounds = ref<StageCaptionBounds[]>([]);
+const tractBounds = ref<StageCaptionBounds[]>([]);
 const transportFocus = shallowRef<NleClip | null>(null);
 const transportRunning = ref(false);
 const monitorSequence = computed(() => {
@@ -1631,6 +1886,9 @@ async function refreshStageCanvas() {
         onSubtitleBounds(bounds) {
           if (bounds.length || subtitleBounds.value.length) subtitleBounds.value = bounds;
         },
+        onTractBounds(bounds) {
+          if (bounds.length || tractBounds.value.length) tractBounds.value = bounds;
+        },
       });
     if (current()) sceneError.value = '';
   } catch (e) {
@@ -1647,7 +1905,7 @@ function subtitleBox(bounds: StageCaptionBounds) {
 }
 const duetSubtitle = computed(() => {
   const clip = selectedNleClip.value;
-  const phrase = clip?.track === 'v3' && clip.duetVoice !== undefined ? stagePhrase(clip) : null;
+  const phrase = clip?.track === 'v3' ? stagePhrase(clip) : null;
   if (!clip || !phrase) return [];
   const end = clip.sourceStartSmp + clip.endSmp - clip.startSmp;
   return phrase.syllable_order.flatMap(id => {
@@ -1657,6 +1915,23 @@ const duetSubtitle = computed(() => {
 });
 const duetSubtitleId = ref('');
 const subtitleDraft = computed(() => duetSubtitle.value.find(syllable => syllable.id === duetSubtitleId.value) ?? duetSubtitle.value[0]);
+const subtitleIntervalOptions = computed(() => duetSubtitle.value.map(word => ({
+  value: word.id,
+  label: `${formatTimecode(word.start_smp)} · ${word.text}`,
+})));
+const duetV2ClipOptions = computed(() => nleClips.value
+  .filter(clip => clip.track === 'v2')
+  .map(clip => ({ value: clip.id, label: clip.label })));
+function selectSubtitleInterval(id: string | number): void {
+  duetSubtitleId.value = String(id);
+  const clip = selectedNleClip.value;
+  const target = duetSubtitle.value.find(word => word.id === duetSubtitleId.value);
+  if (clip && target) seek(clip.startSmp - clip.sourceStartSmp + target.start_smp);
+}
+function selectDuetV2Clip(id: string | number): void {
+  const clip = nleClips.value.find(c => c.id === String(id));
+  if (clip) selectNleClip(clip);
+}
 function editDuetSubtitle(field: 'text'|'ipa', e: Event) {
   const selected = selectedNleClip.value, syllable = subtitleDraft.value;
   const phrase = selected ? stagePhrase(selected) : null;
@@ -1744,7 +2019,27 @@ function resolveSegmentTractParams(seg: SegmentAnchor): Record<TractParamName, n
   return getFullPoseForIpa(seg.ipa, undefined, activeSpeaker.value).params;
 }
 
-const activeProjectClip = computed(() => store.project.value.clips[store.activeClipId.value] ?? null);
+const activeVocalNleClip = computed<NleClip | null>(() => {
+  const selected = selectedNleClip.value;
+  if (selected && isStageVocalTrack(selected.track)) return selected;
+  if (selected?.linkedAudioId) {
+    const linked = nleClips.value.find(c => c.id === selected.linkedAudioId && isStageVocalTrack(c.track));
+    if (linked) return linked;
+  }
+  if (isStageVocalTrack(selectedStageTarget.value)) {
+    return activeClipsByTrack.value[selectedStageTarget.value] ?? findNearestTrackClip(selectedStageTarget.value);
+  }
+  return activeClipsByTrack.value.a1 ?? findNearestTrackClip('a1');
+});
+
+const activeProjectClip = computed(() => {
+  const nle = activeVocalNleClip.value;
+  if (nle) {
+    const p = stagePhrase(nle);
+    if (p) return p;
+  }
+  return store.project.value.clips[store.activeClipId.value] ?? null;
+});
 
 const a1Syllables = computed<Syllable[]>(() => {
   const clip = activeProjectClip.value;
@@ -1765,9 +2060,10 @@ const allA1Segments = computed<FlatA1Segment[]>(() => {
 });
 
 const activeA1LocalSmp = computed<number | null>(() => {
-  const a1Clip = activeClipsByTrack.value.a1;
-  if (!a1Clip) return null;
-  return Math.max(0, store.playheadSmp.value - a1Clip.startSmp + a1Clip.sourceStartSmp);
+  const vocalClip = activeVocalNleClip.value;
+  if (!vocalClip) return null;
+  if (store.playheadSmp.value < vocalClip.startSmp || store.playheadSmp.value >= vocalClip.endSmp) return null;
+  return Math.max(0, store.playheadSmp.value - vocalClip.startSmp + vocalClip.sourceStartSmp);
 });
 
 const activeA1Segment = computed<FlatA1Segment | null>(() => {
@@ -1782,8 +2078,11 @@ const activeA1Segment = computed<FlatA1Segment | null>(() => {
 
 const liveA1TractDraft = ref<{ segId: string; params: Record<TractParamName, number> } | null>(null);
 const activeV1Pose = computed(() => {
-  const clip = activeClipsByTrack.value.v1;
-  if (!clip) return { track: undefined, segment: undefined };
+  const selected = selectedNleClip.value;
+  const clip = (selected?.track === 'v1' && selected.startSmp <= store.playheadSmp.value && store.playheadSmp.value < selected.endSmp)
+    ? selected
+    : activeClipsByTrack.value.v1;
+  if (!clip) return { track: undefined, segment: undefined, syllable: undefined };
   const phrase = stagePhrase(clip);
   const local = store.playheadSmp.value - clip.startSmp + clip.sourceStartSmp;
   const linked = nleClips.value.find(item => item.id === clip.linkedAudioId);
@@ -1792,10 +2091,18 @@ const activeV1Pose = computed(() => {
   const motion = visualSynthesisMotion(store.project.value, nleClips.value, clip, store.activeClipId.value);
   const track = motion
     ? interpolateTrackFrame(motion.frames, (local - motion.sourceOriginSmp) / motion.sourceLengthSmp)
-    : trackFrameAt(frames, (local - (phrase?.start_smp ?? 0)) / Math.max(1, range));
-  const segment = stageSyllables(clip).flatMap((syllable) => syllable.segments)
-    .find((item) => item.start_smp <= local && local < item.end_smp);
-  return { track, segment };
+    : interpolateTrackFrame(frames, (local - (phrase?.start_smp ?? 0)) / Math.max(1, range));
+  let segment: SegmentAnchor | undefined;
+  let syllable: Syllable | undefined;
+  for (const syl of stageSyllables(clip)) {
+    const hit = syl.segments.find((item) => item.start_smp <= local && local < item.end_smp);
+    if (hit) {
+      segment = hit;
+      syllable = syl;
+      break;
+    }
+  }
+  return { track, segment, syllable };
 });
 
 // Real-time 19-dim vocal tract pose & 5-field extras for V1 stage actor driven by active A1 phoneme
@@ -1830,11 +2137,12 @@ const stageTractExtras = computed<TractPoseExtras>(() => {
 watch([sceneCanvas, sharedScene, store.project, store.activeClipId, monitorSequence, () => nleClips.value
   .filter(clip => !isStageAudioTrack(clip.track)).map(clip => [clip.id, clip.startSmp, clip.endSmp, clip.sourceStartSmp, clip.visualLane]),
   monitorFrameSmp, transportRunning, transportFocus, activeTransformDragTarget, liveA1TractDraft, ptbPresetsVersion,
+  cinemaFx, layerTransitions, subtitleKaraokeFill, beatGrid, tractViewConfig,
   store.anatomyAppearance, store.paletteId, store.customAccentHex, store.resolvedColorMode,
   () => activeTransformDragTarget.value ? { ...getStageActor(activeTransformDragTarget.value) } : null], () => {
   stageRevision++;
   queueStageCanvas();
-}, { flush: 'post' });
+}, { flush: 'post', deep: true });
 
 // Selected Phoneme in A1 Inspector
 const selectedA1Entry = computed<FlatA1Segment | null>(() => {
@@ -1875,16 +2183,16 @@ function selectA1Phoneme(syl: Syllable, seg: SegmentAnchor): void {
   store.currentTractParams.value = { ...pose };
   store.currentTractExtras.value = cloneTractExtras(extras);
   void store.requestVtlPose(pose, activeSpeaker.value, extras);
-  const a1Clip = activeClipsByTrack.value.a1 ?? findNearestTrackClip('a1');
-  if (a1Clip) {
-    selectedNleClipId.value = a1Clip.id;
-    store.playheadSmp.value = Math.max(a1Clip.startSmp, a1Clip.startSmp + seg.start_smp - a1Clip.sourceStartSmp);
+  const vocalClip = activeVocalNleClip.value;
+  if (vocalClip) {
+    selectedNleClipId.value = vocalClip.id;
+    store.playheadSmp.value = Math.max(vocalClip.startSmp, vocalClip.startSmp + seg.start_smp - vocalClip.sourceStartSmp);
   } else {
     store.playheadSmp.value = seg.start_smp;
   }
 }
 
-// A1 Inline Phoneme Duration Retiming (strictly validated by @vocalcut/core retime())
+// Vocal Inline Phoneme Duration Retiming (strictly validated by @vocalcut/core retime())
 const a1DurDraftMs = ref<number | null>(null);
 const selectedA1DurMs = computed(() => {
   if (a1DurDraftMs.value !== null) return a1DurDraftMs.value;
@@ -1903,6 +2211,13 @@ function commitA1SegmentDuration(newMs: number): void {
   const clip = activeProjectClip.value;
   if (!entry || !clip) return;
   const targetEndSmp = entry.seg.start_smp + msToSamples(newMs);
+  const isSharedMain = clip.id === store.activeClipId.value;
+  const anchors = isSharedMain
+    ? store.project.value.phonation_anchors
+    : (clip.annotation_controls?.phonation_anchors ?? {});
+  const pins = isSharedMain
+    ? (store.project.value.f0_pins ?? [])
+    : (clip.annotation_controls?.f0_pins ?? []);
   const res = retime(
     clip,
     {
@@ -1911,19 +2226,50 @@ function commitA1SegmentDuration(newMs: number): void {
       segment_id: entry.seg.id,
       new_end_smp: targetEndSmp,
     },
-    store.project.value.phonation_anchors,
-    store.project.value.f0_pins ?? [],
+    anchors,
+    pins,
   );
   if (!res.ok) {
     store.pushToast(res.error.hint, 'danger', 4200);
     return;
   }
+  const deltaSmp = res.value.clip.end_smp - clip.end_smp;
+  const updatedClip: Clip = isSharedMain
+    ? res.value.clip
+    : {
+      ...res.value.clip,
+      annotation_controls: {
+        ...(clip.annotation_controls ?? { phonation_anchor_order: [], phonation_anchors: {} }),
+        phonation_anchors: res.value.phonation_anchors,
+        phonation_anchor_order: Object.keys(res.value.phonation_anchors),
+        f0_pins: res.value.f0_pins,
+      },
+    };
   const commands: WorkbenchCommand[] = [
-    { type: 'clip.edit', payload: { clip: res.value.clip } },
+    {
+      type: 'clip.edit',
+      payload: isSharedMain
+        ? { clip: updatedClip, retimed: res.value }
+        : { clip: updatedClip },
+    },
   ];
-  const nextAnchors = Object.values(res.value.phonation_anchors);
-  if (nextAnchors.length > 0) {
-    commands.push({ type: 'phonation.set_anchors', payload: { anchors: nextAnchors } });
+  if (deltaSmp !== 0) {
+    const nextTimeline = nleClips.value.map(item => {
+      const pId = stagePhrase(item)?.id;
+      if (pId !== clip.id) return item;
+      const nextEnd = Math.max(item.startSmp + msToSamples(20), item.endSmp + deltaSmp);
+      const nextLen = item.sourceLength !== undefined ? Math.max(msToSamples(20), item.sourceLength + deltaSmp) : undefined;
+      return { ...item, endSmp: nextEnd, ...(nextLen !== undefined ? { sourceLength: nextLen } : {}) };
+    });
+    if (!placementCollision(nleClips.value, nextTimeline)) {
+      const v0 = stageLayer(store.project.value, 'v0');
+      if (v0) {
+        commands.push({
+          type: 'visual.set_keys',
+          payload: { layer_id: v0.id, keys: { nle_meta: timelineKeys(nextTimeline) } },
+        });
+      }
+    }
   }
   store.executeCommand({
     type: 'batch',
@@ -2215,10 +2561,35 @@ function splitAtPlayhead() {
   splitSelectedClip([t]);
 }
 
+function cloneNleClipData(clip: NleClip): NleClip {
+  return {
+    ...clip,
+    gainPoints: clip.gainPoints?.map(pt => ({ ...pt })),
+    poseFrames: clip.poseFrames?.map(f => ({ u: f.u, params: [...f.params] })),
+    m27RowsPa: clip.m27RowsPa?.map(row => [...row]),
+    arrangementInstrument: clip.arrangementInstrument
+      ? {
+        instrument: clip.arrangementInstrument.instrument,
+        regions: clip.arrangementInstrument.regions?.map(r => ({ ...r })),
+      }
+      : undefined,
+    arrangerOrigin: clip.arrangerOrigin ? { ...clip.arrangerOrigin } : undefined,
+  };
+}
+
 function copySelectedClip(): void {
   if (!selectedNleClip.value) return;
-  clipboardClip.value = { ...selectedNleClip.value };
-  clipboardCompanions.value = nleClips.value.filter(item => item.linkedAudioId === selectedNleClip.value?.id).map(item => ({ ...item }));
+  const copied = cloneNleClipData(selectedNleClip.value);
+  const companions = nleClips.value
+    .filter(item => item.linkedAudioId === selectedNleClip.value?.id)
+    .map(item => cloneNleClipData(item));
+  // Copying a standalone visual clip detaches it from its original audio parent.
+  if (isStageVisualTrack(copied.track)) {
+    delete copied.linkedAudioId;
+    delete copied.arrangementVoiceId;
+  }
+  clipboardClip.value = copied;
+  clipboardCompanions.value = companions;
   store.pushToast(`已复制片段：${clipboardClip.value.label}`, 'info', 1800);
 }
 
@@ -2226,8 +2597,14 @@ function duplicateClipCompanions(base: NleClip, target: NleClip, companions: rea
   const delta = target.startSmp - base.startSmp;
   return companions.map(item => {
     const startSmp = Math.max(0, item.startSmp + delta);
-    return { ...item, id: crypto.randomUUID(), linkedAudioId: target.id,
-      startSmp, endSmp: startSmp + item.endSmp - item.startSmp };
+    const cloned = cloneNleClipData(item);
+    return {
+      ...cloned,
+      id: crypto.randomUUID(),
+      linkedAudioId: target.id,
+      startSmp,
+      endSmp: startSmp + item.endSmp - item.startSmp,
+    };
   });
 }
 
@@ -2242,14 +2619,22 @@ function pasteClipboardClip(): void {
     return;
   }
   const dur = clipboardClip.value.endSmp - clipboardClip.value.startSmp;
+  const base = cloneNleClipData(clipboardClip.value);
+  if (isStageVisualTrack(base.track)) {
+    delete base.linkedAudioId;
+    delete base.arrangementVoiceId;
+  }
   const pasted: NleClip = {
-    ...clipboardClip.value,
-    id: `c_paste_${Date.now().toString(36).slice(-4)}`,
+    ...base,
+    id: crypto.randomUUID(),
     startSmp: store.playheadSmp.value,
     endSmp: store.playheadSmp.value + dur,
-    label: `${clipboardClip.value.label} [粘贴]`,
+    label: `${clipboardClip.value.label.replace(/\s*\[(粘贴|克隆)\]$/, '')} [粘贴]`,
   };
-  const next = [...nleClips.value, pasted, ...duplicateClipCompanions(clipboardClip.value, pasted, clipboardCompanions.value)];
+  const projectCopy: VcProject = JSON.parse(JSON.stringify(store.project.value));
+  const rawCompanions = duplicateClipCompanions(clipboardClip.value, pasted, clipboardCompanions.value);
+  const placedCompanions = placeVisualCompanions(projectCopy, [...nleClips.value, pasted], rawCompanions);
+  const next = [...nleClips.value, pasted, ...placedCompanions];
   if (!canPlaceTimeline(next)) return;
   nleClips.value = next;
   selectNleClip(pasted);
@@ -2260,15 +2645,22 @@ function cloneSelectedClip(): void {
   const c = selectedNleClip.value;
   if (!c) return;
   const dur = c.endSmp - c.startSmp;
+  const base = cloneNleClipData(c);
+  if (isStageVisualTrack(base.track)) {
+    delete base.linkedAudioId;
+    delete base.arrangementVoiceId;
+  }
   const cloned: NleClip = {
-    ...c,
-    id: `c_clone_${Date.now().toString(36).slice(-4)}`,
+    ...base,
+    id: crypto.randomUUID(),
     startSmp: c.endSmp + msToSamples(80),
     endSmp: c.endSmp + msToSamples(80) + dur,
-    label: `${c.label} [克隆]`,
+    label: `${c.label.replace(/\s*\[(粘贴|克隆)\]$/, '')} [克隆]`,
   };
-  const companions = duplicateClipCompanions(c, cloned, nleClips.value.filter(item => item.linkedAudioId === c.id));
-  const next = [...nleClips.value, cloned, ...companions];
+  const projectCopy: VcProject = JSON.parse(JSON.stringify(store.project.value));
+  const rawCompanions = duplicateClipCompanions(c, cloned, nleClips.value.filter(item => item.linkedAudioId === c.id));
+  const placedCompanions = placeVisualCompanions(projectCopy, [...nleClips.value, cloned], rawCompanions);
+  const next = [...nleClips.value, cloned, ...placedCompanions];
   if (!canPlaceTimeline(next)) return;
   nleClips.value = next;
   selectNleClip(cloned);
@@ -2304,18 +2696,38 @@ function onNleRulerDown(e: PointerEvent): void {
     store.playheadSmp.value = nleXToSmp(lx);
   };
   update(e);
+  try { el?.setPointerCapture?.(e.pointerId); } catch { /* noop */ }
   const onMove = (ev: PointerEvent) => update(ev);
   const onUp = () => {
+    try { el?.releasePointerCapture?.(e.pointerId); } catch { /* noop */ }
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
   };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
 }
 
 const duration = computed(() => Math.max(0, ...nleClips.value.map(c => c.endSmp)));
 const snapEnabled = ref(false);
+const visibleBeatTicks = computed(() => {
+  const grid = beatGrid.value;
+  if (!grid || !grid.beatsSmp.length) return [];
+  const { start, end } = visibleTimeline.value;
+  const strongSet = new Set(grid.strongHitsSmp);
+  return grid.beatsSmp
+    .filter(smp => smp >= start && smp <= end)
+    .map(smp => ({
+      smp,
+      strong: strongSet.has(smp) || grid.strongHitsSmp.some(h => Math.abs(h - smp) < msToSamples(40)),
+    }));
+});
 function quantize(smp: number) {
+  if (beatSnapEnabled.value && beatGrid.value) {
+    const beatSnapped = snapSmpToBeatGrid(smp, beatGrid.value);
+    if (beatSnapped !== smp) return beatSnapped;
+  }
   const frame = SAMPLE_RATE_HZ / store.project.value.settings.fps;
   return snapEnabled.value ? Math.round(Math.round(smp / frame) * frame) : smp;
 }
@@ -2339,7 +2751,8 @@ function onTimelineWheel(event: WheelEvent) {
   const next = Math.max(0.02, Math.min(16, previous * factor));
   if (next === previous) return;
   const rect = element.getBoundingClientRect();
-  const pointer = Math.max(0, Math.min(element.clientWidth, (event.clientX - rect.left) / getCurrentPageScale()));
+  const visibleW = Math.max(120, element.clientWidth - TRACK_HDR_W);
+  const pointer = Math.max(0, Math.min(visibleW, (event.clientX - rect.left) / getCurrentPageScale() - TRACK_HDR_W));
   const left = (element.scrollLeft + pointer) * next / previous - pointer;
   nleZoom.value = next;
   void nextTick(() => {
@@ -2349,9 +2762,62 @@ function onTimelineWheel(event: WheelEvent) {
   });
 }
 
+const ZOOM_MIN = 0.02;
+const ZOOM_MAX = 16;
+const ZOOM_RATIO = ZOOM_MAX / ZOOM_MIN;
+const zoomSliderPct = computed<number>({
+  get() {
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, nleZoom.value));
+    return Math.max(0, Math.min(100, (Math.log(clamped / ZOOM_MIN) / Math.log(ZOOM_RATIO)) * 100));
+  },
+  set(pct: number) {
+    const clampedPct = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
+    nleZoom.value = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, ZOOM_MIN * Math.pow(ZOOM_RATIO, clampedPct / 100)));
+  },
+});
+
 function fitTimeline() {
-  const width = timelineScroll.value?.clientWidth ?? 820;
-  nleZoom.value = Math.max(0.02, Math.min(16, (width - 36) / (155 * Math.max(.5, nleTotalSec.value))));
+  const width = Math.max(240, (timelineScroll.value?.clientWidth ?? 1026) - TRACK_HDR_W);
+  nleZoom.value = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, (width - 36) / (155 * Math.max(.5, nleTotalSec.value))));
+}
+
+interface ClipContextMenuState {
+  clipId: string;
+  x: number;
+  y: number;
+}
+const clipContextMenu = ref<ClipContextMenuState | null>(null);
+const contextMenuClip = computed(() =>
+  clipContextMenu.value ? nleClips.value.find(c => c.id === clipContextMenu.value?.clipId) ?? null : null,
+);
+function openClipContextMenu(clip: NleClip, event: MouseEvent): void {
+  selectNleClip(clip);
+  const menuW = 190;
+  const menuH = 230;
+  const x = Math.max(8, Math.min(window.innerWidth - menuW - 8, event.clientX));
+  const y = Math.max(8, Math.min(window.innerHeight - menuH - 8, event.clientY));
+  clipContextMenu.value = { clipId: clip.id, x, y };
+}
+function closeClipContextMenu(): void {
+  clipContextMenu.value = null;
+}
+function runClipContextAction(action: 'split' | 'copy' | 'paste' | 'clone' | 'mute' | 'locate' | 'delete'): void {
+  const clip = contextMenuClip.value;
+  closeClipContextMenu();
+  if (!clip) return;
+  selectNleClip(clip);
+  if (action === 'split') splitAtPlayhead();
+  else if (action === 'copy') copySelectedClip();
+  else if (action === 'paste') pasteClipboardClip();
+  else if (action === 'clone') cloneSelectedClip();
+  else if (action === 'mute') editDuetMix(clip, { muted: !clip.muted }, clip.muted ? '取消静音' : '静音片段');
+  else if (action === 'locate' && clip.assetId) focusedAssetId.value = clip.assetId;
+  else if (action === 'delete') deleteClipById(clip.id);
+}
+function onWindowPointerDownForMenu(e: PointerEvent): void {
+  if (!clipContextMenu.value) return;
+  if ((e.target as HTMLElement | null)?.closest('.ss-clip-ctx-menu')) return;
+  closeClipContextMenu();
 }
 function chooseTrack(track: StageTargetId, lane = 0) {
   selectedStageTarget.value = track; focusedAssetId.value = null;
@@ -2359,7 +2825,6 @@ function chooseTrack(track: StageTargetId, lane = 0) {
   const t = store.playheadSmp.value;
   const active = nleClips.value.filter(clip => clip.track === track && (clip.visualLane ?? 0) === lane && clip.startSmp <= t && t < clip.endSmp).at(-1);
   selectedNleClipId.value = active?.id ?? findNearestTrackClip(track, lane)?.id ?? null;
-  if (isStageVocalTrack(track)) arrangerStageTarget.value = track;
   if (isStageAudioTrack(track)) assetAudioTarget.value = track;
 }
 function canOpenClipInArranger(clip: NleClip | null | undefined): boolean {
@@ -2432,8 +2897,9 @@ function sendStageClipOrAssetToArranger(clip?: NleClip | null, asset?: StudioAss
   const startFrame = Math.floor(clip.sourceStartSmp / frameRateSmp);
   const endFrame = Math.ceil((clip.sourceStartSmp + (clip.endSmp - clip.startSmp)) / frameRateSmp);
   const slicedRows = rows.slice(Math.max(0, startFrame), Math.min(rows.length, endFrame));
-  const dummyBuf = media?.audio
-    ? copyStageAudio(media.audio, clip.sourceStartSmp, Math.min(clip.endSmp - clip.startSmp, media.audio.length - clip.sourceStartSmp))
+  const availableAudioLen = media?.audio ? Math.min(clip.endSmp - clip.startSmp, media.audio.length - clip.sourceStartSmp) : 0;
+  const dummyBuf = media?.audio && availableAudioLen > 0
+    ? copyStageAudio(media.audio, clip.sourceStartSmp, availableAudioLen)
     : new AudioBuffer({ numberOfChannels: 1, length: Math.max(960, clip.endSmp - clip.startSmp), sampleRate: SAMPLE_RATE_HZ });
   pendingPianoPitch.value = null;
   if (isStageVocalTrack(clip.track)) arrangerStageTarget.value = clip.track;
@@ -2593,6 +3059,14 @@ async function toggleStagePlay(focus?: NleClip) {
       if (version !== playVersion || !store.isPlaying.value) { stopTransport(); return; }
       const t = start + Math.round(Math.max(0, context.currentTime - origin) * SAMPLE_RATE_HZ);
       store.playheadSmp.value = Math.min(end, t);
+      const scrollEl = timelineScroll.value;
+      if (scrollEl) {
+        const visibleW = Math.max(160, scrollEl.clientWidth - TRACK_HDR_W);
+        const px = smpToNleX(store.playheadSmp.value);
+        if (px > scrollEl.scrollLeft + visibleW - 44 || px < scrollEl.scrollLeft) {
+          scrollEl.scrollLeft = Math.max(0, px - visibleW * 0.22);
+        }
+      }
       if (t >= end) { stopTransport(); return; }
       transportRaf = requestAnimationFrame(tick);
     };
@@ -2625,6 +3099,7 @@ watch(
   () => {
     stopTransport();
     nleClips.value = readTimeline(store.project.value, store.activeClipId.value);
+    if (!nleClips.value.length) store.playheadSmp.value = 0;
     if (!selectedNleClip.value) chooseTrack(selectedStageTarget.value);
     hydrateLayersFromProject();
   },
@@ -2638,37 +3113,64 @@ watch(
   },
 );
 
+function isStageShortcutBlocked(): boolean {
+  return store.activeOverlay.value !== 'none'
+    || Boolean(store.exportModalWorkspace.value)
+    || Boolean(store.activeModuleGuide.value)
+    || store.referencesModalOpen.value
+    || store.styleLabOpen.value
+    || Boolean(document.querySelector('[role="dialog"], .export-modal-mask'));
+}
+
 function onKeyDown(e: KeyboardEvent): void {
   const target = e.target as HTMLElement | null;
-  if (e.isComposing || e.keyCode === 229 || target?.closest('input,textarea,select,[contenteditable="true"],[role="dialog"],.ai-drawer') || store.activeOverlay.value !== 'none' || store.exportModalWorkspace.value) return;
+  if (
+    e.isComposing
+    || e.keyCode === 229
+    || target?.closest('input,textarea,select,[contenteditable="true"],[role="dialog"],.ai-drawer')
+    || isStageShortcutBlocked()
+  ) return;
   if (e.code === 'Space' && !e.altKey && !e.ctrlKey && !e.metaKey) {
     if (target?.closest('button')) return;
     e.preventDefault(); e.stopImmediatePropagation(); void toggleStagePlay(); return;
   }
-  if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) { e.preventDefault(); step((e.shiftKey ? 5 : 1) * (e.key === 'ArrowRight' ? 1 : -1)); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+    if (target?.closest('[role="separator"], .split-pane-handle')) return;
+    e.preventDefault(); step((e.shiftKey ? 5 : 1) * (e.key === 'ArrowRight' ? 1 : -1)); return;
+  }
   if (e.altKey) return;
   const mod = e.ctrlKey || e.metaKey;
-  if (!mod && ['Home', 'End', 's', '=', '-', String.fromCharCode(92)].includes(e.key)) {
+  const lower = e.key.toLowerCase();
+  if (!mod && ['Home', 'End', '=', '-', String.fromCharCode(92)].includes(e.key) || (!mod && lower === 's')) {
     e.preventDefault();
     if (e.key === 'Home' || e.key === 'End') seek(e.key === 'Home' ? 0 : duration.value);
-    else if (e.key === 's') snapEnabled.value = !snapEnabled.value;
-    else if (e.key === '=' || e.key === '-') nleZoom.value = Math.max(.02, Math.min(16, nleZoom.value * (e.key === '=' ? 1.2 : 1 / 1.2)));
+    else if (lower === 's') {
+      snapEnabled.value = !snapEnabled.value;
+      store.pushToast(snapEnabled.value ? '已开启吸附至帧' : '已关闭吸附至帧', 'info', 1400);
+    }
+    else if (e.key === '=' || e.key === '-') nleZoom.value = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, nleZoom.value * (e.key === '=' ? 1.2 : 1 / 1.2)));
     else fitTimeline();
     return;
   }
-  if (mod && !target?.closest('.ss-nle-panel')) return;
-  if (!e.ctrlKey && !e.metaKey && (e.key === 'b' || e.key === 'B')) {
+  const inMediaBin = Boolean(target?.closest('.ss-media'));
+  const inTimelineOrStage = Boolean(target?.closest('.ss-nle-panel, .ss-stage-panel'));
+  if (!mod && lower === 'b') {
     e.preventDefault();
     splitAtPlayhead();
-  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+  } else if (mod && lower === 'c' && inTimelineOrStage) {
     e.preventDefault(); copySelectedClip();
-  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+  } else if (mod && lower === 'v' && inTimelineOrStage) {
     e.preventDefault(); pasteClipboardClip();
-  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-    e.preventDefault();
-    cloneSelectedClip();
+  } else if (mod && lower === 'd' && inTimelineOrStage) {
+    e.preventDefault(); cloneSelectedClip();
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selectedNleClipId.value) { e.preventDefault(); deleteSelectedClip(); }
+    if (inMediaBin && focusedAssetId.value) {
+      e.preventDefault();
+      removeSelectedAsset();
+    } else if (inTimelineOrStage && selectedNleClipId.value) {
+      e.preventDefault();
+      deleteSelectedClip();
+    }
   }
 }
 
@@ -2689,21 +3191,83 @@ watch(
   },
 );
 
+let stageKeyListenerBound = false;
+function bindStageListeners(): void {
+  if (stageKeyListenerBound) return;
+  stageKeyListenerBound = true;
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('pointerdown', onWindowPointerDownForMenu, true);
+  window.addEventListener('vocalcut:tour-action', handleStageTourAction);
+}
+function unbindStageListeners(): void {
+  if (!stageKeyListenerBound) return;
+  stageKeyListenerBound = false;
+  window.removeEventListener('keydown', onKeyDown, true);
+  window.removeEventListener('pointerdown', onWindowPointerDownForMenu, true);
+  window.removeEventListener('vocalcut:tour-action', handleStageTourAction);
+  closeClipContextMenu();
+}
+
 onMounted(() => {
+  if (!nleClips.value.length && store.playheadSmp.value > 0) {
+    store.playheadSmp.value = 0;
+  }
   void receiveWorkspaceAudio();
   if (timelineScroll.value) timelineResizeObserver.observe(timelineScroll.value);
   updateTimelineViewport();
   void preloadPtbIpaPresets(activeSpeaker.value);
   hydrateLayersFromProject();
   void nextTick(fitTimeline);
-  window.addEventListener('keydown', onKeyDown, true);
-  window.addEventListener('vocalcut:tour-action', handleStageTourAction);
+  bindStageListeners();
+});
+
+onActivated(() => {
+  stageMounted = true;
+  bindStageListeners();
+  nleClips.value = readTimeline(store.project.value, store.activeClipId.value);
+  hydrateLayersFromProject();
+  void receiveWorkspaceAudio();
+  updateTimelineViewport();
+  stageRevision++;
+  queueStageCanvas();
+});
+
+onDeactivated(() => {
+  stopTransport();
+  unbindStageListeners();
+  cancelAnimationFrame(stageDrawRaf);
+  stageDrawRaf = 0;
 });
 
 let stageTourAbort: AbortController | null = null;
 async function handleStageTourAction(e: Event): Promise<void> {
   const detail = (e as CustomEvent<{ actionId?: string; done?: (ok?: boolean) => void }>).detail;
-  if (detail?.actionId !== 'stage-load-demo') return;
+  const actionId = detail?.actionId;
+  if (!actionId) return;
+
+  if (actionId === 'stage-preview-cinema') {
+    chooseTrack('v0');
+    commitCinemaFx({ look: 'aurora', gridFloor: true, camera: 'slow-push-in', vignette: 0.25 }, '导览预览极光舞台与慢推运镜');
+    store.pushToast('已切至 V0 舞台背景并开启极光冷青 + 透视网格 + 慢推运镜', 'success', 2800);
+    detail?.done?.(true);
+    return;
+  }
+
+  if (actionId === 'stage-focus-v1') {
+    chooseTrack('v1');
+    store.pushToast('已选中 V1 声道图层，可在右侧查看自动插帧、缓动曲线与 9 种转场', 'info', 2600);
+    detail?.done?.(true);
+    return;
+  }
+
+  if (actionId === 'stage-focus-v3') {
+    chooseTrack('v3');
+    store.pushToast('已选中 V3 歌词字幕层，可在右侧开启卡拉 OK 柔边随读或就地改字', 'info', 2600);
+    detail?.done?.(true);
+    return;
+  }
+
+  if (actionId !== 'stage-load-demo') return;
   const slot = ONBOARDING_AUDIO_SLOTS.zh_spk_a;
   stageTourAbort?.abort();
   stageTourAbort = new AbortController();
@@ -2727,8 +3291,9 @@ async function handleStageTourAction(e: Event): Promise<void> {
   detail?.done?.(true);
 }
 
-watch(() => store.project.value.id, () => {
+watch(() => store.project.value.id, (id) => {
   pruneSessionMedia(store.getRestorableAssetIds());
+  pruneDuetScenes(id);
 });
 
 onBeforeUnmount(() => {
@@ -2738,8 +3303,7 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(stageDrawRaf);
   stopTransport();
   pruneSessionMedia(store.getRestorableAssetIds());
-  window.removeEventListener('keydown', onKeyDown, true);
-  window.removeEventListener('vocalcut:tour-action', handleStageTourAction);
+  unbindStageListeners();
   stageTourAbort?.abort();
   stageTourAbort = null;
 });
@@ -2750,10 +3314,22 @@ onBeforeUnmount(() => {
     <header class="ss-commandbar" data-tour="stage-export">
       <div class="sequence-identity"><IconSvg name="timeline" :size="17" /><strong>{{ store.project.value.name }}</strong></div>
       <span class="ss-format mono">{{ store.project.value.settings.size_px.join(' × ') }} <i/> {{ store.project.value.settings.fps }} fps</span>
+      <button
+        type="button"
+        class="btn xs"
+        data-tour="stage-directory-btn"
+        :class="{ active: directoryOpen }"
+        :aria-pressed="directoryOpen"
+        title="展开或收起左侧本地目录浏览面板"
+        @click="directoryOpen = !directoryOpen"
+      >
+        <IconSvg name="folder" :size="13" />
+        <span>本地目录</span>
+      </button>
       <div class="ss-toolbar-spacer"/>
       <VoiceRenderSelect />
       <button type="button" class="btn primary sm" @click="store.openExportModal('studio')"><IconSvg name="download" :size="13" />导出</button>
-      <ModuleGuideButton module-id="stage" size="sm" />
+      <span data-tour="stage-guide-btn"><ModuleGuideButton module-id="stage" size="sm" /></span>
       <input
         ref="videoInputRef"
         type="file"
@@ -2761,25 +3337,29 @@ onBeforeUnmount(() => {
         class="hidden"
         @change="(e) => { const f = (e.target as HTMLInputElement).files?.[0]; if (f) void replaceBackground(f); }"
       />
+      <input ref="dirInputRef" type="file" webkitdirectory multiple class="hidden" @change="chooseFallbackDirectory" />
     </header>
 
     <div class="ss-body-row">
-      <aside class="panel ss-directory" data-tour="stage-directory" aria-label="本地目录" :style="{ width: `${directoryW}px` }">
+      <aside v-if="directoryOpen" class="panel ss-directory" data-tour="stage-directory" aria-label="本地目录" :style="{ width: `${directoryW}px` }">
         <div class="p-head">
           <strong><IconSvg name="folder" :size="14" />本地目录</strong>
-          <button v-if="directoryRoot" type="button" class="btn xs icon-only" aria-label="打开文件夹" title="打开文件夹"
-            :disabled="directoryOpening || projectLoading" @click="browseLocalDirectory"><IconSvg name="folder-open" :size="15" /></button>
+          <div class="asset-header-actions">
+            <button v-if="directoryRoot" type="button" class="btn xs icon-only" aria-label="切换文件夹" title="切换文件夹"
+              :disabled="directoryOpening || projectLoading" @click="browseLocalDirectory"><IconSvg name="folder-open" :size="14" /></button>
+            <button type="button" class="btn xs icon-only" aria-label="收起本地目录" title="收起本地目录"
+              @click="directoryOpen = false"><IconSvg name="close" :size="12" /></button>
+          </div>
         </div>
-        <input ref="dirInputRef" type="file" webkitdirectory multiple class="hidden" @change="chooseFallbackDirectory" />
         <StudioDirectoryBrowser v-if="directoryRoot" :root="directoryRoot" :disabled="projectLoading"
-          @drag="draggedDirectoryFile = $event" @ingest="file => ingestStudioFiles([file])" @close="closeDirectory" />
+          @drag="draggedDirectoryFile = $event" @ingest="file => ingestStudioFiles([file])" @ingest-many="files => ingestStudioFiles(files)" @close="closeDirectory" />
         <div v-else class="ss-directory-empty">
           <button type="button" class="btn xs" :disabled="directoryOpening || projectLoading" @click="browseLocalDirectory">
             <IconSvg name="folder-open" :size="14" />打开文件夹
           </button>
         </div>
       </aside>
-      <SplitPane v-model="directoryW" direction="vertical" :min="160" :max="420" :default-value="206" storage-key="studio-directory" title="调整本地目录宽度" />
+      <SplitPane v-if="directoryOpen" v-model="directoryW" direction="vertical" :min="160" :max="420" :default-value="200" storage-key="studio-directory" title="调整本地目录宽度" />
 
       <aside
         class="panel ss-media"
@@ -2846,7 +3426,7 @@ onBeforeUnmount(() => {
         </div>
       </aside>
 
-      <SplitPane v-model="mediaW" direction="vertical" :min="190" :max="540" :default-value="360" storage-key="studio-left" title="调整媒体库宽度" />
+      <SplitPane v-model="mediaW" direction="vertical" :min="190" :max="540" :default-value="268" storage-key="studio-left" title="调整媒体库宽度" />
 
       <!-- CENTER COLUMN: Top 16:9 Direct-Manipulation Stage + Bottom PR-Level NLE Multi-Track -->
       <div class="ss-center">
@@ -2869,9 +3449,36 @@ onBeforeUnmount(() => {
               <!-- Safe Margin Frame (96, 54 on 1920x1080 = 5% horizontal & vertical) -->
               <div v-if="showSafeMargin" class="stage-safe-frame" aria-hidden="true" />
 
-              <!-- V1 Vocal Tract Actor (Directly clickable, draggable & 4-corner resizable; synced with A1 phoneme) -->
+              <!-- V1 Vocal Tract Actor(s) (Per-clip hit boxes when parallel lanes are active) -->
+              <template v-if="isV1StageVisible && tractBounds.length">
+                <div
+                  v-for="(bounds, i) in tractBounds"
+                  :key="bounds.clipId ?? `v1_${i}`"
+                  class="stage-actor stage-v1-tract stage-v1-bounded"
+                  :class="{ selected: selectedStageTarget === 'v1' && (!bounds.clipId || selectedNleClipId === bounds.clipId || tractBounds.length === 1), resizing: resizingTarget === 'v1' }"
+                  :style="{ ...subtitleBox(bounds), opacity: v1Tract.opacity, '--inv-scale': '1' }"
+                  @pointerdown="startStageActorDrag('v1', $event, bounds.clipId)"
+                  @click.stop
+                >
+                  <template v-if="selectedStageTarget === 'v1' && (!bounds.clipId || selectedNleClipId === bounds.clipId || tractBounds.length === 1)">
+                    <span class="actor-handle-tag mono">
+                      V1 声道演员<template v-if="activeV1Pose.segment"> · /{{ activeV1Pose.segment.ipa }}/</template><template v-if="resizingTarget === 'v1'"> · {{ Math.round(v1Tract.scale * 100) }}%</template>
+                    </span>
+                    <button
+                      v-for="corner in RESIZE_CORNERS"
+                      :key="`v1_${bounds.clipId ?? i}_${corner}`"
+                      type="button"
+                      class="stage-resize-handle"
+                      :class="`corner-${corner}`"
+                      :title="`拖拽缩放 V1 (${Math.round(v1Tract.scale * 100)}%)`"
+                      @pointerdown="startStageActorResize('v1', corner, $event, bounds.clipId)"
+                      @click.stop
+                    />
+                  </template>
+                </div>
+              </template>
               <div
-                v-if="isV1StageVisible"
+                v-else-if="isV1StageVisible"
                 class="stage-actor stage-v1-tract"
                 :class="{ selected: selectedStageTarget === 'v1', resizing: resizingTarget === 'v1' }"
                 :style="{
@@ -2984,7 +3591,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <SplitPane v-model="rightW" direction="vertical" invert :min="220" :max="540" :default-value="294" storage-key="studio-right" />
+      <SplitPane v-model="rightW" direction="vertical" invert :min="220" :max="540" :default-value="276" storage-key="studio-right" />
 
       <!-- RIGHT PROPERTY INSPECTOR (NEVER locked when V0 or any clip/asset is selected!) -->
       <aside class="panel ss-right" data-tour="stage-inspector" :style="{ width: `${rightW}px` }">
@@ -3000,11 +3607,16 @@ onBeforeUnmount(() => {
             <img v-if="focusedAsset.kind === 'sprite' && focusedAsset.url" class="source-preview" :src="focusedAsset.url" :alt="focusedAsset.name" />
             <video v-else-if="focusedAsset.kind === 'video' && focusedAsset.url" class="source-preview" controls :src="focusedAsset.url" />
             <audio v-else-if="focusedAsset.kind === 'audio' && focusedAsset.url" class="source-preview" controls :src="focusedAsset.url" />
-            <label v-if="focusedAsset.kind === 'audio'" class="stage-track-setting">插入音频轨
-              <select v-model="assetAudioTarget" class="inp" aria-label="插入音频轨">
-                <option v-for="row in audioTrackOptions" :key="row.value" :value="row.value">{{ row.label }}</option>
-              </select>
-            </label>
+            <div v-if="focusedAsset.kind === 'audio'" class="stage-track-setting">
+              <span>插入音频轨</span>
+              <CustomSelect
+                :model-value="assetAudioTarget"
+                :options="audioTrackOptions"
+                size="sm"
+                aria-label="插入音频轨"
+                @update:model-value="v => { assetAudioTarget = String(v) as StageAudioTrack; }"
+              />
+            </div>
             <button v-if="focusedAsset.kind !== 'jianpu'" type="button" class="btn sm primary" :disabled="!focusedAsset.url" @click="appendAsset(focusedAsset)"><IconSvg name="plus" :size="13"/>插入到播放头</button>
             <button v-else type="button" class="btn sm" @click="store.studioTab.value = 'arranger'">打开编曲台</button>
             <button v-if="focusedAsset.kind === 'audio' && (focusedPhraseSource || sessionMedia.get(focusedAsset.id)?.transferred?.rowsPa?.length)" type="button" class="btn sm"
@@ -3050,12 +3662,16 @@ onBeforeUnmount(() => {
                 <input class="inp" maxlength="60" aria-label="轨道名称" :value="selectedAudioTrackSettings.name"
                   @change="e => setTrackName(selectedAudioTrackSettings!, e)" />
               </label>
-              <label v-if="isStageVocalTrack(selectedStageTarget)" class="stage-track-setting">声道模型
-                <select class="inp" aria-label="声部声道模型" :value="selectedTrackSpeaker"
-                  @change="e => configureStageTrack(selectedAudioTrackSettings!.id, {}, (e.target as HTMLSelectElement).value as VcProject['voices'][string]['speaker'])">
-                  <option v-for="option in SPEAKER_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
-              </label>
+              <div v-if="isStageVocalTrack(selectedStageTarget)" class="stage-track-setting">
+                <span>声道模型</span>
+                <CustomSelect
+                  :model-value="selectedTrackSpeaker"
+                  :options="SPEAKER_OPTIONS"
+                  size="sm"
+                  aria-label="声部声道模型"
+                  @update:model-value="v => configureStageTrack(selectedAudioTrackSettings!.id, {}, String(v) as VcProject['voices'][string]['speaker'])"
+                />
+              </div>
               <div class="stage-mix-fields">
                 <label>轨道音量 <input class="inp mono" type="number" min="0" max="200" step="1" aria-label="轨道音量"
                   :value="Math.round(selectedAudioTrackSettings.gain*100)" @change="e => setTrackGain(selectedAudioTrackSettings!, e)" />%</label>
@@ -3066,12 +3682,16 @@ onBeforeUnmount(() => {
               </div>
               <template v-if="selectedNleClip && isStageAudioTrack(selectedNleClip.track)">
                 <div class="param-sec-title"><span>片段混音</span></div>
-                <label class="stage-track-setting">所选片段轨道
-                  <select class="inp" aria-label="所选片段轨道" :value="selectedNleClip.track"
-                    @change="e => moveAudioClipToTrack(selectedNleClip!, e)">
-                    <option v-for="row in audioTrackOptions" :key="row.value" :value="row.value">{{ row.label }}</option>
-                  </select>
-                </label>
+                <div class="stage-track-setting">
+                  <span>所选片段轨道</span>
+                  <CustomSelect
+                    :model-value="selectedNleClip.track"
+                    :options="audioTrackOptions"
+                    size="sm"
+                    aria-label="所选片段轨道"
+                    @update:model-value="v => moveAudioClipToTrack(selectedNleClip!, v)"
+                  />
+                </div>
                 <div class="stage-mix-fields">
                   <label>片段音量 <input class="inp mono" type="number" min="0" max="200" step="1" aria-label="片段音量"
                     :value="Math.round((selectedNleClip.gain ?? 1)*100)"
@@ -3087,27 +3707,37 @@ onBeforeUnmount(() => {
                   <button type="button" class="btn sm" :disabled="!canOpenClipInArranger(selectedNleClip)"
                     @click="sendStageClipOrAssetToArranger(selectedNleClip)">送编曲</button>
                   <button type="button" class="btn sm" :disabled="!voiceTransferChoices.some(item => item.id === selectedNleClip?.id)"
-                    @click="voiceTransferPanel?.openFor(selectedNleClip.id)">声音迁移</button>
+                    @click="openVoiceTransferForClip(selectedNleClip.id)">声音迁移</button>
                   <button v-if="stagePhrase(selectedNleClip)" type="button" class="btn sm"
                     :disabled="renderingStageVoice" @click="renderStageVoice">{{ renderingStageVoice ? '合成中…' : '重合成所选片段' }}</button>
                 </div>
               </template>
             </div>
             <div v-if="subtitleDraft && selectedNleClip?.track==='v3'" class="duet-controls">
-              <label>字幕区间
-                <select class="inp" :value="subtitleDraft.id" @change="e => { duetSubtitleId = (e.target as HTMLSelectElement).value; if (subtitleDraft) seek(selectedNleClip!.startSmp - selectedNleClip!.sourceStartSmp + subtitleDraft.start_smp); }">
-                  <option v-for="word in duetSubtitle" :key="word.id" :value="word.id">{{ formatTimecode(word.start_smp) }} · {{ word.text }}</option>
-                </select>
-              </label>
+              <div class="stage-track-setting">
+                <span>字幕区间</span>
+                <CustomSelect
+                  :model-value="subtitleDraft.id"
+                  :options="subtitleIntervalOptions"
+                  size="sm"
+                  aria-label="选择字幕音节区间"
+                  @update:model-value="selectSubtitleInterval"
+                />
+              </div>
               <label>歌词 <input class="inp" :value="subtitleDraft.text" @change="e=>editDuetSubtitle('text',e)" /></label>
               <label>IPA <input class="inp ipa" translate="no" :value="subtitleDraft.ipa.join('')" @change="e=>editDuetSubtitle('ipa',e)" /></label>
             </div>
-            <div v-if="duetProject && selectedStageTarget==='v2'" class="duet-controls">
-              <label>剪辑图层
-                <select class="inp" :value="selectedNleClip?.id || ''" @change="e => { const clip = nleClips.find(c=>c.id===(e.target as HTMLSelectElement).value); if (clip) selectNleClip(clip); }">
-                  <option v-for="clip in nleClips.filter(c=>c.track==='v2')" :key="clip.id" :value="clip.id">{{ clip.label }}</option>
-                </select>
-              </label>
+            <div v-if="duetProject && selectedStageTarget==='v2' && duetV2ClipOptions.length" class="duet-controls">
+              <div class="stage-track-setting">
+                <span>剪辑图层</span>
+                <CustomSelect
+                  :model-value="selectedNleClip?.id || ''"
+                  :options="duetV2ClipOptions"
+                  size="sm"
+                  aria-label="选择角色立绘图层"
+                  @update:model-value="selectDuetV2Clip"
+                />
+              </div>
             </div>
             <!-- Strict Timeline Gating Notice When Playhead Is Outside Active Clip Interval -->
             <div v-if="!playheadInInspectorSelection" class="editorial-card ss-oor-card">
@@ -3136,18 +3766,29 @@ onBeforeUnmount(() => {
               </div>
               <div class="ss-check-row">
                 <label><input v-model="v3Sub.showIpa" type="checkbox" @change="commitSubtitleStyle({ show_ipa: v3Sub.showIpa })" /> 同步显示 [IPA] 音标行</label>
+                <label><input v-model="subtitleKaraokeFill" type="checkbox" @change="commitSubtitleKaraokeFill" /> 卡拉 OK 柔边随读填充</label>
               </div>
               <CustomSelect style="margin-bottom:10px" :model-value="v3Sub.reveal" :options="[{value:'char_by_char',label:'逐字显现（单行）'},{value:'single_char',label:'逐字显现（单字）'},{value:'word',label:'按音节显现'},{value:'line',label:'整行显示'}]" size="sm" @update:model-value="value => commitSubtitleStyle({ reveal_mode: value as SubtitleStyleConfig['reveal_mode'] })"/>
-              <CompactSlider v-model="v3Sub.fontSizePx" label="字幕字号" :min="14" :max="SUBTITLE_MAX_FONT_PX" :step="1" :decimals="0" unit="px" @change="value => commitSubtitleStyle({ font_size_px: value })" />
-              <CompactSlider v-model="v3Sub.tiltDeg" label="字幕倾角" :min="-12" :max="12" :step="0.5" :decimals="1" unit="°" @change="value => commitSubtitleStyle({ tilt_deg: value })" />
+              <CompactSlider v-model="v3Sub.fontSizePx" label="字幕字号" :min="14" :max="SUBTITLE_MAX_FONT_PX" :step="1" :decimals="0" :default-value="22" unit="px" @change="value => commitSubtitleStyle({ font_size_px: value })" />
+              <CompactSlider v-model="v3Sub.tiltDeg" label="字幕倾角" :min="-12" :max="12" :step="0.5" :decimals="1" :default-value="0" unit="°" @change="value => commitSubtitleStyle({ tilt_deg: value })" />
               <div class="stage-jitter" aria-label="字幕字号抖动">
                 <label><input v-model="subtitleJitter.enabled" type="checkbox" @change="commitSubtitleJitter" /> 随机抖动每字字号</label>
                 <div class="stage-jitter-values" v-if="subtitleJitter.enabled">
-                  <label>下限 (%)<input v-model.number="subtitleJitter.min_pct" type="number" :min="SUBTITLE_MIN_JITTER_PCT"
+                  <label>下限 (%)<input v-model.number="subtitleJitter.min_pct" class="inp mono" type="number" :min="SUBTITLE_MIN_JITTER_PCT"
                     :max="SUBTITLE_MAX_JITTER_PCT" step="1" @change="commitSubtitleJitter" /></label>
-                  <label>上限 (%)<input v-model.number="subtitleJitter.max_pct" type="number" :min="SUBTITLE_MIN_JITTER_PCT"
+                  <label>上限 (%)<input v-model.number="subtitleJitter.max_pct" class="inp mono" type="number" :min="SUBTITLE_MIN_JITTER_PCT"
                     :max="SUBTITLE_MAX_JITTER_PCT" step="1" @change="commitSubtitleJitter" /></label>
-                  <label>随机种子<input v-model.number="subtitleJitter.seed" type="number" step="1" @change="commitSubtitleJitter" /></label>
+                  <label>随机种子<input v-model.number="subtitleJitter.seed" class="inp mono" type="number" step="1" @change="commitSubtitleJitter" /></label>
+                </div>
+              </div>
+              <div class="stage-jitter" aria-label="字幕角度抖动">
+                <label><input v-model="subtitleAngleJitter.enabled" type="checkbox" @change="commitSubtitleAngleJitter" /> 随机抖动每字角度</label>
+                <div class="stage-jitter-values" v-if="subtitleAngleJitter.enabled">
+                  <label>下限 (°)<input v-model.number="subtitleAngleJitter.min_deg" class="inp mono" type="number" :min="SUBTITLE_MIN_ANGLE_JITTER_DEG"
+                    :max="SUBTITLE_MAX_ANGLE_JITTER_DEG" step="1" @change="commitSubtitleAngleJitter" /></label>
+                  <label>上限 (°)<input v-model.number="subtitleAngleJitter.max_deg" class="inp mono" type="number" :min="SUBTITLE_MIN_ANGLE_JITTER_DEG"
+                    :max="SUBTITLE_MAX_ANGLE_JITTER_DEG" step="1" @change="commitSubtitleAngleJitter" /></label>
+                  <label>随机种子<input v-model.number="subtitleAngleJitter.seed" class="inp mono" type="number" step="1" @change="commitSubtitleAngleJitter" /></label>
                 </div>
               </div>
             </div>
@@ -3156,7 +3797,19 @@ onBeforeUnmount(() => {
             <div v-if="activeKeyframeTrack && activeKfStatus" class="param-sec ss-kf-sec">
               <div class="param-sec-title">
                 <span>变换关键帧 ({{ activeKeyframeTrack.toUpperCase() }})</span>
-                <span class="mono tree-tag">{{ activeKfStatus.count }} 枚</span>
+                <div class="ss-kf-head-right">
+                  <button
+                    type="button"
+                    class="btn xs"
+                    :class="{ active: autoKeyframe }"
+                    :aria-pressed="autoKeyframe"
+                    title="开启后，在非关键帧位置拖拽舞台或微调滑块将自动在当前播放头插帧"
+                    @click="autoKeyframe = !autoKeyframe"
+                  >
+                    自动插帧
+                  </button>
+                  <span class="mono tree-tag">{{ activeKfStatus.count }} 枚</span>
+                </div>
               </div>
               <div class="ss-kf-status">
                 <span class="kf-inline-diamond" :class="{ filled: Boolean(activeKfStatus.near) }" aria-hidden="true" />
@@ -3203,23 +3856,237 @@ onBeforeUnmount(() => {
                   <IconSvg name="chevron-right" :size="11" />
                 </button>
               </div>
+              <div v-if="activeKfStatus.near" class="stage-track-setting">
+                <span>关键帧缓动曲线</span>
+                <CustomSelect
+                  :model-value="activeKfStatus.near.kf.ease ?? 'linear'"
+                  :options="EASING_OPTIONS"
+                  size="sm"
+                  aria-label="关键帧缓动曲线"
+                  @update:model-value="v => updateActiveKeyframeEasing(activeKeyframeTrack!, v)"
+                />
+              </div>
             </div>
 
-            <!-- V0 Short Video Background Properties (Always fully unlocked & editable!) -->
+            <!-- Clip-Edge Transitions for V1 / V2 / V3 (adapted from video-shotcraft, Apache-2.0) -->
+            <details v-if="activeKeyframeTrack" class="param-sec ss-fx-details">
+              <summary class="ss-fx-summary">
+                <span>镜头转场 ({{ activeKeyframeTrack.toUpperCase() }})</span>
+                <span class="mono muted">
+                  {{ layerTransitions[activeKeyframeTrack].inType === 'none' && layerTransitions[activeKeyframeTrack].outType === 'none' ? '未启用' : `${layerTransitions[activeKeyframeTrack].durationMs} ms` }}
+                </span>
+              </summary>
+              <div class="ss-fx-body">
+                <div class="stage-track-setting">
+                  <span>片段入场转场</span>
+                  <CustomSelect
+                    :model-value="layerTransitions[activeKeyframeTrack].inType"
+                    :options="TRANSITION_OPTIONS"
+                    size="sm"
+                    aria-label="片段入场转场"
+                    @update:model-value="v => commitLayerTransition(activeKeyframeTrack!, { inType: v as LayerTransitionConfig['inType'] })"
+                  />
+                </div>
+                <div class="stage-track-setting">
+                  <span>片段出场转场</span>
+                  <CustomSelect
+                    :model-value="layerTransitions[activeKeyframeTrack].outType"
+                    :options="TRANSITION_OPTIONS"
+                    size="sm"
+                    aria-label="片段出场转场"
+                    @update:model-value="v => commitLayerTransition(activeKeyframeTrack!, { outType: v as LayerTransitionConfig['outType'] })"
+                  />
+                </div>
+                <CompactSlider
+                  :model-value="layerTransitions[activeKeyframeTrack].durationMs"
+                  label="转场时长"
+                  :min="120"
+                  :max="1800"
+                  :step="20"
+                  :decimals="0"
+                  :default-value="420"
+                  unit="ms"
+                  @change="v => commitLayerTransition(activeKeyframeTrack!, { durationMs: Math.round(v) })"
+                />
+              </div>
+            </details>
+
+            <!-- V0 Short Video Background & Cinema Stage Properties (Always fully unlocked & editable!) -->
             <template v-if="selectedStageTarget === 'v0'">
               <div class="param-sec">
                 <div class="param-sec-title">
                   <span>背景</span>
                 </div>
-                <p>{{ activeVideo?.name ?? '背景底色' }}</p>
+                <p class="ss-v0-status">{{ activeVideo?.name ?? '背景底色' }}</p>
                 <button type="button" class="btn sm" @click="videoInputRef?.click()"><IconSvg name="upload" :size="12" />在播放头插入视频</button>
                 <div class="ss-check-row">
                   <label><input v-model="v0Video.visible" type="checkbox" @change="commitBackground" /> 可见</label>
                   <label v-if="activeVideo"><input v-model="v0Video.muted" type="checkbox" /> 预览静音</label>
                 </div>
-                <CompactSlider v-model="v0Video.opacity" label="不透明度" :min="0" :max="1" :step="0.02" @change="commitBackground" />
-                <CompactSlider v-model="v0Video.scale" label="画面缩放" :min="0.5" :max="2" :step="0.02" @change="commitBackground" />
+                <CompactSlider v-model="v0Video.opacity" label="不透明度" :min="0" :max="1" :step="0.02" :default-value="1" @change="commitBackground" />
+                <CompactSlider v-model="v0Video.scale" label="画面缩放" :min="0.5" :max="2" :step="0.02" :default-value="1" @change="commitBackground" />
               </div>
+
+              <details open class="param-sec ss-fx-details">
+                <summary class="ss-fx-summary">
+                  <span>舞台风格与全局运镜</span>
+                  <span class="mono muted">{{ cinemaFx.camera === 'none' ? cinemaFx.look : cinemaFx.camera }}</span>
+                </summary>
+                <div class="ss-fx-body">
+                  <div class="stage-track-setting">
+                    <span>舞台调色风格</span>
+                    <CustomSelect
+                      :model-value="cinemaFx.look"
+                      :options="STAGE_LOOK_OPTIONS"
+                      size="sm"
+                      aria-label="舞台调色风格"
+                      @update:model-value="v => commitCinemaFx({ look: v as StageCinemaConfig['look'] }, '切换舞台调色风格')"
+                    />
+                  </div>
+                  <div class="ss-check-row">
+                    <label>
+                      <input
+                        type="checkbox"
+                        :checked="cinemaFx.gridFloor"
+                        @change="e => commitCinemaFx({ gridFloor: (e.target as HTMLInputElement).checked }, '切换透视网格地面')"
+                      />
+                      透视网格地面
+                    </label>
+                  </div>
+                  <div class="stage-track-setting">
+                    <span>全局运镜预设</span>
+                    <CustomSelect
+                      :model-value="cinemaFx.camera"
+                      :options="CAMERA_PRESET_OPTIONS"
+                      size="sm"
+                      aria-label="全局运镜预设"
+                      @update:model-value="v => commitCinemaFx({ camera: v as StageCinemaConfig['camera'] }, '切换全局运镜预设')"
+                    />
+                  </div>
+                  <CompactSlider
+                    v-if="cinemaFx.camera !== 'none'"
+                    :model-value="cinemaFx.cameraStrength"
+                    label="运镜幅度"
+                    :min="0.2"
+                    :max="2"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="1"
+                    @change="v => commitCinemaFx({ cameraStrength: v }, '调整运镜幅度')"
+                  />
+                  <CompactSlider
+                    :model-value="cinemaFx.handheldAmp"
+                    label="手持自然漂移"
+                    :min="0"
+                    :max="1"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="0"
+                    @change="v => commitCinemaFx({ handheldAmp: v }, '调整手持漂移')"
+                  />
+                </div>
+              </details>
+
+              <details class="param-sec ss-fx-details">
+                <summary class="ss-fx-summary">
+                  <span>胶片质感、节拍特效与收尾</span>
+                  <span class="mono muted">{{ cinemaFx.outro !== 'none' ? cinemaFx.outro : cinemaFx.rhythmFx !== 'none' ? cinemaFx.rhythmFx : '后处理' }}</span>
+                </summary>
+                <div class="ss-fx-body">
+                  <CompactSlider
+                    :model-value="cinemaFx.vignette"
+                    label="暗角强度 (Vignette)"
+                    :min="0"
+                    :max="1"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="0"
+                    @change="v => commitCinemaFx({ vignette: v }, '调整暗角强度')"
+                  />
+                  <CompactSlider
+                    :model-value="cinemaFx.grain"
+                    label="胶片颗粒 (Grain)"
+                    :min="0"
+                    :max="1"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="0"
+                    @change="v => commitCinemaFx({ grain: v }, '调整胶片颗粒')"
+                  />
+                  <CompactSlider
+                    :model-value="cinemaFx.halation"
+                    label="高光晕染 (Halation)"
+                    :min="0"
+                    :max="1"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="0"
+                    @change="v => commitCinemaFx({ halation: v }, '调整高光晕染')"
+                  />
+                  <div class="stage-track-setting">
+                    <span>节拍卡点特效</span>
+                    <CustomSelect
+                      :model-value="cinemaFx.rhythmFx"
+                      :options="RHYTHM_FX_OPTIONS"
+                      size="sm"
+                      aria-label="节拍卡点特效"
+                      @update:model-value="v => commitCinemaFx({ rhythmFx: v as StageCinemaConfig['rhythmFx'] }, '切换节拍特效')"
+                    />
+                  </div>
+                  <CompactSlider
+                    v-if="cinemaFx.rhythmFx !== 'none'"
+                    :model-value="cinemaFx.rhythmIntensity"
+                    label="节拍冲击强度"
+                    :min="0.1"
+                    :max="1"
+                    :step="0.05"
+                    :decimals="2"
+                    :default-value="0.65"
+                    @change="v => commitCinemaFx({ rhythmIntensity: v }, '调整节拍特效强度')"
+                  />
+                  <div class="stage-track-setting">
+                    <span>蒙太奇片尾收尾</span>
+                    <CustomSelect
+                      :model-value="cinemaFx.outro"
+                      :options="OUTRO_PRESET_OPTIONS"
+                      size="sm"
+                      aria-label="蒙太奇片尾收尾"
+                      @update:model-value="v => commitCinemaFx({ outro: v as StageCinemaConfig['outro'] }, '切换片尾收尾预设')"
+                    />
+                  </div>
+                  <template v-if="cinemaFx.outro !== 'none'">
+                    <CompactSlider
+                      :model-value="cinemaFx.outroSec"
+                      label="片尾时长"
+                      :min="0.6"
+                      :max="4"
+                      :step="0.1"
+                      :decimals="1"
+                      :default-value="1.5"
+                      unit="s"
+                      @change="v => commitCinemaFx({ outroSec: v }, '调整片尾收尾时长')"
+                    />
+                    <template v-if="cinemaFx.outro === 'title-lockup'">
+                      <label class="stage-track-setting">片尾主标题
+                        <input
+                          class="inp"
+                          maxlength="60"
+                          :value="cinemaFx.outroTitle"
+                          @change="e => commitCinemaFx({ outroTitle: (e.target as HTMLInputElement).value }, '编辑片尾主标题')"
+                        />
+                      </label>
+                      <label class="stage-track-setting">片尾副标题
+                        <input
+                          class="inp"
+                          maxlength="80"
+                          :value="cinemaFx.outroSubtitle"
+                          @change="e => commitCinemaFx({ outroSubtitle: (e.target as HTMLInputElement).value }, '编辑片尾副标题')"
+                        />
+                      </label>
+                    </template>
+                  </template>
+                </div>
+              </details>
             </template>
 
             <!-- V1 Vocal Tract Actor Properties -->
@@ -3227,55 +4094,135 @@ onBeforeUnmount(() => {
               <div class="param-sec">
                 <div class="param-sec-title">
                   <span>声道图层变换</span>
-                  <label class="ss-vis-chk"><input v-model="v1Tract.visible" type="checkbox" @change="commitLayerVisibility('v1')" /> 可见</label>
+                  <div class="ss-kf-head-right">
+                    <button type="button" class="btn xs" title="复位 V1 位置、缩放与不透明度" @click="resetActorTransform('v1')">重置</button>
+                    <label class="ss-vis-chk"><input v-model="v1Tract.visible" type="checkbox" @change="commitLayerVisibility('v1')" /> 可见</label>
+                  </div>
                 </div>
                 <div class="editorial-card ss-v1-sync-note">
                   <span>当前音素</span>
-                  <span v-if="activeA1Segment" class="mono ss-v1-sync-live">
-                    「{{ activeA1Segment?.syl.text }}」/{{ activeA1Segment?.seg.ipa }}/
+                  <span v-if="activeV1Pose.segment" class="mono ss-v1-sync-live">
+                    <template v-if="activeV1Pose.syllable">「{{ activeV1Pose.syllable.text }}」</template>/{{ activeV1Pose.segment.ipa }}/
                   </span>
                   <span v-else class="muted">—</span>
                 </div>
+                <div class="stage-style-field">
+                  <span>声道维度</span>
+                  <div class="seg control-seg" role="group" aria-label="V1 声道维度">
+                    <button
+                      type="button"
+                      :class="{ active: tractViewConfig.dimension === '2d' }"
+                      :aria-pressed="tractViewConfig.dimension === '2d'"
+                      @click="commitTractViewConfig({ dimension: '2d' }, '切换 V1 为 2D 矢状声道')"
+                    >2D 矢状</button>
+                    <button
+                      type="button"
+                      :class="{ active: tractViewConfig.dimension === '3d' }"
+                      :aria-pressed="tractViewConfig.dimension === '3d'"
+                      @click="commitTractViewConfig({ dimension: '3d' }, '切换 V1 为 3D 空间声道')"
+                    >3D 空间</button>
+                  </div>
+                </div>
+                <div class="stage-style-field">
+                  <span>人头模型（同语音合成）</span>
+                  <div class="seg control-seg" role="group" aria-label="V1 人头模型">
+                    <button
+                      type="button"
+                      :class="{ active: tractViewConfig.headMode === 'head' }"
+                      :aria-pressed="tractViewConfig.headMode === 'head'"
+                      @click="commitTractViewConfig({ headMode: 'head' }, '启用语音合成同款人头模型')"
+                    >语音合成人头</button>
+                    <button
+                      type="button"
+                      :class="{ active: tractViewConfig.headMode === 'none' }"
+                      :aria-pressed="tractViewConfig.headMode === 'none'"
+                      @click="commitTractViewConfig({ headMode: 'none' }, '切换为纯声道无头模')"
+                    >纯声道</button>
+                  </div>
+                </div>
+                <template v-if="tractViewConfig.dimension === '3d'">
+                  <div class="stage-style-field">
+                    <span>3D 视角预设</span>
+                    <CustomSelect
+                      :model-value="tractViewConfig.view3dAngle"
+                      :options="TRACT_3D_ANGLE_OPTIONS"
+                      size="sm"
+                      aria-label="3D 视角预设"
+                      @update:model-value="v => commitTractViewConfig({ view3dAngle: v as StageTractViewConfig['view3dAngle'] }, '切换 V1 3D 视角')"
+                    />
+                  </div>
+                  <CompactSlider
+                    :model-value="tractViewConfig.yawDeg"
+                    label="3D 水平旋转"
+                    :min="-65"
+                    :max="65"
+                    :step="1"
+                    :decimals="0"
+                    :default-value="0"
+                    unit="°"
+                    @change="v => commitTractViewConfig({ yawDeg: Math.round(v) }, '调整 V1 3D 水平旋转')"
+                  />
+                  <CompactSlider
+                    :model-value="tractViewConfig.pitchDeg"
+                    label="3D 俯仰角度"
+                    :min="-25"
+                    :max="25"
+                    :step="1"
+                    :decimals="0"
+                    :default-value="0"
+                    unit="°"
+                    @change="v => commitTractViewConfig({ pitchDeg: Math.round(v) }, '调整 V1 3D 俯仰角度')"
+                  />
+                  <p v-if="activeSpeaker.endsWith('-2D')" class="muted ss-tract-3d-note">
+                    当前说话人（{{ activeSpeaker }}）仅含 2D 矢状轮廓，已自动以 2D 同款人头渲染。
+                  </p>
+                </template>
                 <div class="stage-style-field">
                   <span>声道画风</span>
                   <CustomSelect :model-value="tractRenderStyle" :options="TRACT_STYLE_OPTIONS" size="sm"
                     aria-label="声道画风" @update:model-value="commitTractRenderStyle" />
                 </div>
-                <CompactSlider v-model="v1Tract.x" label="水平位置 X" :min="5" :max="95" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v1')" />
-                <CompactSlider v-model="v1Tract.y" label="垂直位置 Y" :min="8" :max="92" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v1')" />
-                <CompactSlider v-model="v1Tract.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" @change="commitTransformEdit('v1')" />
-                <CompactSlider v-model="v1Tract.opacity" label="不透明度" :min="0" :max="1" :step="0.02" @change="commitTransformEdit('v1')" />
+                <CompactSlider v-model="v1Tract.x" label="水平位置 X" :min="5" :max="95" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v1.x" unit="%" @change="commitTransformEdit('v1')" />
+                <CompactSlider v-model="v1Tract.y" label="垂直位置 Y" :min="8" :max="94" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v1.y" unit="%" @change="commitTransformEdit('v1')" />
+                <CompactSlider v-model="v1Tract.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v1.scale" @change="commitTransformEdit('v1')" />
+                <CompactSlider v-model="v1Tract.opacity" label="不透明度" :min="0" :max="1" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v1.opacity" @change="commitTransformEdit('v1')" />
               </div>
             </template>
 
             <template v-else-if="selectedStageTarget === 'v2'">
               <div class="param-sec">
                 <div class="param-sec-title"><span>图像变换</span>
-                  <label class="ss-vis-chk"><input v-model="v2Sprite.visible" type="checkbox" @change="commitLayerVisibility('v2')" /> 可见</label>
+                  <div class="ss-kf-head-right">
+                    <button type="button" class="btn xs" title="复位 V2 位置、缩放与不透明度" @click="resetActorTransform('v2')">重置</button>
+                    <label class="ss-vis-chk"><input v-model="v2Sprite.visible" type="checkbox" @change="commitLayerVisibility('v2')" /> 可见</label>
+                  </div>
                 </div>
-                <CompactSlider v-model="v2Sprite.x" label="水平位置 X" :min="5" :max="95" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v2')" />
-                <CompactSlider v-model="v2Sprite.y" label="垂直位置 Y" :min="8" :max="92" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v2')" />
-                <CompactSlider v-model="v2Sprite.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" @change="commitTransformEdit('v2')" />
-                <CompactSlider v-model="v2Sprite.opacity" label="不透明度" :min="0" :max="1" :step="0.02" @change="commitTransformEdit('v2')" />
+                <CompactSlider v-model="v2Sprite.x" label="水平位置 X" :min="5" :max="95" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v2.x" unit="%" @change="commitTransformEdit('v2')" />
+                <CompactSlider v-model="v2Sprite.y" label="垂直位置 Y" :min="8" :max="94" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v2.y" unit="%" @change="commitTransformEdit('v2')" />
+                <CompactSlider v-model="v2Sprite.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v2.scale" @change="commitTransformEdit('v2')" />
+                <CompactSlider v-model="v2Sprite.opacity" label="不透明度" :min="0" :max="1" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v2.opacity" @change="commitTransformEdit('v2')" />
               </div>
             </template>
 
             <!-- V3 Char-by-Char IPA / Lyrics Subtitle Properties -->
             <template v-else-if="selectedStageTarget === 'v3'">
               <div class="param-sec">
-                <div class="param-sec-title"><span>字幕位置与变换</span></div>
-                <CompactSlider v-model="v3Sub.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" @change="commitTransformEdit('v3')" />
-                <CompactSlider v-model="v3Sub.opacity" label="不透明度" :min="0" :max="1" :step="0.02" @change="commitTransformEdit('v3')" />
-                <CompactSlider v-model="v3Sub.x" label="水平位置 X" :min="10" :max="90" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v3')" />
-                <CompactSlider v-model="v3Sub.y" label="垂直位置 Y" :min="12" :max="94" :step="0.5" :decimals="1" unit="%" @change="commitTransformEdit('v3')" />
+                <div class="param-sec-title">
+                  <span>字幕位置与变换</span>
+                  <button type="button" class="btn xs" title="复位 V3 位置、缩放与不透明度" @click="resetActorTransform('v3')">重置</button>
+                </div>
+                <CompactSlider v-model="v3Sub.scale" label="缩放倍率" :min="0.25" :max="2.6" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v3.scale" @change="commitTransformEdit('v3')" />
+                <CompactSlider v-model="v3Sub.opacity" label="不透明度" :min="0" :max="1" :step="0.02" :default-value="DEFAULT_TRANSFORMS.v3.opacity" @change="commitTransformEdit('v3')" />
+                <CompactSlider v-model="v3Sub.x" label="水平位置 X" :min="5" :max="95" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v3.x" unit="%" @change="commitTransformEdit('v3')" />
+                <CompactSlider v-model="v3Sub.y" label="垂直位置 Y" :min="8" :max="94" :step="0.5" :decimals="1" :default-value="DEFAULT_TRANSFORMS.v3.y" unit="%" @change="commitTransformEdit('v3')" />
               </div>
             </template>
 
-            <template v-else-if="selectedStageTarget === 'a1'">
+            <template v-else-if="isStageVocalTrack(selectedStageTarget)">
               <!-- 1. Syllable & Clickable Phoneme Chips -->
               <div class="param-sec">
                 <div class="param-sec-title">
-                  <span>A1 音节与音素序列</span>
+                  <span>{{ selectedStageTarget.toUpperCase() }} 音节与音素序列</span>
                   <span v-if="activeA1Segment" class="mono tree-tag ss-a1-live-tag">
                     播放中 /{{ activeA1Segment.seg.ipa }}/
                   </span>
@@ -3326,7 +4273,7 @@ onBeforeUnmount(() => {
                 </div>
                 <button
                   type="button"
-                  class="btn sm primary ss-a1-audition-btn"
+                  class="btn sm primary ss-a1-audition"
                   :disabled="isAuditioningA1 || store.isSynthesizing.value"
                   @click="auditionSelectedPhonemeLocal"
                 >
@@ -3340,6 +4287,7 @@ onBeforeUnmount(() => {
                   :max="600"
                   :step="1"
                   :decimals="0"
+                  :default-value="100"
                   unit="ms"
                   @update:model-value="onA1DurationInput"
                   @change="commitA1SegmentDuration"
@@ -3356,8 +4304,8 @@ onBeforeUnmount(() => {
                 <CompactSlider
                   :model-value="a1F0DisplayHz"
                   label="声源基频 F0"
-                  :min="F0_LIMIT_HZ.min"
-                  :max="F0_LIMIT_HZ.max"
+                  :min="Math.min(F0_UI_SLIDER_HZ.min, Number.isFinite(a1F0DisplayHz) && a1F0DisplayHz > 0 ? Math.floor(a1F0DisplayHz) : F0_UI_SLIDER_HZ.min)"
+                  :max="Math.max(F0_UI_SLIDER_HZ.max, Number.isFinite(a1F0DisplayHz) ? Math.ceil(a1F0DisplayHz) : F0_UI_SLIDER_HZ.max)"
                   :step="1"
                   :decimals="0"
                   unit="Hz"
@@ -3388,11 +4336,17 @@ onBeforeUnmount(() => {
 
           </template>
 
-          <VoiceTransferPanel ref="voiceTransferPanel" :choices="voiceTransferChoices" :save="saveVoiceTransfer" :replace-clip="replaceVoiceTransfer" />
+          <VoiceTransferPanel
+            v-show="focusedAsset?.kind === 'audio' || isStageAudioTrack(selectedStageTarget) || voiceTransferForcedOpen"
+            ref="voiceTransferPanel"
+            :choices="voiceTransferChoices"
+            :save="saveVoiceTransfer"
+            :replace-clip="replaceVoiceTransfer"
+          />
         </div>
       </aside>
     </div>
-        <SplitPane v-model="nleH" direction="horizontal" invert :min="220" :max="680" :default-value="330" storage-key="studio-nle-h" />
+        <SplitPane v-model="nleH" direction="horizontal" invert :min="200" :max="680" :default-value="316" storage-key="studio-nle-h" />
 
         <!-- PR-Level Non-Linear Multi-Track Timeline -->
         <div class="panel ss-nle-panel" data-tour="stage-timeline" :style="{ height: `${nleH}px` }" @wheel="onTimelineWheel">
@@ -3435,138 +4389,181 @@ onBeforeUnmount(() => {
                 <span>删除片段</span>
               </button>
             </div>
-            <div class="ss-nle-zoom">
+            <div class="ss-nle-zoom" data-tour="stage-beat-sync">
+              <button
+                type="button"
+                class="btn xs"
+                :disabled="analyzingBeats"
+                title="从伴奏或所选音频纯本地分析节拍网格（BPM 与强拍点），用于卡点剪辑与节拍特效"
+                @click="analyzeTimelineBeats"
+              >
+                <IconSvg name="waveform" :size="11" />
+                <span>{{ analyzingBeats ? '分析中…' : '识别节拍' }}</span>
+              </button>
+              <template v-if="beatGrid">
+                <button
+                  type="button"
+                  class="btn xs"
+                  :class="{ active: beatSnapEnabled }"
+                  :aria-pressed="beatSnapEnabled"
+                  :title="`已识别 ${beatGrid.bpm} BPM（${beatGrid.beatsSmp.length} 拍），点击开启/关闭拖拽吸附至节拍`"
+                  @click="beatSnapEnabled = !beatSnapEnabled"
+                >
+                  <span class="mono">{{ beatGrid.bpm }} BPM · 吸附</span>
+                </button>
+                <button type="button" class="btn xs icon-only" title="清除节拍网格" aria-label="清除节拍网格" @click="clearTimelineBeats">
+                  <IconSvg name="close" :size="10" />
+                </button>
+              </template>
               <button type="button" class="btn xs" :aria-pressed="snapEnabled" :class="{ active: snapEnabled }" @click="snapEnabled = !snapEnabled">吸附至帧</button>
               <button type="button" class="btn xs" @click="fitTimeline">适应全宽</button>
               <span class="muted">缩放</span>
               <input
-                v-model.number="nleZoom"
+                v-model.number="zoomSliderPct"
                 type="range"
                 aria-label="时间线缩放"
                 title="Ctrl + 滚轮以鼠标位置为中心缩放，Shift + 滚轮横向移动"
-                min="0.02"
-                max="16"
-                step="0.01"
+                min="0"
+                max="100"
+                step="0.2"
                 class="ss-zoom-sl"
-                :style="{ '--fill': `${(((nleZoom - 0.5) / 2.5) * 100).toFixed(1)}%` }"
+                :style="{ '--fill': `${zoomSliderPct.toFixed(1)}%` }"
               />
               <span class="mono">{{ Math.round(nleZoom * 100) }}%</span>
             </div>
           </div>
 
-          <div class="ss-nle-body" :class="{ 'duet-timeline':duetProject }"
-            :style="{ '--track-rows': visualTimelineTracks.length + AUDIO_TRACKS.length + (duetProject ? 2 : 0) }">
-            <!-- Fixed Track Headers Grouped into Visual Layers (V0–V3) and Audio Mix Tracks (A1–An) (T-56) -->
-            <div class="ss-nle-hdrs">
+          <div
+            ref="timelineScroll"
+            class="ss-nle-viewport"
+            :class="{ 'duet-timeline': duetProject }"
+            :style="{ '--track-rows': visualTimelineTracks.length + AUDIO_TRACKS.length + (duetProject ? 2 : 0) }"
+            @scroll.passive="updateTimelineViewport"
+          >
+            <div class="ss-nle-grid">
               <div class="ss-nle-hdr-ruler mono muted">分层与音轨</div>
-
               <div
-                class="ss-nle-sec-hdr is-visual-sec"
-                title="上方视频画面图层（V0 背景 · V1 声道解剖动画 · V2 角色形象 · V3 歌词字幕）：自下而上叠加合成到上方 16:9 节目监视器视频画面"
+                class="ss-nle-ruler"
+                :style="{ width: `${nleCanvasWidth}px`, '--second-w': nlePxPerSec + 'px' }"
+                @pointerdown="onNleRulerDown"
               >
-                <IconSvg name="layers" :size="11" />
-                <span>上方视频画面图层 (V0–V3)</span>
-              </div>
-              <div
-                v-for="trk in visualTimelineTracks"
-                :key="trk.key"
-                class="ss-nle-hdr-row"
-                :class="{
-                  active: selectedStageTarget === trk.id && selectedVisualLane === trk.lane,
-                  'is-off': !isVisualTrackVisible(trk.id) || !nleClips.some(clip =>
-                    clip.track === trk.id && (clip.visualLane ?? 0) === trk.lane &&
-                    clip.startSmp <= store.playheadSmp.value && store.playheadSmp.value < clip.endSmp),
-                  'duet-stacked': !trk.lane && duetProject && (trk.id === 'v1' || trk.id === 'v3'),
-                }"
-                :title="trk.tip"
-                role="button" tabindex="0" @keydown.enter="chooseTrack(trk.id, trk.lane)" @click="chooseTrack(trk.id, trk.lane)"
-              >
-                <span class="ss-trk-dot" :style="{ background: trk.colorVar }" />
-                <span class="ss-trk-name">{{ trk.name }}</span>
-                <span class="mono muted ss-trk-tag">{{ trk.tag }}</span>
-                <button
-                  v-if="!trk.lane"
-                  type="button"
-                  class="trk-mini-btn"
-                  :class="{ 'is-eye-off': !isVisualTrackVisible(trk.id) }"
-                  :aria-pressed="isVisualTrackVisible(trk.id)"
-                  :title="isVisualTrackVisible(trk.id) ? `隐藏 ${trk.name} 画面图层` : `显示 ${trk.name} 画面图层`"
-                  @click.stop="toggleVisualTrackVisible(trk.id)"
+                <div class="ss-nle-playhead-head" :style="{ left: `${smpToNleX(store.playheadSmp.value)}px` }" />
+                <span
+                  v-for="tick in visibleBeatTicks"
+                  :key="`beat_${tick.smp}`"
+                  class="ss-beat-tick"
+                  :class="{ 'is-strong': tick.strong }"
+                  :style="{ left: `${smpToNleX(tick.smp)}px` }"
+                  aria-hidden="true"
+                />
+                <span
+                  v-for="sec in tickSeconds"
+                  :key="sec"
+                  class="ss-r-tick mono muted"
+                  :style="{ left: `${sec * nlePxPerSec}px` }"
                 >
-                  <IconSvg name="eye" :size="12" />
-                </button>
+                  {{ formatTimecode(sec * SAMPLE_RATE_HZ).slice(0, 5) }}
+                </span>
               </div>
 
-              <div
-                class="ss-nle-sec-hdr is-audio-sec"
-                title="下方声音混音轨道：人声声部轨（驱动配套的 V1 声道动画与 V3 歌词字幕）与伴奏配乐轨共同混音输出"
-              >
-                <IconSvg name="volume" :size="11" />
-                <span>下方声音混音轨道 (A1–An)</span>
-              </div>
-              <div
-                v-for="trk in AUDIO_TRACKS"
-                :key="trk.id"
-                class="ss-nle-hdr-row"
-                :class="{ active: selectedStageTarget === trk.id, 'is-off': !activeClipsByTrack[trk.id] || trk.settings.muted }"
-                :title="trk.tip"
-                role="button" tabindex="0" @keydown.enter="chooseTrack(trk.id)" @click="chooseTrack(trk.id)"
-              >
-                <span class="ss-trk-dot" :style="{ background: trk.colorVar }" />
-                <span class="ss-trk-name">{{ trk.name }}</span>
-                <div class="trk-mix-btns" @click.stop>
+              <!-- Sticky Left Track Headers -->
+              <div class="ss-nle-hdrs">
+                <div
+                  class="ss-nle-sec-hdr is-visual-sec"
+                  title="上方视频画面图层（V0 背景 · V1 声道解剖动画 · V2 角色形象 · V3 歌词字幕）"
+                >
+                  <IconSvg name="layers" :size="10" />
+                  <span>画面分层 (V0–V3)</span>
+                </div>
+                <div
+                  v-for="trk in visualTimelineTracks"
+                  :key="trk.key"
+                  class="ss-nle-hdr-row"
+                  :class="{
+                    active: selectedStageTarget === trk.id && selectedVisualLane === trk.lane,
+                    'is-off': !isVisualTrackVisible(trk.id) || !nleClips.some(clip =>
+                      clip.track === trk.id && (clip.visualLane ?? 0) === trk.lane &&
+                      clip.startSmp <= store.playheadSmp.value && store.playheadSmp.value < clip.endSmp),
+                    'duet-stacked': !trk.lane && duetProject && (trk.id === 'v1' || trk.id === 'v3'),
+                  }"
+                  :title="trk.tip"
+                  role="button" tabindex="0" @keydown.enter="chooseTrack(trk.id, trk.lane)" @click="chooseTrack(trk.id, trk.lane)"
+                >
+                  <span class="ss-trk-dot" :style="{ background: trk.colorVar }" />
+                  <span class="ss-trk-name">{{ trk.name }}</span>
+                  <span class="mono muted ss-trk-tag">{{ trk.tag }}</span>
                   <button
+                    v-if="!trk.lane"
                     type="button"
-                    class="trk-ms-btn mono"
-                    :class="{ 'is-muted': trk.settings.muted }"
-                    :aria-pressed="trk.settings.muted"
-                    :title="trk.settings.muted ? '取消轨道静音 (Mute)' : '静音此音轨 (Mute)'"
-                    @click.stop="configureStageTrack(trk.id, { muted: !trk.settings.muted })"
+                    class="btn xs icon-only trk-toggle"
+                    :class="{ 'is-eye-off': !isVisualTrackVisible(trk.id) }"
+                    :aria-pressed="isVisualTrackVisible(trk.id)"
+                    :title="isVisualTrackVisible(trk.id) ? `隐藏 ${trk.name} 画面图层` : `显示 ${trk.name} 画面图层`"
+                    @click.stop="toggleVisualTrackVisible(trk.id)"
                   >
-                    M
-                  </button>
-                  <button
-                    type="button"
-                    class="trk-ms-btn mono"
-                    :class="{ 'is-solo': Boolean(trk.settings.solo) }"
-                    :aria-pressed="Boolean(trk.settings.solo)"
-                    :title="trk.settings.solo ? '取消轨道独奏 (Solo)' : '独奏此音轨 (Solo)'"
-                    @click.stop="configureStageTrack(trk.id, { solo: !trk.settings.solo })"
-                  >
-                    S
-                  </button>
-                  <button
-                    v-if="canRemoveStageAudioTrack(store.project.value, trk.id, audioTrackSettings)"
-                    type="button"
-                    class="trk-mini-btn trk-del-btn"
-                    :title="`删除 ${trk.name} 音轨`"
-                    :aria-label="`删除 ${trk.name} 音轨`"
-                    @click.stop="removeStageVoiceTrack(trk.id)"
-                  >
-                    <IconSvg name="trash" :size="11" />
+                    <IconSvg name="eye" :size="11" />
                   </button>
                 </div>
-              </div>
-            </div>
 
-            <!-- Horizontal-Scroll Lanes Matching Visual & Audio Sections -->
-            <div ref="timelineScroll" class="ss-nle-scroll" @scroll.passive="updateTimelineViewport">
+                <div
+                  class="ss-nle-sec-hdr is-audio-sec"
+                  title="下方声音混音轨道：人声声部轨与伴奏配乐轨共同混音输出"
+                >
+                  <IconSvg name="volume" :size="10" />
+                  <span>声音混音 (A1–An)</span>
+                </div>
+                <div
+                  v-for="trk in AUDIO_TRACKS"
+                  :key="trk.id"
+                  class="ss-nle-hdr-row"
+                  :class="{ active: selectedStageTarget === trk.id, 'is-off': !activeClipsByTrack[trk.id] || trk.settings.muted }"
+                  :title="trk.tip"
+                  role="button" tabindex="0" @keydown.enter="chooseTrack(trk.id)" @click="chooseTrack(trk.id)"
+                >
+                  <span class="ss-trk-dot" :style="{ background: trk.colorVar }" />
+                  <span class="ss-trk-name">{{ trk.name }}</span>
+                  <div class="trk-mix-btns" @click.stop>
+                    <button
+                      type="button"
+                      class="btn xs mono trk-ms"
+                      :class="{ 'is-muted': trk.settings.muted }"
+                      :aria-pressed="trk.settings.muted"
+                      :title="trk.settings.muted ? '取消轨道静音 (Mute)' : '静音此音轨 (Mute)'"
+                      @click.stop="configureStageTrack(trk.id, { muted: !trk.settings.muted })"
+                    >
+                      M
+                    </button>
+                    <button
+                      type="button"
+                      class="btn xs mono trk-ms"
+                      :class="{ 'is-solo': Boolean(trk.settings.solo) }"
+                      :aria-pressed="Boolean(trk.settings.solo)"
+                      :title="trk.settings.solo ? '取消轨道独奏 (Solo)' : '独奏此音轨 (Solo)'"
+                      @click.stop="configureStageTrack(trk.id, { solo: !trk.settings.solo })"
+                    >
+                      S
+                    </button>
+                    <button
+                      v-if="canRemoveStageAudioTrack(store.project.value, trk.id, audioTrackSettings)"
+                      type="button"
+                      class="btn xs icon-only trk-toggle trk-remove"
+                      :title="`删除 ${trk.name} 音轨`"
+                      :aria-label="`删除 ${trk.name} 音轨`"
+                      @click.stop="removeStageVoiceTrack(trk.id)"
+                    >
+                      <IconSvg name="trash" :size="11" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Scrollable Lanes Canvas -->
               <div class="ss-nle-canvas" :style="{ width: `${nleCanvasWidth}px`, '--second-w': nlePxPerSec + 'px' }">
                 <div class="ss-nle-playhead" :style="{ left: `${smpToNleX(store.playheadSmp.value)}px` }" />
-                <div class="ss-nle-ruler" @pointerdown="onNleRulerDown">
-                  <span
-                    v-for="sec in tickSeconds"
-                    :key="sec"
-                    class="ss-r-tick mono muted"
-                    :style="{ left: `${sec * nlePxPerSec}px` }"
-                  >
-                    {{ formatTimecode(sec * SAMPLE_RATE_HZ).slice(0, 5) }}
-                  </span>
-                </div>
 
-                <!-- Visual Section Banner -->
+                <!-- Visual Section Divider -->
                 <div class="ss-nle-sec-lane is-visual-sec">
-                  <span>画面分层（控制上方视频画布）：V0 背景 · V1 声道解剖动画 · V2 角色形象 · V3 歌词字幕</span>
+                  <span>V0 背景 · V1 声道动画 · V2 形象 · V3 字幕</span>
                 </div>
                 <div
                   v-for="trk in visualTimelineTracks"
@@ -3603,6 +4600,7 @@ onBeforeUnmount(() => {
                     @pointerenter="hoveredClipId = clip.id"
                     @pointerleave="hoveredClipId === clip.id && (hoveredClipId = null)"
                     @pointerdown="startClipMove(clip, $event)"
+                    @contextmenu.prevent="openClipContextMenu(clip, $event)"
                   >
                     <div class="nle-trim left" title="左边缘修剪 (Trim)" @pointerdown="startClipTrim(clip, 'left', $event)" />
                     <span
@@ -3621,16 +4619,6 @@ onBeforeUnmount(() => {
                       {{ resolveNleClipSourceKind(clip) === 'audio-reconstruct' ? '声道重建' : 'IPA 合成' }}
                     </span>
                     <span class="nle-clip-lbl">{{ clip.label }}</span>
-                    <button
-                      type="button"
-                      class="nle-clip-del"
-                      :title="linkCompanions && companionGroupMap.get(clip.id) ? '删除同源片段组' : '删除此片段'"
-                      aria-label="删除此片段"
-                      @pointerdown.stop
-                      @click.stop="deleteClipById(clip.id)"
-                    >
-                      <IconSvg name="close" :size="10" />
-                    </button>
                     <template v-if="trk.id === 'v1'">
                       <button v-for="k in v1Markers.get(clip.id)" :key="k.t" type="button" class="tract-marker"
                         :class="{ 'is-dense': k.dense }" :style="{ left: smpToNleX(k.t - clip.sourceStartSmp) + 'px' }"
@@ -3659,9 +4647,9 @@ onBeforeUnmount(() => {
                   </template>
                 </div>
 
-                <!-- Audio Mix Section Banner -->
+                <!-- Audio Mix Section Divider -->
                 <div class="ss-nle-sec-lane is-audio-sec">
-                  <span>声音混音（输出多声部音频）：A1/A2… 人声声部（同源联动 V1/V3） · A3 伴奏配乐</span>
+                  <span>A1/A2… 人声声部（联动 V1/V3） · A3 伴奏配乐</span>
                 </div>
                 <div
                   v-for="trk in AUDIO_TRACKS"
@@ -3696,6 +4684,7 @@ onBeforeUnmount(() => {
                     @pointerenter="hoveredClipId = clip.id"
                     @pointerleave="hoveredClipId === clip.id && (hoveredClipId = null)"
                     @pointerdown="startClipMove(clip, $event)"
+                    @contextmenu.prevent="openClipContextMenu(clip, $event)"
                   >
                     <div class="nle-trim left" title="左边缘修剪 (Trim)" @pointerdown="startClipTrim(clip, 'left', $event)" />
                     <span
@@ -3714,16 +4703,6 @@ onBeforeUnmount(() => {
                       {{ resolveNleClipSourceKind(clip) === 'audio-reconstruct' ? '声道重建' : 'IPA 合成' }}
                     </span>
                     <span class="nle-clip-lbl">{{ clip.label }}</span>
-                    <button
-                      type="button"
-                      class="nle-clip-del"
-                      :title="linkCompanions && companionGroupMap.get(clip.id) ? '删除同源片段组' : '删除此片段'"
-                      aria-label="删除此片段"
-                      @pointerdown.stop
-                      @click.stop="deleteClipById(clip.id)"
-                    >
-                      <IconSvg name="close" :size="10" />
-                    </button>
                     <AudioWaveform v-if="clip.assetId" class="clip-wave" :asset-id="clip.assetId" :start-smp="clip.sourceStartSmp" :duration-smp="clip.endSmp - clip.startSmp"/>
                     <button v-for="point in visibleStageGainPoints(clip.gainPoints, clip.sourceStartSmp, clip.sourceStartSmp + clip.endSmp - clip.startSmp)"
                       :key="point.source_smp" type="button" class="clip-gain-marker"
@@ -3741,6 +4720,38 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
+
+    <Teleport to="body">
+      <div
+        v-if="clipContextMenu && contextMenuClip"
+        class="vc-sel-menu ss-clip-ctx-menu"
+        role="menu"
+        :style="{ left: `${clipContextMenu.x}px`, top: `${clipContextMenu.y}px` }"
+      >
+        <button type="button" class="vc-sel-opt" role="menuitem" @click="runClipContextAction('split')">
+          <span>在播放头切分</span><span class="mono muted">B</span>
+        </button>
+        <button type="button" class="vc-sel-opt" role="menuitem" @click="runClipContextAction('copy')">
+          <span>复制片段</span><span class="mono muted">Ctrl+C</span>
+        </button>
+        <button type="button" class="vc-sel-opt" role="menuitem" :disabled="!clipboardClip" @click="runClipContextAction('paste')">
+          <span>粘贴至播放头</span><span class="mono muted">Ctrl+V</span>
+        </button>
+        <button type="button" class="vc-sel-opt" role="menuitem" @click="runClipContextAction('clone')">
+          <span>向后生成副本</span><span class="mono muted">Ctrl+D</span>
+        </button>
+        <button type="button" class="vc-sel-opt" role="menuitem" @click="runClipContextAction('mute')">
+          <span>{{ contextMenuClip.muted ? '取消静音片段' : '静音此片段' }}</span>
+        </button>
+        <button v-if="contextMenuClip.assetId" type="button" class="vc-sel-opt" role="menuitem" @click="runClipContextAction('locate')">
+          <span>在媒体库中定位</span>
+        </button>
+        <button type="button" class="vc-sel-opt ss-ctx-danger" role="menuitem" @click="runClipContextAction('delete')">
+          <span>{{ linkCompanions && companionGroupMap.get(contextMenuClip.id) ? '删除同源片段组' : '删除此片段' }}</span>
+          <span class="mono muted">Del</span>
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -3753,8 +4764,6 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
 }
-
-.ss-dev-sel { min-width: 152px; width: auto; max-width: 214px; }
 
 .ss-body-row {
   flex: 1;
@@ -3796,11 +4805,11 @@ onBeforeUnmount(() => {
 
 .ss-center {
   flex: 1;
-  min-width: 330px;
+  min-width: 300px;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
 
 .ss-stage-panel {
@@ -3920,6 +4929,7 @@ onBeforeUnmount(() => {
 .stage-scene-canvas { z-index: 2; }
 .stage-scene-canvas.overlay { z-index: 4; }
 .stage-style-field { display: grid; gap: 4px; margin: 0 0 8px; }
+.ss-tract-3d-note { margin: 0 0 8px; font-size: 0.8rem; line-height: 1.45; }
 .stage-jitter { display: grid; gap: 8px; margin: 8px 0; }
 .stage-jitter-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
 .stage-jitter-values label { display: grid; gap: 3px; min-width: 0; font-size: 0.916667rem; }
@@ -3980,73 +4990,152 @@ onBeforeUnmount(() => {
   cursor: nwse-resize;
 }
 
-/* PR-Level Non-Linear Multi-Track Timeline (snug height = 226px default for 6 tracks, zero void below A2) */
+/* PR-Level Non-Linear Multi-Track Timeline */
 .ss-nle-panel {
   flex: none;
-  min-height: 176px;
+  margin: 0;
+  min-height: 196px;
 }
 
 .ss-nle-bar {
-  height: 30px;
   flex: none;
-  padding: 0 10px;
+  min-height: 36px;
+  padding: 4px 10px;
   border-bottom: 1px solid var(--panel-border);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 0.9rem;
+  gap: 5px 8px;
+  font-size: 0.875rem;
 }
 
 .ss-nle-acts,
 .ss-nle-zoom {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .ss-nle-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.95rem;
   font-weight: 700;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
   margin-right: 4px;
 }
 
+.ss-nle-bar kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 3px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-size: 0.75rem;
+}
+
 .ss-zoom-sl {
-  width: 68px !important;
+  width: 72px !important;
   height: 14px !important;
 }
 
-.ss-nle-body {
+.ss-nle-viewport {
   flex: 1;
   min-height: 0;
-  display: flex;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
+  position: relative;
   scrollbar-width: thin;
 }
 
-.ss-nle-hdrs {
-  width: 156px;
-  flex: none;
-  border-right: 1px solid var(--panel-border);
-  background: color-mix(in srgb, var(--sidebar) 68%, transparent);
+.ss-nle-grid {
+  display: grid;
+  grid-template-columns: 206px max-content;
+  min-width: 100%;
+  width: max-content;
 }
 
 .ss-nle-hdr-ruler {
-  height: 20px;
-  padding: 0 8px;
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: var(--z-popover);
+  height: 24px;
+  padding: 0 10px;
   display: flex;
   align-items: center;
   font-size: 0.791667rem;
+  border-right: 1px solid var(--panel-border);
   border-bottom: 1px solid var(--panel-border);
+  background: var(--sidebar);
+}
+
+.ss-nle-ruler {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  min-width: 100%;
+  height: 24px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--app);
+  background-image: repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px calc(var(--second-w) / 4));
+  background-size: 100% 4px;
+  background-position: left bottom;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.ss-nle-playhead-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: var(--danger);
+  z-index: var(--z-sticky);
+  pointer-events: none;
+}
+
+.ss-nle-playhead-head::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 10px;
+  height: 11px;
+  background: var(--danger);
+  clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+}
+
+.ss-r-tick {
+  position: absolute;
+  top: 4px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding-left: 5px;
+  border-left: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.ss-nle-hdrs {
+  position: sticky;
+  left: 0;
+  z-index: var(--z-sticky);
+  border-right: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--sidebar) 92%, var(--panel));
 }
 
 .ss-nle-hdr-row {
-  height: 28px;
-  padding: 0 8px;
+  height: var(--lane-height);
+  padding: 0 8px 0 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   font-size: 0.875rem;
   cursor: pointer;
 }
@@ -4058,43 +5147,30 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.ss-nle-hdr-row.is-off .ss-trk-dot {
-  opacity: 0.35;
-}
-
-.ss-nle-hdr-row.is-off .ss-trk-name {
-  opacity: 0.65;
-}
+.ss-nle-hdr-row.is-off .ss-trk-dot { opacity: 0.35; }
+.ss-nle-hdr-row.is-off .ss-trk-name { opacity: 0.65; }
 
 .ss-trk-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 3px;
+  height: 15px;
+  border-radius: 1px;
   flex: none;
 }
 
 .ss-trk-name {
   flex: 1;
   min-width: 0;
+  font-size: 0.875rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ss-trk-tag {
-  font-size: 0.733333rem;
-}
-
-.ss-nle-scroll {
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-  overflow-y: visible;
-  scrollbar-width: thin;
-}
+.ss-trk-tag { font-size: 0.733333rem; }
 
 .ss-nle-canvas {
   position: relative;
+  min-width: 100%;
 }
 
 .ss-nle-playhead {
@@ -4103,51 +5179,40 @@ onBeforeUnmount(() => {
   bottom: 0;
   width: 1.5px;
   background: var(--danger);
-  z-index: 9;
+  z-index: var(--z-sticky);
   pointer-events: none;
 }
 
-.ss-nle-ruler {
-  height: 20px;
-  position: relative;
-  border-bottom: 1px solid var(--panel-border);
-  background: color-mix(in srgb, var(--app) 68%, transparent);
-  cursor: pointer;
-}
-
-.ss-r-tick {
-  position: absolute;
-  top: 3px;
-  font-size: 0.75rem;
-  padding-left: 3px;
-  border-left: 1px solid var(--border);
-}
-
 .ss-nle-lane {
-  height: 28px;
+  height: var(--lane-height);
   position: relative;
   border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 55%, transparent);
-  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  background: repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px var(--second-w));
 }
+
+.ss-nle-lane.lane-hidden { opacity: 0.56; }
 
 .nle-clip {
   position: absolute;
   top: 3px;
   bottom: 3px;
-  border-radius: max(3px, calc(var(--r-ctrl) - 2px));
-  background: color-mix(in srgb, var(--clip-c) 24%, var(--panel));
-  border: 1px solid color-mix(in srgb, var(--clip-c) 68%, var(--border));
-  padding: 0 8px;
+  border-radius: max(2px, calc(var(--r-ctrl) / 2));
+  background: color-mix(in srgb, var(--clip-c) 19%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--clip-c) 52%, var(--border));
+  border-inline-start: 3px solid var(--clip-c);
+  padding: 2px 8px 2px 7px;
   display: flex;
-  align-items: center;
+  align-items: start;
+  gap: 4px;
   cursor: grab;
   overflow: hidden;
 }
 
 .nle-clip.selected {
-  background: color-mix(in srgb, var(--clip-c) 38%, var(--selected));
+  background: color-mix(in srgb, var(--clip-c) 34%, var(--selected));
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  outline: 1px solid var(--clip-c);
+  box-shadow: inset 0 0 0 1px var(--panel);
 }
 
 .nle-clip.at-playhead {
@@ -4155,7 +5220,9 @@ onBeforeUnmount(() => {
 }
 
 .nle-clip-lbl {
-  font-size: 0.833333rem;
+  color: var(--text);
+  font-size: 0.85rem;
+  line-height: 14px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -4168,6 +5235,7 @@ onBeforeUnmount(() => {
   bottom: 0;
   width: 6px;
   cursor: col-resize;
+  z-index: var(--z-base);
 }
 
 .nle-trim.left { left: 0; }
@@ -4186,9 +5254,9 @@ onBeforeUnmount(() => {
   background: var(--warning);
   transform: translate(-50%, -50%) rotate(45deg);
   cursor: pointer;
-  z-index: 6;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
-  transition: transform 0.12s, background-color 0.12s, border-color 0.12s;
+  z-index: var(--z-base);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--shadow-ink) 40%, transparent);
+  transition: transform var(--dur-fast), background-color var(--dur-fast), border-color var(--dur-fast);
 }
 
 .nle-kf-dot::before {
@@ -4204,7 +5272,7 @@ onBeforeUnmount(() => {
 
 .nle-kf-dot.active {
   background: var(--teal);
-  border-color: #ffffff;
+  border-color: var(--on-accent);
   transform: translate(-50%, -50%) rotate(45deg) scale(1.22);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 36%, transparent);
 }
@@ -4214,6 +5282,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 10px 12px;
 }
 
 .ss-oor-card {
@@ -4231,13 +5300,17 @@ onBeforeUnmount(() => {
   color: var(--warning);
 }
 
-.ss-oor-empty {
-  font-size: 0.833333rem;
-}
+.ss-oor-empty { font-size: 0.833333rem; }
 
 .ss-kf-sec {
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+
+.ss-kf-head-right {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
 }
 
@@ -4270,18 +5343,9 @@ onBeforeUnmount(() => {
   border-radius: 1px;
 }
 
-.kf-inline-diamond {
-  color: var(--warning);
-}
-
-.kf-inline-diamond.filled {
-  color: var(--teal);
-  background: var(--teal);
-}
-
-.kf-btn-diamond.filled {
-  background: currentColor;
-}
+.kf-inline-diamond { color: var(--warning); }
+.kf-inline-diamond.filled { color: var(--teal); background: var(--teal); }
+.kf-btn-diamond.filled { background: currentColor; }
 
 .ss-kf-btns {
   display: grid;
@@ -4289,33 +5353,18 @@ onBeforeUnmount(() => {
   gap: 4px;
 }
 
-.ss-kf-btns .btn {
-  justify-content: center;
-  gap: 4px;
-}
+.ss-kf-btns .btn { justify-content: center; gap: 4px; }
 
-.ss-v1-sync-note {
-  font-size: 0.85rem;
-  gap: 2px;
-  margin-bottom: 6px;
-}
+.ss-v1-sync-note { font-size: 0.85rem; gap: 2px; margin-bottom: 6px; }
+.ss-v1-sync-live { color: var(--teal); font-weight: 600; }
 
-.ss-v1-sync-live {
-  color: var(--teal);
-  font-weight: 600;
-}
-
-/* Rich A1 Main Vocal Inspector */
+/* Rich Vocal Inspector */
 .ss-a1-live-tag {
   color: var(--teal);
   border-color: color-mix(in srgb, var(--teal) 50%, var(--border));
 }
 
-.ss-a1-syl-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
+.ss-a1-syl-list { display: flex; flex-wrap: wrap; gap: 5px; }
 
 .ss-a1-syl-card {
   flex: 0 1 auto;
@@ -4340,20 +5389,9 @@ onBeforeUnmount(() => {
   gap: 4px;
 }
 
-.ss-a1-syl-txt {
-  font-size: 0.916667rem;
-  font-weight: 700;
-}
-
-.ss-a1-syl-tone {
-  font-size: 0.75rem;
-}
-
-.ss-a1-seg-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 3px;
-}
+.ss-a1-syl-txt { font-size: 0.916667rem; font-weight: 700; }
+.ss-a1-syl-tone { font-size: 0.75rem; }
+.ss-a1-seg-row { display: flex; flex-wrap: wrap; gap: 3px; }
 
 .ss-a1-chip {
   min-width: 24px;
@@ -4369,26 +5407,12 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: border-color 0.12s, background-color 0.12s, box-shadow 0.12s;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), box-shadow var(--dur-fast);
 }
 
-.ss-a1-chip:hover {
-  border-color: var(--accent);
-}
-
-.ss-a1-chip.selected {
-  background: var(--selected);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 700;
-}
-
-.ss-a1-chip.playing {
-  border-color: var(--teal);
-  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--teal) 45%, transparent);
-  color: var(--teal);
-  font-weight: 700;
-}
+.ss-a1-chip:hover { border-color: var(--accent); }
+.ss-a1-chip.selected { background: var(--selected); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.ss-a1-chip.playing { border-color: var(--teal); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--teal) 45%, transparent); color: var(--teal); font-weight: 700; }
 
 .ss-a1-seg-meta {
   display: flex;
@@ -4409,11 +5433,7 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.ss-a1-audition-btn {
-  width: 100%;
-  justify-content: center;
-  margin-bottom: 7px;
-}
+.ss-a1-audition { width: 100%; justify-content: center; margin-bottom: 7px; }
 
 .ss-a1-subhead {
   display: flex;
@@ -4423,16 +5443,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: var(--muted);
   margin: 7px 0 4px;
-}
-
-.ss-phon-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 4px;
-}
-
-.ss-phon-btn {
-  justify-content: center;
 }
 
 .ss-jp-preview {
@@ -4446,17 +5456,7 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 
-.ss-v0-status {
-  font-size: 0.875rem;
-  margin-bottom: 6px;
-}
-
-.ss-v0-btns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 5px;
-  margin-bottom: 6px;
-}
+.ss-v0-status { font-size: 0.875rem; margin: 0 0 6px; color: var(--muted); }
 
 .ss-check-row {
   display: flex;
@@ -4474,25 +5474,19 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.ss-clip-meta {
-  font-size: 0.833333rem;
-  gap: 3px;
-}
-.tract-marker{position:absolute;bottom:2px;width:8px;height:8px;padding:0;transform:rotate(45deg);background:var(--teal);border:1px solid var(--panel);cursor:pointer}
-.duet-timeline .ss-nle-scroll { min-height:calc(24px + 9 * var(--lane-height) + 12px); }
-.duet-stacked.ss-nle-hdr-row,.duet-stacked.ss-nle-lane { height:calc(2 * var(--lane-height)); }
-.duet-stacked .nle-clip { bottom:auto;height:calc(var(--lane-height) - 6px); }
-.duet-stacked .nle-clip.duet-voice-two { top:calc(var(--lane-height) + 3px); }
-.nle-clip.is-muted { opacity:.58; }
-.duet-controls { display:grid;gap:7px;margin:10px 0; }
-.duet-controls label { display:flex;gap:6px;align-items:center;font-size:var(--fs-sm); }
-.duet-controls .inp { flex:1;min-width:0; }
-.tract-marker.is-dense{bottom:3px;width:5px;height:5px;border-radius:50%;opacity:.65;transform:none}
-</style>
-<style scoped>
-.ss-shell { --lane-height: 40px; gap: 0; padding: 0 8px 8px; }
-.ss-commandbar { min-height: 37px; display: flex; align-items: center; gap: 10px; padding: 3px 4px; }
-.sequence-identity, .ss-format, .p-head strong, .ss-nle-title { display: inline-flex; align-items: center; gap: 8px; }
+.duet-stacked.ss-nle-hdr-row,
+.duet-stacked.ss-nle-lane { height: calc(2 * var(--lane-height)); }
+.duet-stacked .nle-clip { bottom: auto; height: calc(var(--lane-height) - 6px); }
+.duet-stacked .nle-clip.duet-voice-two { top: calc(var(--lane-height) + 3px); }
+.nle-clip.is-muted { opacity: 0.58; }
+
+.duet-controls { display: grid; gap: 7px; margin: 8px 0; }
+.duet-controls label { display: flex; gap: 6px; align-items: center; font-size: 0.875rem; }
+.duet-controls .inp { flex: 1; min-width: 0; }
+
+.ss-shell { --lane-height: calc(34px * var(--track-row-scale)); gap: 0; padding: 0 8px 8px; }
+.ss-commandbar { min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 3px 4px; }
+.sequence-identity, .ss-format, .p-head strong { display: inline-flex; align-items: center; gap: 8px; }
 .sequence-identity { min-width: 0; }
 .sequence-identity strong { font-size: 1rem; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sequence-identity svg { color: var(--accent); }
@@ -4500,11 +5494,9 @@ onBeforeUnmount(() => {
 .ss-format i { width: 3px; height: 3px; border-radius: 100%; background: currentColor; }
 .ss-toolbar-spacer { flex: 1; }
 .ss-body-row { padding: 0; gap: 0; }
-.ss-center { gap: 0; }
 .ss-stage-panel { padding: 0; min-height: 170px; align-items: stretch; justify-content: stretch; }
-.ss-shell .p-head { padding: 0 12px; min-height: 35px; flex: none; }
-.p-head strong { font-size: 1rem; font-weight: 650; }
-.ss-directory, .ss-media, .ss-right, .ss-stage-panel, .ss-nle-panel { background-color: var(--panel); }
+.ss-shell .p-head { padding: 0 10px; min-height: 34px; flex: none; }
+.p-head strong { font-size: 0.95rem; font-weight: 650; }
 .asset-count { color: var(--muted); font-size: 0.833333rem; font-weight: 400; }
 .asset-header-actions { display: flex; align-items: center; gap: 4px; }
 .asset-tools { display: flex; gap: 6px; align-items: center; }
@@ -4512,10 +5504,10 @@ onBeforeUnmount(() => {
 .asset-search { display: flex; flex: 1; min-width: 0; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--app); color: var(--muted); border-radius: var(--r-ctrl); padding: 0 7px; }
 .asset-search:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 .asset-search svg { flex: none; }
-.asset-search input { width: 100%; min-width: 0; min-height: 26px; border: 0; padding: 0; background: transparent; outline: none; }
+.asset-search input { width: 100%; min-width: 0; min-height: 26px; border: 0; padding: 0; background: transparent; outline: none; color: var(--text); }
 .asset-scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; padding: 2px; }
 .asset-items { display: grid; align-content: start; }
-.asset-items-grid { gap: 6px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 78px), 1fr)); }
+.asset-items-grid { gap: 6px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 74px), 1fr)); }
 .asset-items-list { gap: 2px; grid-template-columns: minmax(0, 1fr); }
 .ss-asset-row { min-width: 0; border: 1px solid transparent; background: transparent; border-radius: var(--r-ctrl); color: var(--text); text-align: start; cursor: pointer; }
 .asset-items-grid .ss-asset-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 4px; border-color: var(--border); }
@@ -4523,7 +5515,7 @@ onBeforeUnmount(() => {
 .asset-list-icon { flex: none; color: var(--muted); }
 .ss-asset-row:hover, .ss-asset-row.active { border-color: var(--accent); background: var(--selected); }
 .ss-asset-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.ss-asset-name { font-size: 0.916667rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-asset-name { font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .asset-thumb { position: relative; aspect-ratio: 1; display: grid; place-items: center; color: var(--violet); background: color-mix(in srgb, var(--violet) 12%, var(--panel)); border-radius: max(2px, calc(var(--r-ctrl) / 2)); overflow: hidden; }
 .asset-thumb[data-kind="audio"] { color: var(--teal); background: color-mix(in srgb, var(--teal) 12%, var(--panel)); }
 .asset-thumb > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: var(--rail); pointer-events: none; }
@@ -4531,79 +5523,56 @@ onBeforeUnmount(() => {
 .asset-action { align-self: start; max-width: 100%; }
 .drop-target { background: transparent; border: 1px dashed var(--border); color: var(--muted); display: flex; justify-content: center; align-items: center; gap: 6px; width: 100%; min-height: 52px; border-radius: var(--r-ctrl); cursor: pointer; font-size: 0.916667rem; }
 .drop-target:hover { border-color: var(--accent); color: var(--accent); }
-.ss-stage-viewport { flex: 1; min-height: 0; padding: 12px; background: color-mix(in srgb, var(--text) 8%, var(--rail)); }
-.stage-16x9-box { border: none; background: #10171b; border-radius: 1px; box-shadow: 0 1px 10px rgb(0 0 0 / .16); }
-.scene-error { position: absolute; inset: 0; display: grid; place-items: center; color: white; z-index: 10; pointer-events: none; }
+.ss-stage-viewport { flex: 1; min-height: 0; padding: 10px; background: color-mix(in srgb, var(--text) 6%, var(--rail)); }
+.scene-error { position: absolute; inset: 0; display: grid; place-items: center; color: var(--on-accent); z-index: var(--z-sticky); pointer-events: none; }
 .composited .stage-v2-sprite img { opacity: 0; }
-.stage-base-matte { position: absolute; inset: 0; background-color: #16242a;
-  background-image: linear-gradient(rgb(185 214 215 / .045) 1px, transparent 1px),linear-gradient(90deg,rgb(185 214 215 / .045) 1px,transparent 1px),radial-gradient(ellipse at 44% 44%, #344d50, transparent 68%);
-  background-size: 5% 8.89%,5% 8.89%,100% 100%; }
-.stage-actor { border-radius: 1px; }
-.stage-v1-tract { width: 62%; height: 74%; }
-.stage-actor.selected { border: 1px solid color-mix(in srgb,var(--teal) 55%,transparent); box-shadow: none; }
-.stage-resize-handle::after { width: 5px; height: 5px; border-radius: 0; border-width: 1px; }
-.stage-safe-frame { z-index: 9; }
-.monitor-transport { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; min-height: 42px; padding: 0 12px; border-top: 1px solid var(--border); }
-.monitor-time { display: inline-flex; align-items: baseline; gap: 5px; font-size: 1rem; font-weight: 600; color: var(--accent); }
+.stage-v1-bounded { transform: none; width: auto; height: auto; }
+.stage-base-matte {
+  position: absolute;
+  inset: 0;
+  background-color: var(--app);
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--text) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--text) 6%, transparent) 1px, transparent 1px),
+    radial-gradient(ellipse at 44% 44%, color-mix(in srgb, var(--teal) 22%, var(--panel)), transparent 68%);
+  background-size: 5% 8.89%, 5% 8.89%, 100% 100%;
+}
+.monitor-transport { flex: none; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; min-height: 40px; padding: 0 12px; border-top: 1px solid var(--border); }
+.monitor-time { display: inline-flex; align-items: baseline; gap: 5px; font-size: 0.95rem; font-weight: 600; color: var(--accent); }
 .monitor-time small, .monitor-format { font-size: 0.833333rem; font-weight: 400; color: var(--muted); }
 .monitor-format { min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .transport-buttons { display: flex; align-items: center; gap: 3px; }
 .inspector-track, .clip-range, .ss-nle-zoom, kbd { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .inspector-track { color: var(--accent); font-size: 0.833333rem; }
-.ss-insp-body { padding: 12px; }
-.inspect-title, .inspect-selection h3 { margin: 2px 0 7px; font-size: 1.166667rem; line-height: 1.4; overflow-wrap: anywhere; }
+.inspect-title, .inspect-selection h3 { margin: 2px 0 6px; font-size: 1.083333rem; line-height: 1.35; overflow-wrap: anywhere; }
 .inspect-selection > small { font-size: 0.833333rem; color: var(--muted); display: block; }
-.clip-range { display: flex; gap: 12px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 10px; }
-.clip-range span { display: grid; gap: 4px; font: 10px var(--font-ui); color: var(--muted); }
-.clip-range b { font: 11px var(--font-mono); letter-spacing: .03em; color: var(--text); }
-.source-preview { display: block; width: 100%; max-height: 210px; object-fit: contain; margin: 8px 0; }
-.ss-nle-panel { margin: 0; min-height: 200px; }
-.ss-nle-bar { min-height: 40px; padding: 0 12px; }
-.ss-nle-title { font-size: 1rem; border-right: 1px solid var(--border); padding-right: 12px; margin-right: 6px; }
-.ss-nle-bar kbd { display: inline-flex; align-items: center; height: 14px; padding: 0 3px; color: var(--muted); border: 1px solid var(--border); border-radius: 2px; font-size: 0.75rem; }
-.ss-nle-body { display: grid; grid-template-columns: 206px minmax(0,1fr); overflow-y: auto; }
-.ss-nle-hdrs { width: auto; background: color-mix(in srgb,var(--rail) 80%,var(--panel)); }
-.ss-nle-hdr-ruler, .ss-nle-ruler { height: 24px; }
-.ss-nle-hdr-ruler { padding-left: 10px; }
-.ss-nle-scroll { overflow-x: auto; overflow-y: hidden; min-height: calc(24px + 44px + var(--track-rows, 7) * var(--lane-height) + 12px); }
-.duet-timeline .ss-nle-scroll { min-height: calc(24px + 44px + var(--track-rows, 9) * var(--lane-height) + 12px); }
-.stage-audio-inspector { display:grid; gap:6px; }
-.stage-track-setting { display:grid; gap:4px; color:var(--muted); font-size:0.916667rem; }
-.stage-track-setting .inp { width:100%; min-width:0; }
-.stage-mix-fields,.stage-voice-actions { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; }
-.stage-mix-fields label { display:flex; align-items:center; gap:4px; font-size:0.916667rem; }
-.stage-mix-fields input[type="number"] { inline-size: 76px; min-inline-size: 76px; box-sizing: border-box; padding-inline: 7px; appearance: textfield; font-variant-numeric: tabular-nums; }
+.clip-range { display: flex; gap: 12px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 8px; }
+.clip-range span { display: grid; gap: 3px; font: 10px var(--font-ui); color: var(--muted); }
+.clip-range b { font: 11px var(--font-mono); letter-spacing: 0.03em; color: var(--text); }
+.source-preview { display: block; width: 100%; max-height: 200px; object-fit: contain; margin: 6px 0; }
+.stage-audio-inspector { display: grid; gap: 6px; }
+.stage-track-setting { display: grid; gap: 4px; color: var(--muted); font-size: 0.875rem; }
+.stage-track-setting .inp { width: 100%; min-width: 0; }
+.stage-mix-fields, .stage-voice-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
+.stage-mix-fields label { display: flex; align-items: center; gap: 4px; font-size: 0.875rem; }
+.stage-mix-fields input[type="number"] { inline-size: 74px; min-inline-size: 74px; box-sizing: border-box; padding-inline: 7px; appearance: textfield; font-variant-numeric: tabular-nums; }
 .stage-mix-fields input[type="number"]::-webkit-inner-spin-button,
 .stage-mix-fields input[type="number"]::-webkit-outer-spin-button { appearance: none; margin: 0; }
-.ss-nle-hdr-row,.ss-nle-lane { height: var(--lane-height); }
-.ss-nle-hdr-row { padding: 0 8px 0 10px; gap: 6px; }
-.ss-trk-dot { width: 3px; height: 15px; border-radius: 1px; }
-.ss-trk-name { font-size: 0.916667rem; }
-.ss-nle-canvas { min-width: 100%; }
-.ss-nle-ruler { background-image: repeating-linear-gradient(90deg,var(--border) 0 1px,transparent 1px calc(var(--second-w) / 4)); background-size: 100% 3px; background-position: left bottom; background-repeat: no-repeat; }
-.ss-r-tick { top: 4px; padding-left: 5px; font-size: 0.833333rem; font-weight: 500; }
-.ss-nle-lane { background: repeating-linear-gradient(90deg,var(--border) 0 1px,transparent 1px var(--second-w)); }
-.ss-nle-lane.lane-hidden { opacity: 0.56; }
-.nle-clip { top: 3px; bottom: 3px; border-radius: max(2px,calc(var(--r-ctrl) / 2)); border: 1px solid color-mix(in srgb,var(--clip-c) 52%,var(--border)); border-inline-start: 3px solid var(--clip-c); background: color-mix(in srgb,var(--clip-c) 19%,var(--panel)); padding: 3px 22px 3px 7px; align-items: start; gap: 4px; }
-.nle-clip-lbl { color: var(--text); font-size: 0.875rem; line-height: 14px; }
-.nle-clip.selected { outline: 1px solid var(--clip-c); box-shadow: inset 0 0 0 1px var(--panel); }
 
-/* Visual vs Audio Section Banners & Track M/S/Eye/Delete Controls (T-56) */
+/* Slim Section Dividers & Track M/S/Eye/Remove Controls */
 .ss-nle-sec-hdr,
 .ss-nle-sec-lane {
-  height: 22px;
+  height: 16px;
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 0.833333rem;
+  font-size: 0.75rem;
   font-weight: 600;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
 }
-.ss-nle-sec-hdr {
-  padding: 0 8px;
-}
+.ss-nle-sec-hdr { padding: 0 8px; }
 .ss-nle-sec-hdr.is-visual-sec,
 .ss-nle-sec-lane.is-visual-sec {
   color: var(--accent);
@@ -4615,55 +5584,29 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--teal) 10%, var(--sidebar));
   border-top: 1px solid var(--border);
 }
-.ss-nle-sec-lane {
-  padding: 0 10px;
-  font-weight: 500;
-  color: var(--muted);
-}
-.trk-mix-btns {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-.trk-ms-btn,
-.trk-mini-btn {
+.ss-nle-sec-lane { padding: 0 10px; font-weight: 500; color: var(--muted); }
+.trk-mix-btns { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.trk-ms,
+.trk-toggle {
   height: 18px;
   min-width: 18px;
   padding: 0 3px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--app) 62%, var(--panel));
-  color: var(--muted);
-  font-size: 0.791667rem;
+  font-size: 0.75rem;
   font-weight: 700;
   line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
 }
-.trk-ms-btn:hover,
-.trk-mini-btn:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-.trk-ms-btn.is-muted {
+.trk-ms.is-muted {
   background: color-mix(in srgb, var(--danger) 22%, var(--panel));
   border-color: var(--danger);
   color: var(--danger);
 }
-.trk-ms-btn.is-solo {
+.trk-ms.is-solo {
   background: color-mix(in srgb, var(--warning) 24%, var(--panel));
   border-color: var(--warning);
   color: var(--warning);
 }
-.trk-mini-btn.is-eye-off {
-  opacity: 0.48;
-  color: var(--muted);
-  border-style: dashed;
-}
-.trk-del-btn:hover {
+.trk-toggle.is-eye-off { opacity: 0.48; border-style: dashed; }
+.trk-remove:hover {
   border-color: var(--danger);
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 14%, var(--panel));
@@ -4677,21 +5620,11 @@ onBeforeUnmount(() => {
   border-color: var(--danger);
 }
 
-/* Source Provenance Badges & Linked Peer Highlighting (T-51, T-56) */
-.asset-items .ss-asset-row[data-source="ipa-synth"] {
-  border-inline-start: 3px solid var(--accent);
-}
-.asset-items .ss-asset-row[data-source="audio-reconstruct"] {
-  border-inline-start: 3px solid var(--teal);
-}
-.asset-thumb[data-src="ipa-synth"] {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
-}
-.asset-thumb[data-src="audio-reconstruct"] {
-  color: var(--teal);
-  background: color-mix(in srgb, var(--teal) 16%, var(--panel));
-}
+/* Source Provenance Badges & Linked Peer Highlighting */
+.asset-items .ss-asset-row[data-source="ipa-synth"] { border-inline-start: 3px solid var(--accent); }
+.asset-items .ss-asset-row[data-source="audio-reconstruct"] { border-inline-start: 3px solid var(--teal); }
+.asset-thumb[data-src="ipa-synth"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.asset-thumb[data-src="audio-reconstruct"] { color: var(--teal); background: color-mix(in srgb, var(--teal) 16%, var(--panel)); }
 .asset-src-badge {
   display: inline-flex;
   align-items: center;
@@ -4714,22 +5647,10 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--teal) 16%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--teal) 52%, var(--border));
 }
-.inspect-sel-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-}
-.inspect-sel-meta small {
-  font-size: 0.833333rem;
-  color: var(--muted);
-}
-.nle-clip.src-ipa {
-  border-inline-start: 3.5px solid var(--accent);
-}
-.nle-clip.src-reconstruct {
-  border-inline-start: 3.5px solid var(--teal);
-}
+.inspect-sel-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.inspect-sel-meta small { font-size: 0.833333rem; color: var(--muted); }
+.nle-clip.src-ipa { border-inline-start: 3.5px solid var(--accent); }
+.nle-clip.src-reconstruct { border-inline-start: 3.5px solid var(--teal); }
 .nle-clip.is-linked-peer {
   border-color: var(--teal);
   box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--teal) 55%, transparent);
@@ -4756,48 +5677,101 @@ onBeforeUnmount(() => {
   font-weight: 600;
   white-space: nowrap;
 }
-.clip-src-pill.is-ipa {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
-}
-.clip-src-pill.is-reconstruct {
-  color: var(--teal);
-  background: color-mix(in srgb, var(--teal) 18%, var(--panel));
-}
-.nle-clip-del {
+.clip-src-pill.is-ipa { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+.clip-src-pill.is-reconstruct { color: var(--teal); background: color-mix(in srgb, var(--teal) 18%, var(--panel)); }
+.clip-wave { position: absolute; inset: auto 0 0; height: 16px; color: var(--clip-c); }
+.clip-gain-marker {
   position: absolute;
-  top: 2px;
-  right: 7px;
-  z-index: 3;
-  width: 15px;
-  height: 15px;
+  top: 53%;
+  width: 8px;
+  height: 8px;
+  z-index: var(--z-base);
   padding: 0;
-  border-radius: 3px;
-  border: 1px solid transparent;
-  background: color-mix(in srgb, var(--panel) 82%, transparent);
-  color: var(--muted);
-  display: none;
-  align-items: center;
-  justify-content: center;
+  border: 1px solid var(--panel);
+  border-radius: 1px;
+  background: var(--accent);
+  transform: translate(-50%, -50%) rotate(45deg);
   cursor: pointer;
 }
-.nle-clip:hover .nle-clip-del,
-.nle-clip.selected .nle-clip-del {
-  display: inline-flex;
+.clip-gain-marker:focus-visible { outline: 2px solid var(--text); }
+.clip-syllable {
+  position: absolute;
+  bottom: 0;
+  font: 10px var(--font-ipa);
+  color: var(--muted);
+  height: 13px;
+  border-left: 1px solid color-mix(in srgb, var(--clip-c) 50%, var(--border));
+  padding-left: 6px;
+  pointer-events: none;
 }
-.nle-clip-del:hover {
-  color: #ffffff;
-  background: var(--danger);
-  border-color: var(--danger);
+.empty-lane {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 0.833333rem;
+  pointer-events: none;
 }
-.clip-wave { position: absolute; inset: auto 0 0; height: 17px; color: var(--clip-c); }
-.clip-gain-marker { position:absolute; top:53%; width:8px; height:8px; z-index:2; padding:0; border:1px solid var(--panel);
-  border-radius:1px; background:var(--accent); transform:translate(-50%, -50%) rotate(45deg); cursor:pointer; }
-.clip-gain-marker:focus-visible { outline:2px solid var(--text); }
-.clip-syllable { position: absolute; bottom: 0; font: 10px var(--font-ipa); color: var(--muted); height: 13px; border-left: 1px solid color-mix(in srgb,var(--clip-c) 50%,var(--border)); padding-left: 6px; pointer-events: none; }
-.empty-lane { position: absolute; top: 50%; left: 10px; transform: translateY(-50%); color: var(--muted); font-size: 0.833333rem; pointer-events: none; }
-.nle-trim { z-index: 1; }
-.ss-nle-playhead { width: 1.5px; }
-.ss-nle-playhead::before { content: ''; position: absolute; top: 0; left: -4px; width: 10px; height: 11px; background: var(--danger); clip-path: polygon(0 0,100% 0,100% 60%,50% 100%,0 60%); }
-.tract-marker{position:absolute;bottom:2px;width:8px;height:8px;padding:0;transform:rotate(45deg);background:var(--teal);border:1px solid var(--panel);cursor:pointer}
+.tract-marker {
+  position: absolute;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  transform: rotate(45deg);
+  background: var(--teal);
+  border: 1px solid var(--panel);
+  cursor: pointer;
+}
+.tract-marker.is-dense {
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  opacity: 0.65;
+  transform: none;
+}
+.ss-clip-ctx-menu {
+  position: fixed;
+  z-index: var(--z-modal);
+  min-width: 184px;
+}
+.ss-ctx-danger { color: var(--danger); }
+.ss-fx-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ss-fx-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 650;
+  color: var(--text);
+  list-style: none;
+}
+.ss-fx-summary::-webkit-details-marker { display: none; }
+.ss-fx-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 4px;
+}
+.ss-beat-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1.5px;
+  height: 7px;
+  background: color-mix(in srgb, var(--teal) 72%, transparent);
+  pointer-events: none;
+}
+.ss-beat-tick.is-strong {
+  width: 2px;
+  height: 12px;
+  background: var(--warning);
+}
 </style>

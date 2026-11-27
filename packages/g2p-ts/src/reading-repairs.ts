@@ -1,6 +1,5 @@
 import rules from './reading-repairs.json' with {type:'json'};
 
-export const readingRepairVersion=rules.version;
 export const readingRepairs=rules.repairs;
 const nanCharacters=new Set([...rules.missing_nan_characters]);
 

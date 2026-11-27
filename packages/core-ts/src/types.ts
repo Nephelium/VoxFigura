@@ -9,8 +9,10 @@
 
 export const SAMPLE_RATE_HZ = 48000 as const;
 export const DEFAULT_FPS = 60 as const;
-export const SAMPLES_PER_FRAME_60FPS = 800 as const; // 48000 / 60 = 800 exact
-export const F0_LIMIT_HZ = { min: 60, max: 600 } as const;
+/** Native VTL 2.4 C++ GeometricGlottis hardware F0 bounds (40..600 Hz). */
+export const VTL_F0_LIMIT_HZ = { min: 40, max: 600, unit: 'Hz' } as const;
+/** Default numeric slider span for UI F0 range inputs (controls are not hard-capped to this). */
+export const F0_UI_SLIDER_HZ = { min: 10, max: 2000, unit: 'Hz' } as const;
 export const PRESSURE_LIMIT_PA = { min: 0, max: 1600 } as const;
 export const MAX_SEQUENCE_SECONDS = 60 as const;
 
@@ -18,7 +20,8 @@ export type ComputeDevice = 'webgpu-high' | 'webgpu-low' | 'cuda' | 'wasm-cpu';
 
 export interface RangeBound {
   min: number;
-  max: number;
+  max?: number;
+  exclusiveMin?: boolean;
   unit?: string;
 }
 
@@ -55,6 +58,8 @@ export function fail(error: CoreErrorDetail): { ok: false; error: CoreErrorDetai
   return { ok: false, error };
 }
 
+export type RangeLimit = RangeBound | readonly [number, number];
+
 export function outOfRange(
   field: string,
   value: number,
@@ -63,6 +68,7 @@ export function outOfRange(
   unit: string,
   hint?: string,
 ): { ok: false; error: CoreErrorDetail } {
+  const unitSuffix = unit ? ` ${unit}` : '';
   return {
     ok: false,
     error: {
@@ -70,7 +76,7 @@ export function outOfRange(
       field,
       value,
       allowed: { min, max, unit },
-      hint: hint ?? `${field} (${value} ${unit}) 超出合法范围 [${min}, ${max}] ${unit}`,
+      hint: hint ?? `${field} (${value}${unitSuffix}) 超出合法范围 [${min}, ${max}]${unitSuffix}`,
     },
   };
 }
@@ -89,6 +95,71 @@ export function assertInRange(
   return ok(value);
 }
 
+export function isValidF0Hz(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+export function assertValidF0Hz(
+  field: string,
+  value: number,
+  hint?: string,
+): Result<number> {
+  if (!isValidF0Hz(value)) {
+    return {
+      ok: false,
+      error: {
+        code: 'out_of_range',
+        field,
+        value,
+        allowed: { min: 0, exclusiveMin: true, unit: 'Hz' },
+        hint: hint ?? `${field} (${value} Hz) 须为有限正数 (> 0 Hz)`,
+      },
+    };
+  }
+  return ok(value);
+}
+
+/**
+ * Unified range guard returning standard `{ ok: false, error: { code: 'out_of_range', ... } }`.
+ * Accepts either a `{ min, max?, exclusiveMin?, unit? }` object (e.g. `PRESSURE_LIMIT_PA`, `VTL_F0_LIMIT_HZ`)
+ * or a `[min, max]` tuple (e.g. `TRACT_PARAM_LIMITS.TRX`). Never silently clamps.
+ */
+function isRangeTuple(limit: RangeLimit): limit is readonly [number, number] {
+  return Array.isArray(limit);
+}
+
+export function checkRange(
+  value: number,
+  limit: RangeLimit,
+  field: string,
+  unit?: string,
+  hint?: string,
+): Result<number> {
+  const min = isRangeTuple(limit) ? limit[0] : limit.min;
+  const max = isRangeTuple(limit) ? limit[1] : limit.max;
+  const exclusiveMin = !isRangeTuple(limit) && Boolean(limit.exclusiveMin);
+  const resolvedUnit = unit ?? (isRangeTuple(limit) ? '' : (limit.unit ?? ''));
+  if (max === undefined) {
+    const lowBad = exclusiveMin ? value <= min : value < min;
+    if (typeof value !== 'number' || !Number.isFinite(value) || lowBad) {
+      const unitSuffix = resolvedUnit ? ` ${resolvedUnit}` : '';
+      const op = exclusiveMin ? '>' : '>=';
+      return {
+        ok: false,
+        error: {
+          code: 'out_of_range',
+          field,
+          value,
+          allowed: { min, ...(exclusiveMin ? { exclusiveMin: true } : {}), unit: resolvedUnit },
+          hint: hint ?? `${field} (${value}${unitSuffix}) 须满足 ${op} ${min}${unitSuffix}`,
+        },
+      };
+    }
+    return ok(value);
+  }
+  return assertInRange(field, value, min, max, resolvedUnit, hint);
+}
+
 export function msToSamples(ms: number, sampleRateHz: number = SAMPLE_RATE_HZ): number {
   return Math.round((ms / 1000) * sampleRateHz);
 }
@@ -105,17 +176,10 @@ export function stToHz(st: number, refHz: number): number {
   return refHz * Math.pow(2, st / 12);
 }
 
-export interface SampleInterval {
-  start_smp: number;
-  end_smp: number;
-}
-
 export type TractParamName =
   | 'HX' | 'HY' | 'JX' | 'JA' | 'LP' | 'LD' | 'VS' | 'VO'
   | 'TCX' | 'TCY' | 'TTX' | 'TTY' | 'TBX' | 'TBY' | 'TRX' | 'TRY'
   | 'TS1' | 'TS2' | 'TS3';
-
-export type Tract17ParamName = Exclude<TractParamName, 'TRX' | 'TRY'>;
 
 export type TractDelta = Partial<Record<TractParamName, number>>;
 
@@ -140,7 +204,7 @@ export type PhonationRegime =
   | 'falsetto';
 
 export interface GlottisM27Params {
-  f0_hz: number;       // F0 bias / nominal Hz (40..600 in M27, 60..600 for voiced control)
+  f0_hz: number;       // F0 bias / nominal Hz (finite > 0 Hz; VTL 2.4 physical glottis uses 40..600 Hz)
   pr_pa: number;       // Subglottal pressure in Pa (0..1600 Pa; engine converts dPa = pa * 10)
   xb_cm: number;       // Lower vocal fold displacement x_bottom (-0.05..0.30 cm)
   xt_cm: number;       // Upper vocal fold displacement x_top (-0.05..0.30 cm)
@@ -313,8 +377,9 @@ export type ClipKind = 'phrase' | 'audio' | 'video' | 'subtitle';
 export interface ClipSourceMeta {
   lyrics?: string;
   score?: string;
-  score_tonic?: import('./scheduler').SongTonic;
+  score_tonic?: import('./score-notation').SongTonic;
   score_bpm?: number;
+  score_notation?: import('./score-notation').ScoreNotationId;
   reading_standard?: string;
   lang?: 'cmn' | 'en' | 'ja' | 'ipa' | 'mixed';
   transcription?: string;
@@ -417,6 +482,7 @@ export interface VisualLayer {
 
 export type TractRenderStyle = 'natural' | 'ink' | 'oil' | 'watercolor' | 'pastel' | 'sketch';
 export interface SubtitleJitterConfig { enabled: boolean; min_pct: number; max_pct: number; seed: number }
+export interface SubtitleAngleJitterConfig { enabled: boolean; min_deg: number; max_deg: number; seed: number }
 
 export interface SubtitleStyleConfig {
   font_family: string;
@@ -429,6 +495,7 @@ export interface SubtitleStyleConfig {
   show_translation: boolean;
   safe_margin_px: [number, number];
   size_jitter?: SubtitleJitterConfig;
+  angle_jitter?: SubtitleAngleJitterConfig;
 }
 
 export interface ProjectSettings {

@@ -29,6 +29,8 @@ DEFAULT_FILE = 'vowel-transfer-jd2-65.json'
 _VOWELS = frozenset('iyɨʉɯuɪʏʊeøɘɵɤoəɛœɜɞʌɔæɐaᴀɶɑɒɚɝɿʅ') | {'a\u0308'}
 _ID = re.compile(r'[A-Za-z0-9_-]+')
 _cache = OrderedDict()
+_track_cache = OrderedDict()
+_TRACK_CACHE_MAX = 64
 _lock = threading.Lock()
 _speaker_locks = {speaker: threading.Lock() for speaker in SPEAKERS}
 
@@ -241,4 +243,125 @@ def measure_saved_poses(speaker, poses, dense_manager=None):
         finally:
             eng.close()
     return {'speaker': speaker, 'section_count': SECTION_COUNT, 'records': records, 'omitted': omitted}
+
+
+def _track_signature(speaker: str, symbol: str, rows_arr: np.ndarray) -> str:
+    h = hashlib.sha256(f'{METHOD}:track:{speaker}:{symbol}:{rows_arr.shape}'.encode('utf-8'))
+    h.update(np.round(rows_arr, 4).astype(np.float32).tobytes())
+    return h.hexdigest()
+
+
+def _interpolate_track_frames(sampled: dict[int, dict | None], total: int) -> list[dict | None]:
+    frames: list[dict | None] = [None] * total
+    indices = sorted(sampled.keys())
+    for idx in indices:
+        frames[idx] = sampled[idx]
+    for left, right in zip(indices, indices[1:]):
+        if right - left <= 1:
+            continue
+        p0, p1 = sampled[left], sampled[right]
+        if p0 is None or p1 is None:
+            continue
+        span = right - left
+        for idx in range(left + 1, right):
+            t = (idx - left) / span
+            f3 = None
+            if p0.get('f3') is not None and p1.get('f3') is not None:
+                f3 = round(float(p0['f3'] + (p1['f3'] - p0['f3']) * t), 1)
+            frames[idx] = {
+                'f1': round(float(p0['f1'] + (p1['f1'] - p0['f1']) * t), 1),
+                'f2': round(float(p0['f2'] + (p1['f2'] - p0['f2']) * t), 1),
+                **({'f3': f3} if f3 is not None else {}),
+                'nasal': bool(p0['nasal'] if t < 0.5 else p1['nasal']),
+            }
+    return frames
+
+
+def measure_vowel_track(speaker, rows, symbol='', dense_manager=None):
+    """Compute a cached 50 Hz F1-F3 formant trajectory for real-time vowel chart tracking."""
+    if speaker not in SPEAKERS:
+        raise ValueError('不支持的解剖说话人')
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 400:
+        raise ValueError('动态元音轨迹帧数应在 1 至 400 之间')
+    try:
+        arr = np.asarray(rows, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('无效的动态轨迹参数矩阵') from exc
+    if arr.ndim != 2 or arr.shape[1] < 17:
+        raise ValueError('动态轨迹每帧需至少包含 17 维声道参数')
+    tract17 = arr[:, :17]
+    sym = symbol if isinstance(symbol, str) else ''
+    cache_key = _track_signature(speaker, sym, tract17)
+    with _lock:
+        cached = _track_cache.get(cache_key)
+        if cached is not None:
+            _track_cache.move_to_end(cache_key)
+            return cached
+
+    total = len(tract17)
+    stride = 1 if total <= 30 else 2
+    sample_indices = sorted(set(range(0, total, stride)) | {0, total // 2, total - 1})
+    sampled: dict[int, dict | None] = {}
+
+    def _run(eng):
+        eng.set_manual_root(False)
+        adaptation = _AnatomicalTransfer(eng) if speaker.removesuffix('-2D') != 'JD2' else None
+        prev_row = None
+        prev_result = None
+        for idx in sample_indices:
+            row = tract17[idx]
+            if not np.isfinite(row).all():
+                sampled[idx] = None
+                prev_row = None
+                prev_result = None
+                continue
+            if prev_row is not None and float(np.max(np.abs(row - prev_row))) < 1e-3:
+                sampled[idx] = prev_result
+                continue
+            frame = np.r_[row[:14], eng.neutral[14:16], row[14:17]]
+            if adaptation is not None:
+                frame = adaptation.apply(frame, sym)
+            peaks, area = eng.reference_formants(frame, 1.0, 0.0, None, None)
+            if (
+                peaks is not None
+                and len(peaks) >= 3
+                and math.isfinite(area)
+                and 100 <= peaks[0] < peaks[1] <= 5000
+                and peaks[1] < peaks[2] <= 6000
+            ):
+                res = {
+                    'f1': round(float(peaks[0]), 1),
+                    'f2': round(float(peaks[1]), 1),
+                    'f3': round(float(peaks[2]), 1),
+                    'nasal': bool(area > NASAL_PORT_CM2),
+                }
+            else:
+                res = None
+            sampled[idx] = res
+            prev_row = row
+            prev_result = res
+
+    if dense_manager is not None:
+        with dense_manager.lease(speaker, manual_root=False, section_count=SECTION_COUNT) as eng:
+            _run(eng)
+    else:
+        eng = Engine(speaker, resource_dir=VTL_NATIVE_DIR)
+        try:
+            eng.set_section_count(SECTION_COUNT)
+            _run(eng)
+        finally:
+            eng.close()
+
+    result = {
+        'speaker': speaker,
+        'section_count': SECTION_COUNT,
+        'fps': CONTROL_HZ,
+        'frames': _interpolate_track_frames(sampled, total),
+    }
+    with _lock:
+        _track_cache[cache_key] = result
+        _track_cache.move_to_end(cache_key)
+        while len(_track_cache) > _TRACK_CACHE_MAX:
+            _track_cache.popitem(last=False)
+    return result
 

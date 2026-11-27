@@ -6,9 +6,9 @@
 | Three.js & OrbitControls (`vendor/three.module.js`, `vendor/OrbitControls.js`) | Three.js (MIT) | MIT | 3D 声道模型渲染与交互相机 | 随 `vocal-tract-view` 独立打包 |
 | MediaPipe Canonical Face Model | [MediaPipe v0.10.14](https://github.com/google-ai-edge/mediapipe/blob/v0.10.14/mediapipe/modules/face_geometry/data/canonical_face_model.obj) | [Apache-2.0](public/mediapipe-0.10.14/LICENSE) | 三维人头的标准脸几何与三角拓扑 | 原始 OBJ 随本地摄像头资源分发 |
 | MediaPipe Tasks Vision / Face Landmarker | [SDK v0.10.14](https://github.com/google-ai-edge/mediapipe/tree/v0.10.14) / [float16/1 模型包](https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task) | SDK 为 Apache-2.0；[Face Mesh V2 模型卡](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf)标注 Apache-2.0，完整 task 包许可范围待核实 | 摄像头面部追踪 | 本地模型 SHA-256 为 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff` |
-| Vue 3 / Vite / TypeScript / Vitest / dotenv | npm 开源依赖 | MIT / BSD-2-Clause | 前端、代理及构建与测试 | Vue 用于前端运行，dotenv 用于代理；其余为开发构建或测试工具 |
+| Vue 3 / Vite / TypeScript / Vitest | npm 开源依赖 | MIT / BSD-2-Clause | 前端运行、构建与测试 | Vue 用于前端运行，其余为开发构建或测试工具（Node 代理使用原生 `--env-file`，原未用依赖 `dotenv` 已移除） |
 | Apache ECharts | [上游工程](https://github.com/apache/echarts) | [Apache-2.0，含第三方声明](https://github.com/apache/echarts/blob/master/LICENSE) | 工作台图表 | 随前端构建使用 |
-| faster-whisper / CTranslate2 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) / [CTranslate2](https://github.com/OpenNMT/CTranslate2) | MIT；模型及其他依赖分别适用其上游条款 | 可选本地 Whisper 转写 | 按需安装，模型来源及固定版本见 `engine/asr_models.py` |
+| faster-whisper / CTranslate2 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) / [CTranslate2](https://github.com/OpenNMT/CTranslate2) | MIT；模型及其他依赖分别适用其上游条款 | 仅开发态可选本地 Whisper 转写（不入 Windows 免安装/安装包） | 开发态按需安装，模型来源及固定版本见 `engine/asr_models.py`；Windows 发包严禁装入其权重、下载入口及专用 PyAV 解码依赖 |
 | DPDFNet2 | [上游工程](https://github.com/ceva-ip/DPDFNet) | Apache-2.0 | 可选本地语音降噪 | 通过 PhoneticToolbox 的推理接口和本地模型使用 |
 | KaTeX | 0.19.1，[上游项目](https://github.com/KaTeX/KaTeX) | MIT | 知乎摘录与刘看山对话的公式排版 | 参赛版依赖 |
 | Doulos SIL (`DoulosSIL-Regular.ttf`) | SIL International (`Doulos-OFL.txt`) | SIL OFL 1.1 | IPA 国际音标排版 | 保留 OFL 许可文件 |
@@ -25,7 +25,7 @@
 | TIMIT pronunciation dictionary | [TIMIT LDC93S1](https://catalog.ldc.upenn.edu/LDC93S1) | 具体使用、分发权限以实际取得的 LDC 协议为准 | 引擎英语词典及对齐辅助 | `engine/model_bundle/packages/kf_ipa_synth/assets/lexicon/TIMITDIC.TXT` 已在本地目录；授权记录及拟议分发范围待核实 |
 | IPA / extIPA / VoQS 数据目录 | IPA Chart 2026 / extIPA 2025 / Ball et al. (2018) / Zenodo 10206204 | 按各来源分别标注：IPA 图表 CC BY-SA 4.0，extIPA 图表 CC BY-SA 3.0，VoQS 中文译表 CC BY 4.0；论文版权另计 | 655 入口音标目录与双语释义 | 详见 `public/data/ipa-plus-catalog.json` 内 `sources` 字段；上游原图是否随包分发以各来源说明为准 |
 | 刘看山官方动态 GIF 与三视图 | 知乎黑客松 S3 官方素材包 | 赛事限定非商用展示许可 | 知乎发音探索实验室陪伴与舞台立绘 | 仅限参赛作品展示 |
-| TensorTract3 (`F:\TensorTract3_Train`) | Krug et al. (2026) 架构衍生自训模型 | 仅作后端只读推理接口对接 | Stage 4 `m27` 反演与 Stage 5 神经重合成 | 不随仓库分发 1.18 GB WavLM 底座 |
+| TensorTract3 (`F:\TensorTract3_Train`) | Krug et al. (2026) 架构衍生自训模型 | 仅作后端只读推理接口对接 | `Vox2Tract-Lite` 27 维声道反演与 `Tract2Vox-Lite` 神经重合成 | 不随仓库分发 1.18 GB WavLM 底座 |
 | Vox2Align-Lite v2 | 井井提供的 TensorTract3 正式 FP16、20,000 步导出及 v2 SDK | 用户授权本地集成。上游未附模型单独的公开分发许可证 | 普通话和英语原文引导对齐 | 权重、SDK 来源和词表 SHA-256 见 `engine/model_bundle/models/manifest.json` |
 | Pillow | 12.1.1，[PyPI CPython 3.11 Windows x86-64 wheel](https://pypi.org/project/pillow/12.1.1/#pillow-12.1.1-cp311-cp311-win_amd64.whl) | MIT-CMU | 国际音标资源包的声带视频离屏绘图 | 本地引擎依赖。保留 wheel 的原始许可及附带组件声明 |
 

@@ -40,14 +40,18 @@ export function arrangementInstrumentRegions(
   overrides?: InstrumentRegion[],
 ): InstrumentRegion[] | undefined {
   if (!instrument) return overrides;
+  const sorted = [...notes].sort((a, b) => a.startSmp - b.startSmp || a.endSmp - b.endSmp);
   const regions: InstrumentRegion[] = [];
-  let interlude: InstrumentRegion | undefined;
-  for (const note of notes) {
-    if (!note.instrumental) interlude = undefined;
-    else if (interlude) interlude.endSmp = Math.max(interlude.endSmp,note.endSmp);
-    else {
-      interlude = { startSmp: note.startSmp, endSmp: note.endSmp, instrument };
-      regions.push(interlude);
+  for (const note of sorted) {
+    if (!note.instrumental) continue;
+    const last = regions.at(-1);
+    const vocalBetween = last
+      ? sorted.some((n) => !n.instrumental && n.endSmp > last.endSmp && n.startSmp < note.startSmp)
+      : true;
+    if (last && !vocalBetween) {
+      last.endSmp = Math.max(last.endSmp, note.endSmp);
+    } else {
+      regions.push({ startSmp: note.startSmp, endSmp: note.endSmp, instrument });
     }
   }
   return regions.concat(overrides ?? []);

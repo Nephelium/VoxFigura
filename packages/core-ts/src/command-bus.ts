@@ -7,10 +7,10 @@
  */
 
 import {
-  F0_LIMIT_HZ,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
   assertInRange,
+  assertValidF0Hz,
   fail,
   ok,
   type Clip,
@@ -59,8 +59,8 @@ export const TRACT_PARAM_LIMITS: Record<TractParamName, [number, number]> = {
   TTY: [-3.0, 2.5],
   TBX: [-3.0, 6.5],
   TBY: [-3.0, 5.0],
-  TRX: [-4.0, 4.0],
-  TRY: [-4.0, 4.0],
+  TRX: [-4.0, 2.0],
+  TRY: [-6.0, 0.0],
   TS1: [0.0, 1.0],
   TS2: [0.0, 1.0],
   TS3: [-1.0, 1.0],
@@ -465,13 +465,12 @@ export function applySemanticCommand(
         const fRef = voice?.f0_ref_hz ?? 125;
         let bEndSt = item.b_end_st ?? 0;
         if (item.note_hz !== undefined) {
-          const hzChk = assertInRange('note_hz', item.note_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz',
-            `最高可用音为 D5（587.3 Hz），最低 60 Hz；可整体降调或更换说话人`);
+          const hzChk = assertValidF0Hz('note_hz', item.note_hz);
           if (!hzChk.ok) return hzChk;
           bEndSt = 12 * Math.log2(item.note_hz / fRef);
         } else {
           const effHz = fRef * Math.pow(2, bEndSt / 12);
-          const hzChk = assertInRange('b_end_st', effHz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+          const hzChk = assertValidF0Hz('b_end_st', effHz);
           if (!hzChk.ok) return hzChk;
         }
         const lam = item.lambda_per_s ?? 60;
@@ -511,7 +510,7 @@ export function applySemanticCommand(
           return fail({ code: 'validation_error', field: 'points', hint: '钉住曲线至少需要 2 个点' });
         }
         for (const pt of points) {
-          const r = assertInRange('points.f0_hz', pt.f0_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+          const r = assertValidF0Hz('points.f0_hz', pt.f0_hz);
           if (!r.ok) return r;
         }
         next.f0_pins = next.f0_pins ?? [];
@@ -868,6 +867,7 @@ export function applySemanticCommand(
         show_translation: stylePatch.show_translation ?? layer.style?.show_translation ?? false,
         safe_margin_px: stylePatch.safe_margin_px ?? layer.style?.safe_margin_px ?? [96, 54],
         size_jitter: stylePatch.size_jitter ?? layer.style?.size_jitter,
+        angle_jitter: stylePatch.angle_jitter ?? layer.style?.angle_jitter,
       };
       break;
     }
@@ -905,10 +905,19 @@ export class CommandBus {
   private project: VcProject;
   private stack: UndoRedoStack;
   private oplog: UndoEntry[] = [];
+  private maxHistory: number;
 
   constructor(initialProject: VcProject, maxHistory: number = 200) {
+    this.maxHistory = Math.max(1, Math.floor(maxHistory));
     this.project = cloneJson(initialProject);
-    this.stack = new UndoRedoStack(maxHistory);
+    this.stack = new UndoRedoStack(this.maxHistory);
+  }
+
+  private appendOpLog(entry: UndoEntry): void {
+    this.oplog.push(entry);
+    if (this.oplog.length > this.maxHistory) {
+      this.oplog.splice(0, this.oplog.length - this.maxHistory);
+    }
   }
 
   getProject(): VcProject {
@@ -948,7 +957,7 @@ export class CommandBus {
     };
     this.project = res.next;
     this.stack.push(entry);
-    this.oplog.push(entry);
+    this.appendOpLog(entry);
     return res.result;
   }
 
@@ -1001,7 +1010,7 @@ export class CommandBus {
 
     this.project = working;
     this.stack.push(entry);
-    this.oplog.push(entry);
+    this.appendOpLog(entry);
 
     return {
       ok: true,
@@ -1081,7 +1090,10 @@ export class CommandBus {
     if (!entry) {
       return fail({ code: 'not_found', field: 'undo', hint: '没有可撤销的操作' });
     }
-    this.project = applyJsonPatch(this.project, entry.inverse);
+    const nextRevision = this.project.revision + 1;
+    const restored = applyJsonPatch(this.project, entry.inverse);
+    restored.revision = nextRevision;
+    this.project = restored;
     return {
       ok: true,
       revision: this.project.revision,
@@ -1097,7 +1109,10 @@ export class CommandBus {
     if (!entry) {
       return fail({ code: 'not_found', field: 'redo', hint: '没有可重做的操作' });
     }
-    this.project = applyJsonPatch(this.project, entry.patch);
+    const nextRevision = this.project.revision + 1;
+    const restored = applyJsonPatch(this.project, entry.patch);
+    restored.revision = nextRevision;
+    this.project = restored;
     return {
       ok: true,
       revision: this.project.revision,

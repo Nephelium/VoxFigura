@@ -51,4 +51,50 @@ describe('MIDI note editing and export',()=>{
     expect(()=>fitMelody(rows,notes)).toThrow('音节');
     expect(()=>fitMelody(rows,[notes[0],note(65,0,6000)])).toThrow('单音');
   });
+
+  it('decodes GBK Chinese track names and lyrics, auto-closes unclosed notes with warning, and avoids short-note tick overlap on export', () => {
+    // 1. Unclosed noteOn (no matching noteOff) should auto-close at track end with warning instead of throwing
+    const unclosedMidi: MidiData = {
+      header: { format: 1, numTracks: 1, ticksPerBeat: 480 },
+      tracks: [[
+        { deltaTime: 0, type: 'setTempo', microsecondsPerBeat: 500000 },
+        { deltaTime: 0, type: 'noteOn', channel: 0, noteNumber: 60, velocity: 90 },
+        { deltaTime: 480, type: 'noteOn', channel: 0, noteNumber: 64, velocity: 85 },
+        { deltaTime: 480, type: 'noteOff', channel: 0, noteNumber: 64, velocity: 0 },
+      ]],
+    };
+    const parsedUnclosed = readMidiParts(new Uint8Array(writeMidi(unclosedMidi)));
+    expect(parsedUnclosed.parts).toHaveLength(1);
+    expect(parsedUnclosed.parts[0].notes).toHaveLength(2);
+    expect(parsedUnclosed.warnings.length).toBeGreaterThan(0);
+
+    // 2. GBK Chinese trackName / lyrics bytes decode cleanly instead of mojibake
+    // GBK for "春风" is B4 BA B7 E7
+    const gbkRaw = String.fromCharCode(0xb4, 0xba, 0xb7, 0xe7);
+    const gbkMidi: MidiData = {
+      header: { format: 1, numTracks: 1, ticksPerBeat: 480 },
+      tracks: [[
+        { deltaTime: 0, type: 'trackName', text: gbkRaw },
+        { deltaTime: 0, type: 'lyrics', text: gbkRaw },
+        { deltaTime: 0, type: 'noteOn', channel: 0, noteNumber: 60, velocity: 90 },
+        { deltaTime: 480, type: 'noteOff', channel: 0, noteNumber: 60, velocity: 0 },
+      ]],
+    };
+    const parsedGbk = readMidiParts(new Uint8Array(writeMidi(gbkMidi)));
+    expect(parsedGbk.parts[0].name).toBe('春风');
+    expect(parsedGbk.parts[0].lyrics?.[0].text).toBe('春风');
+
+    // 3. Adjacent same-pitch very short notes export cleanly without false tick-quantization overlap error
+    const shortAdj = [
+      { id: 's1', midi: 60, startSmp: 0, endSmp: 55, velocity: 90 },
+      { id: 's2', midi: 60, startSmp: 55, endSmp: 1200, velocity: 90 },
+    ];
+    const exported = exportMidiScore(
+      [{ name: '快音', program: 0, channel: 1, notes: shortAdj }],
+      [{ beat: 0, sample: 0, samplesPerBeat: 24000 }],
+      [{ beat: 0, numerator: 4, denominator: 4 }],
+    );
+    const roundTrip = readMidiParts(exported);
+    expect(roundTrip.parts[0].notes).toHaveLength(2);
+  });
 });

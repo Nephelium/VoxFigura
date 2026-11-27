@@ -6,6 +6,7 @@ export class MixerSpectrogramCache {
   private worker: Worker | null = null;
   private destroyed = false;
   private reqId = 0;
+  private chain: Promise<void> = Promise.resolve();
   private pendingCancels = new Set<() => void>();
   private cache = new WeakMap<Blob, Partial<Record<'light' | 'dark', HTMLCanvasElement>>>();
 
@@ -19,51 +20,57 @@ export class MixerSpectrogramCache {
     const existing = this.cache.get(blob)?.[modeKey];
     if (existing) return existing;
 
+    const id = ++this.reqId;
     const bytes = await blob.arrayBuffer();
-    if (this.destroyed) return null;
+    if (this.destroyed || id !== this.reqId) return null;
     const decoded = await new OfflineAudioContext(1, 1, 16000).decodeAudioData(bytes);
-    if (this.destroyed) return null;
+    if (this.destroyed || id !== this.reqId) return null;
     const mono = new Float32Array(decoded.length);
     for (let ch = 0; ch < decoded.numberOfChannels; ch++) {
       const data = decoded.getChannelData(ch);
       for (let i = 0; i < data.length; i++) mono[i] += data[i] / decoded.numberOfChannels;
     }
 
-    const worker = this.ensureWorker();
-    if (!worker) return null;
-    const id = ++this.reqId;
     const targetW = Math.max(240, Math.min(1024, Math.round(width)));
     const duration = Math.max(0.04, decoded.duration);
 
-    const canvas = await new Promise<HTMLCanvasElement | null>((resolve) => {
-      let settled = false;
-      const finish = (value: HTMLCanvasElement | null) => {
-        if (settled) return;
-        settled = true;
-        this.pendingCancels.delete(cancel);
-        worker.removeEventListener('message', onMessage);
-        worker.removeEventListener('error', onError);
-        resolve(value);
-      };
-      const cancel = () => finish(null);
-      const onMessage = (ev: MessageEvent<{ id: number; width: number; height: number; levels: Uint8ClampedArray }>) => {
-        if (ev.data.id !== id) return;
-        finish(this.destroyed ? null : buildSpectrogramBitmap(ev.data.width, ev.data.height, ev.data.levels, darkMode));
-      };
-      const onError = () => finish(null);
-      this.pendingCancels.add(cancel);
-      worker.addEventListener('message', onMessage);
-      worker.addEventListener('error', onError);
-      worker.postMessage({ type: 'source', pcm: mono, sampleRate: decoded.sampleRate }, [mono.buffer]);
-      worker.postMessage({ type: 'image', id, width: targetW, start: 0, span: duration });
+    let resultCanvas: HTMLCanvasElement | null = null;
+    const job = this.chain.then(async () => {
+      if (this.destroyed || id !== this.reqId) return;
+      const worker = this.ensureWorker();
+      if (!worker) return;
+      resultCanvas = await new Promise<HTMLCanvasElement | null>((resolve) => {
+        let settled = false;
+        const finish = (value: HTMLCanvasElement | null) => {
+          if (settled) return;
+          settled = true;
+          this.pendingCancels.delete(cancel);
+          worker.removeEventListener('message', onMessage);
+          worker.removeEventListener('error', onError);
+          resolve(value);
+        };
+        const cancel = () => finish(null);
+        const onMessage = (ev: MessageEvent<{ id: number; width: number; height: number; levels: Uint8ClampedArray }>) => {
+          if (ev.data.id !== id) return;
+          finish(this.destroyed ? null : buildSpectrogramBitmap(ev.data.width, ev.data.height, ev.data.levels, darkMode));
+        };
+        const onError = () => finish(null);
+        this.pendingCancels.add(cancel);
+        worker.addEventListener('message', onMessage);
+        worker.addEventListener('error', onError);
+        worker.postMessage({ type: 'source', pcm: mono, sampleRate: decoded.sampleRate }, [mono.buffer]);
+        worker.postMessage({ type: 'image', id, width: targetW, start: 0, span: duration });
+      });
     });
+    this.chain = job.catch(() => {});
+    await job;
 
-    if (canvas && !this.destroyed) {
+    if (resultCanvas && !this.destroyed) {
       const entry = this.cache.get(blob) ?? {};
-      entry[modeKey] = canvas;
+      entry[modeKey] = resultCanvas;
       this.cache.set(blob, entry);
     }
-    return canvas;
+    return resultCanvas;
   }
 
   private ensureWorker(): Worker | null {

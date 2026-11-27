@@ -23,6 +23,7 @@ from .phonetics import (
     SegmentEvent,
     default_organ_mask,
     ipa_to_phon_features,
+    ipa_to_phon_features_32_checked,
     ipa_to_phon_features_checked,
 )
 
@@ -232,8 +233,9 @@ def build_condition_from_segments(
     *,
     mask_override: Optional[Callable[[SegmentEvent, np.ndarray], np.ndarray]] = None,
     pose_perturb_fn: Optional[Callable[[np.ndarray, np.ndarray, SegmentEvent], np.ndarray]] = None,
+    phon_dim: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Expand time-aligned SegmentEvents onto the 50 Hz grid and build (cond_111, x_base_26, w_mask_26, events_4).
+    """Expand time-aligned SegmentEvents onto the 50 Hz grid and build (cond, x_base_26, w_mask_26, events_4).
 
     Args:
         segments: ordered SegmentEvent sequence covering [0, n_frames * 0.02] s.
@@ -242,21 +244,23 @@ def build_condition_from_segments(
         pose_lookup: returns canonical normalized (26,) target pose for a SegmentEvent.
         mask_override: optional hook (seg, default_w26) -> custom_w26 (e.g. user pinned phonation).
         pose_perturb_fn: optional training-time augmentation (pose26, w26, seg) -> augmented_pose26.
+        phon_dim: phonetic feature dimension (default 22 -> cond 111; pass 32 for Stage 2 v4 -> cond 121).
 
     Returns:
-        cond_111 : (T, 111) float32 model input tensor
+        cond     : (T, 88 + phon_dim + 1) float32 model input tensor
         x_base   : (T, 26)  float32 mask-bridged async qTA baseline in [-1, 1]
         w_mask   : (T, 26)  float32 organ constraint mask in [0, 1]
         events_4 : (T, 4)   float32 [is_closure, is_release, is_aspiration, is_voiced]
     """
     t_len = int(n_frames)
+    p_dim = int(PHON_FEAT_DIM if phon_dim is None else phon_dim)
     f0 = np.asarray(f0_norm_50hz, dtype=np.float32).reshape(t_len)
 
     g_pose = np.repeat(DEFAULT_KF26_NEUTRAL_NORM[None, :], t_len, axis=0)
     w_mask = np.zeros((t_len, KF_OUT_DIM), dtype=np.float32)
     phase = np.zeros((t_len, 5), dtype=np.float32)
     events = np.zeros((t_len, 4), dtype=np.float32)
-    phon = np.zeros((t_len, PHON_FEAT_DIM), dtype=np.float32)
+    phon = np.zeros((t_len, p_dim), dtype=np.float32)
     has_phon = np.ones((t_len, 1), dtype=np.float32)
 
     # Frame centers in seconds: (k + 0.5) * 0.02
@@ -312,8 +316,11 @@ def build_condition_from_segments(
         events[idxs, 2] = 1.0 if seg.is_aspiration else 0.0
         events[idxs, 3] = 1.0 if seg.is_voiced else 0.0
 
-        pf, matched = ipa_to_phon_features_checked(seg.ipa)
-        phon[idxs] = pf[None, :]
+        if p_dim > PHON_FEAT_DIM:
+            pf, matched = ipa_to_phon_features_32_checked(seg.ipa)
+        else:
+            pf, matched = ipa_to_phon_features_checked(seg.ipa)
+        phon[idxs, : min(p_dim, pf.shape[0])] = pf[None, : min(p_dim, pf.shape[0])]
         if not matched:
             # Unknown / custom pose label -> cleanly drop into pure articulatory-pose mode (has_phon = 0.0)
             has_phon[idxs, 0] = 0.0

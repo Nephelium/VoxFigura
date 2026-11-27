@@ -12,7 +12,7 @@ function triggerOpen(): void {
     ws === 'explore'
       ? 'explore'
       : ws === 'home'
-        ? 'main'
+        ? 'home'
         : ws === 'research'
         ? store.researchTab.value
         : store.studioTab.value;
@@ -28,7 +28,7 @@ function triggerOpen(): void {
     :aria-label="`打开${cardOptions.titlePrefix ?? ''}发音卡工坊`"
     @click="triggerOpen"
   >
-    <NavArtwork item="card-studio" />
+    <NavArtwork item="card-studio" toolbar />
     <span>发音卡</span>
   </button>
 </template>

@@ -6,7 +6,12 @@ import type { Clip, TractDelta, TractParamName } from '@vocalcut/core';
 import type { M27TrajectoryAnim } from '@vocalcut/model-adapters';
 import { findTargetInterval, fetchIpaReferences, fetchIpaReferenceTrajectory, ipaReferenceUrl,
   matchingIpaReferences, referenceTarget, type IpaReference } from '@/data/ipa-reference-library';
-import { listIpaPersonalRecordings, removeIpaPersonalRecording, saveIpaPersonalRecording } from '@/data/ipa-personal-recordings';
+import {
+  clearIpaPersonalRecordingsForSet,
+  listIpaPersonalRecordings,
+  removeIpaPersonalRecording,
+  saveIpaPersonalRecording,
+} from '@/data/ipa-personal-recordings';
 import { interpM27AnimState, readThemePalette, renderM27TractSvg } from '@/vendor/m27-tract-studio/tract-renderer.js';
 import {
   RECORDED_IPA_SET_ID,
@@ -18,6 +23,7 @@ import {
   ipaPoseSets,
   loadDefaultIpaPoses,
   renameIpaPoseSet,
+  resetIpaPoseInSet,
   saveIpaPoseToSet,
   setIpaPoseProtected,
   selectIpaPoseSet,
@@ -50,9 +56,23 @@ import { defaultVoqsHeight } from '@/data/voqs-library';
 import IpaRecordingTimeline from './IpaRecordingTimeline.vue';
 import IpaReferenceRecorder from './IpaReferenceRecorder.vue';
 import IpaRecordingKeyframes from './IpaRecordingKeyframes.vue';
-import { editedRecordingRow, fetchRecordingLimits, IPA_RECORDING_HZ, loadRecordingKeyframes, recordingFrameAt,
-  recordingTractParams, renderRecordingRevision, saveRecordingKeyframes, signatureForKeyframes,
-  type RecordingKeyframe, type RecordingLimits, type RecordingRevision, type RecordingTrack } from '@/data/ipa-recording-edits';
+import {
+  bellSuperimposedRow,
+  clearRecordingKeyframesForSet,
+  expandBellKeyframesForRender,
+  fetchRecordingLimits,
+  IPA_RECORDING_HZ,
+  loadRecordingKeyframes,
+  recordingFrameAt,
+  recordingTractParams,
+  renderRecordingRevision,
+  saveRecordingKeyframes,
+  signatureForKeyframes,
+  type RecordingKeyframe,
+  type RecordingLimits,
+  type RecordingRevision,
+  type RecordingTrack,
+} from '@/data/ipa-recording-edits';
 import { getActiveSplitterValue } from '@/data/splitter-layout';
 import { normalizeAudioFile, synthesisGainMode, voiceRenderLabels, type VoiceRenderMode } from '@/data/voice-renderer';
 import IpaMaterialDownloads from './IpaMaterialDownloads.vue';
@@ -62,11 +82,18 @@ import type { VoqsProfile, VoqsTake } from '@/data/voqs-library';
 import { getCurrentPageScale } from '@/styles/skin-registry';
 import { loadRecordedVowelFormants, vowelSymbolKey } from '@/data/ipa-vowel-measurements';
 import {
-  customIpaPoses, customPoseKey, poseOverridesForSet,
+  clearLinkedVowelRecordingsForSet,
+  copyLinkedVowelRecordingsForSet,
+  customIpaPoses,
+  customPoseKey,
   deleteCustomIpaPose,
   getFullPoseForIpa,
+  getLinkedVowelRecording,
+  linkedVowelRecordings,
+  poseOverridesForSet,
   replaceSegmentIpa,
   saveCustomIpaPose,
+  setLinkedVowelRecording,
 } from './research-utils';
 
 interface CatalogExample {
@@ -192,6 +219,8 @@ const loadErr = ref('');
 const activeSystem = ref<'ipa' | 'extipa' | 'voqs'>('ipa');
 const fontSizePx = ref(16);
 const searchQuery = ref('');
+const searchInputRef = ref<HTMLInputElement | null>(null);
+const vowelsRowRef = ref<HTMLElement | null>(null);
 const activeIpaSubSection = ref<'main' | 'diacritics'>('main');
 const activeExtIpaSubSection = ref<'all' | 'matrix' | 'marks' | 'context'>('all');
 
@@ -223,10 +252,14 @@ const isFavorite = computed(() => ipaFavorites.value.some((item) => item.entryId
 const editorParams = ref<Record<TractParamName, number>>(defaultTractParams());
 const editorExtras = ref<TractPoseExtras>(cloneTractExtras(DEFAULT_TRACT_EXTRAS));
 const references = shallowRef<IpaReference[]>([]);
+const referencesLoadFailed = ref(false);
+const referencesLoading = ref(false);
 const hasReferences = computed(() => references.value.some(item => item.exists));
 const clickPlays = ref(false);
-const lockedEntry = ref(false);
 const draftEdited = ref(false);
+let suppressKitReset = false;
+const pendingUnsavedAction = ref<(() => void) | null>(null);
+const unsavedGuardTitle = ref('');
 const unsupportedRows = new Set(['内爆音','喷音','啧音']);
 const unsupportedIds = computed(() => new Set(ipaConsonantMatrix.value?.rows.filter(r=>unsupportedRows.has(r.label))
   .flatMap(r=>r.cells.flatMap(c=>[...c.ids,...(c.rows?.flat() ?? [])]))));
@@ -321,7 +354,7 @@ const editedControlsMeta = computed(() => {
   const parameters = Array.isArray(metadata.parameters) ? metadata.parameters.map(parameter => {
     const field = bounds.get(parameter.name);
     if (!field) return parameter;
-    return { ...parameter, min: Math.max(parameter.min, field.min), max: Math.min(parameter.max, field.max) };
+    return { ...parameter, min: Math.max(parameter.min, field.min), max: field.max != null ? Math.min(parameter.max, field.max) : parameter.max };
   }) : metadata.parameters;
   return { ...metadata, parameters, speaker: 'JD2' };
 });
@@ -345,88 +378,6 @@ const defaultBellRadius = computed(() => {
   }
   return Math.max(6, Math.min(maxR, Math.round(scope.m27_50hz_pa.length * 0.28)));
 });
-
-/**
- * T-21: Raised-cosine bell window `0.5 * (1 + cos(π * (u - u0) / width))` delta superposition.
- * Evaluates exact user values at `u0` while preserving onset & offset coarticulatory trajectories.
- */
-function bellSuperimposedRow(
-  baseRows: readonly number[][],
-  frame: number,
-  keyframes: readonly RecordingKeyframe[],
-  fields: RecordingLimits['fields'],
-): number[] {
-  const base = baseRows[frame];
-  if (!base) return [];
-  if (!fields.length || !keyframes.length) return editedRecordingRow(base, frame, [...keyframes], fields);
-  const size = baseRows.length;
-  const denom = Math.max(1, size - 1);
-  const u = frame / denom;
-  const pinned = keyframes.find((point) => point.frame === frame)?.values ?? {};
-  const deltaSum = new Float64Array(base.length);
-
-  for (const point of keyframes) {
-    const anchorBase = baseRows[point.frame];
-    if (!anchorBase) continue;
-    let w = 0;
-    if (point.frame === frame) {
-      w = 1;
-    } else if (point.radius > 0) {
-      const u0 = point.frame / denom;
-      const width = point.radius / denom;
-      const du = Math.abs(u - u0);
-      if (du < width) {
-        w = 0.5 * (1 + Math.cos((Math.PI * (u - u0)) / width));
-      }
-    }
-    if (w <= 0) continue;
-    for (const field of fields) {
-      const targetVal = point.values[field.key];
-      if (targetVal === undefined) continue;
-      deltaSum[field.index] += w * (targetVal - anchorBase[field.index]);
-    }
-  }
-
-  const out = [...base];
-  for (const field of fields) {
-    if (pinned[field.key] !== undefined) {
-      out[field.index] = pinned[field.key]!;
-    } else if (deltaSum[field.index] !== 0) {
-      out[field.index] = Math.max(field.min, Math.min(field.max, base[field.index] + deltaSum[field.index]));
-    }
-  }
-  return out;
-}
-
-function expandBellKeyframesForRender(
-  baseRows: readonly number[][],
-  keyframes: readonly RecordingKeyframe[],
-  fields: RecordingLimits['fields'],
-): RecordingKeyframe[] {
-  if (!fields.length || !keyframes.length) return [...keyframes];
-  const touchedFrames = new Set<number>();
-  const size = baseRows.length;
-  for (const point of keyframes) {
-    if (!Object.keys(point.values).length) continue;
-    const r = Math.max(0, point.radius);
-    for (let f = Math.max(0, point.frame - r); f <= Math.min(size - 1, point.frame + r); f++) {
-      touchedFrames.add(f);
-    }
-  }
-  const touchedKeys = new Set(keyframes.flatMap((p) => Object.keys(p.values)));
-  return [...touchedFrames]
-    .sort((a, b) => a - b)
-    .map((f) => {
-      const row = bellSuperimposedRow(baseRows, f, keyframes, fields);
-      const values: Record<string, number> = {};
-      for (const field of fields) {
-        if (touchedKeys.has(field.key)) {
-          values[field.key] = Number(row[field.index].toFixed(6));
-        }
-      }
-      return { frame: f, radius: 0, values };
-    });
-}
 
 const editKey = computed(() => recordingKeys.value.find(item => item.frame === editClock.value));
 const editSignature = computed(() => signatureForKeyframes(recordingKeys.value));
@@ -474,12 +425,18 @@ function referencesForEntry(entry: CatalogEntry): IpaReference[] {
     id => personalRecordings.value.has(id));
 }
 
+function restingReferenceMode(reference = activeReference.value): 'static' | 'preset' {
+  return !draftEdited.value
+    && Boolean(reference?.animation)
+    && selectedIpaPoseSetId.value === RECORDED_IPA_SET_ID
+    && !customIpaPoses.value[customPoseKey(selectedEntry.value?.id ?? '')]
+    ? 'static' : 'preset';
+}
+
 watch(activeReference, reference => {
   recordingDemo.value = undefined;
   recordingType.value = 'audio';
-  if (!draftEdited.value) referenceMode.value = reference?.animation &&
-    selectedIpaPoseSetId.value === 'recorded-default' && !customIpaPoses.value[customPoseKey(selectedEntry.value?.id ?? '')]
-    ? 'static' : 'preset';
+  if (!draftEdited.value) referenceMode.value = restingReferenceMode(reference);
 }, { flush: 'sync' });
 const setOperation = ref<'copy' | 'rename'>('copy');
 function editSet(mode: 'copy' | 'rename') {
@@ -488,6 +445,25 @@ function editSet(mode: 'copy' | 'rename') {
   poseSetName.value = mode === 'copy' ? name.replace('（只读）', '').trim() + ' 副本' : name;
   poseSetOpen.value = true;
 }
+
+async function ensureEditablePoseSet(): Promise<{ setId: string; createdName?: string } | null> {
+  if (selectedIpaPoseSetId.value !== RECORDED_IPA_SET_ID) {
+    return { setId: selectedIpaPoseSetId.value };
+  }
+  await loadDefaultIpaPoses();
+  const edits = poseOverridesForSet(RECORDED_IPA_SET_ID);
+  let name = '个人构型方案', suffix = 1;
+  while (ipaPoseSets.value.some(set => set.name === name)) name = '个人构型方案 ' + ++suffix;
+  const newId = createIpaPoseSet(name, ipaPoseSets.value[0]?.poses ?? {});
+  if (!newId) return null;
+  edits.forEach((ov) => {
+    saveCustomIpaPose(ov);
+    saveIpaPoseToSet(ov.symbol, tractRecordToArray19(ov.params), newId);
+  });
+  copyLinkedVowelRecordingsForSet(RECORDED_IPA_SET_ID, newId);
+  return { setId: newId, createdName: name };
+}
+
 async function makeIpaSet() {
   const src = selectedIpaPoseSetId.value;
   if (setOperation.value === 'rename') {
@@ -513,6 +489,7 @@ async function makeIpaSet() {
       });
       saveIpaPoseToSet(ov.symbol, tractRecordToArray19(ov.params), newId);
     });
+    copyLinkedVowelRecordingsForSet(src, newId);
     poseSetOpen.value = false;
     poseSetName.value = '';
     store.pushToast('已基于当前构型建立副本，现在可自由微调各音标舌位', 'success');
@@ -533,18 +510,63 @@ function removeActivePoseSet() {
       }
       customIpaPoses.value = nextMap;
     }
+    clearRecordingKeyframesForSet(targetId);
+    clearLinkedVowelRecordingsForSet(targetId);
+    void clearIpaPersonalRecordingsForSet(targetId).catch(() => undefined);
     poseSetOpen.value = false;
     store.pushToast(`已删除构型方案「${targetName}」`, 'info');
   }
 }
 
 watch(selectedIpaPoseSetId, () => {
+  if (suppressKitReset) return;
   if (selectedEntry.value) setEntryPose(selectedEntry.value, true);
   referenceMode.value = 'preset';
 });
 watch(ipaPoseSets, () => {
+  if (suppressKitReset) return;
   if (selectedEntry.value && !draftEdited.value) setEntryPose(selectedEntry.value, true);
 });
+
+function guardUnsavedChanges(action: () => void, label = '切换音标或构型方案'): void {
+  if (!draftEdited.value && !editDirty.value) {
+    action();
+    return;
+  }
+  unsavedGuardTitle.value = label;
+  pendingUnsavedAction.value = action;
+}
+
+async function confirmUnsavedSaveAndContinue(): Promise<void> {
+  const next = pendingUnsavedAction.value;
+  pendingUnsavedAction.value = null;
+  if (draftEdited.value) await saveAsCustomPose();
+  if (editDirty.value) await saveRecordingEdit();
+  next?.();
+}
+
+function confirmUnsavedDiscardAndContinue(): void {
+  const next = pendingUnsavedAction.value;
+  pendingUnsavedAction.value = null;
+  draftEdited.value = false;
+  if (editDirty.value) {
+    recordingKeys.value = storedRecordingKeys.value;
+    editOpen.value = false;
+    editNotice.value = '';
+  }
+  next?.();
+}
+
+function cancelUnsavedGuard(): void {
+  pendingUnsavedAction.value = null;
+}
+
+function switchPoseSet(nextId: string): void {
+  if (nextId === selectedIpaPoseSetId.value) return;
+  guardUnsavedChanges(() => {
+    selectIpaPoseSet(nextId);
+  }, '切换构型方案');
+}
 
 function stopReferenceAudio() {
   recordingQueued.value = false;
@@ -557,7 +579,6 @@ function stopReferenceAudio() {
 }
 
 function startPersonalRecording() {
-  lockedEntry.value = true;
   stopReferenceAudio();
 }
 
@@ -612,6 +633,9 @@ function createReferenceAudio(url: string) {
     referenceTime.value = player.currentTime;
     referenceEnd = Infinity;
     stopReferenceAudio();
+    if (!editOpen.value) {
+      referenceMode.value = restingReferenceMode();
+    }
   };
   player.onerror = () => { if (referenceAudio === player) recordingStatus.value = '所选录音暂时无法载入。'; };
   player.src = url;
@@ -659,12 +683,32 @@ watch([recordingSource, recordingRetry, synthesisGainMode], async ([source, , ga
 function chooseRecording(source: 'audio' | 'reconstruction' | 'revision') {
   if (source === 'revision' && !revisionUrl.value) return;
   if (source === 'reconstruction' && !canReconstructReference.value && !canReconstructVoqs.value) return;
-  lockedEntry.value = true;
   const at = recordingDemo.value ? 0 : referenceTime.value;
   recordingDemo.value = undefined;
   if (recordingType.value === source) return;
   recordingType.value = source;
   setRecordingTime(at);
+}
+
+function playRecordingSource(source: 'audio' | 'reconstruction' | 'revision') {
+  if (source === 'revision' && !revisionUrl.value) return;
+  if (source === 'reconstruction' && !canReconstructReference.value && !canReconstructVoqs.value) return;
+  if (source === 'audio' && !recordingSource.value && !activeReference.value?.exists && !personalRecording.value) return;
+  const sameSource = !recordingDemo.value && recordingType.value === source;
+  if (sameSource) {
+    if (recordingPlaying.value || recordingQueued.value) {
+      stopReferenceAudio();
+    } else {
+      void startRecording();
+    }
+    return;
+  }
+  stopReferenceAudio();
+  recordingDemo.value = undefined;
+  recordingType.value = source;
+  referenceEnd = Infinity;
+  referenceTime.value = 0;
+  void startRecording();
 }
 
 function showRecordingMotion() {
@@ -682,7 +726,6 @@ function setRecordingTime(time: number) {
 }
 
 function seekRecording(time: number) {
-  lockedEntry.value = true;
   referenceEnd = Infinity;
   showRecordingMotion();
   if (editOpen.value && editTrack.value) {
@@ -705,6 +748,7 @@ function releaseRevision(restoreSound = true) {
 }
 
 watch([editTrack, selectedIpaPoseSetId], ([scope, kit]) => {
+  if (suppressKitReset) return;
   releaseRevision();
   editOpen.value = false;
   editNotice.value = '';
@@ -718,7 +762,6 @@ watch([editSignature, revisionMode], () => releaseRevision(), { flush: 'sync' })
 async function openRecordingEditor() {
   if (!hasFrameEditor.value) return;
   const scope = editTrack.value, kit = selectedIpaPoseSetId.value;
-  lockedEntry.value = true;
   stopReferenceAudio();
   editOpen.value = true;
   referenceMode.value = 'motion';
@@ -772,8 +815,10 @@ function updateRecordingControls(delta: Record<string, number | undefined>) {
   for (const [key, value] of Object.entries(delta)) {
     const field = recordingLimits.value.fields.find(item => item.key === key);
     if (!field) continue;
-    if (value === undefined || !Number.isFinite(value) || value < field.min || value > field.max) {
-      editNotice.value = `${key} 须在 ${field.min}–${field.max} 之间`;
+    const below = field.exclusiveMin ? (value !== undefined && value <= field.min) : (value !== undefined && value < field.min);
+    const above = value !== undefined && field.max != null && value > field.max;
+    if (value === undefined || !Number.isFinite(value) || below || above) {
+      editNotice.value = field.max != null ? `${key} 须在 ${field.min}–${field.max} 之间` : `${key} 须大于 ${field.min}`;
       return;
     }
     values[key] = value;
@@ -801,13 +846,36 @@ function updateRecordingPose(delta: TractDelta) {
   if (Object.keys(changed).length) updateRecordingControls(changed);
 }
 
-function saveRecordingEdit() {
+async function saveRecordingEdit() {
   const scope = editTrack.value;
   if (!scope) return;
+  const pendingKeys = recordingKeys.value.map((k) => ({ ...k, values: { ...k.values } }));
+  let createdName: string | undefined;
+  let targetSetId = selectedIpaPoseSetId.value;
+  if (targetSetId === RECORDED_IPA_SET_ID) {
+    suppressKitReset = true;
+    try {
+      const created = await ensureEditablePoseSet();
+      if (!created) {
+        editNotice.value = '未能自动创建可编辑的构型方案，请先手动新建方案后保存。';
+        return;
+      }
+      targetSetId = created.setId;
+      createdName = created.createdName;
+    } finally {
+      suppressKitReset = false;
+    }
+  }
   try {
-    saveRecordingKeyframes(selectedIpaPoseSetId.value, scope.id, scope.m27_50hz_pa.length, recordingKeys.value);
-    storedRecordingKeys.value = recordingKeys.value;
-    editNotice.value = '已保存到当前录音与构型方案';
+    saveRecordingKeyframes(targetSetId, scope.id, scope.m27_50hz_pa.length, pendingKeys);
+    recordingKeys.value = pendingKeys;
+    storedRecordingKeys.value = pendingKeys;
+    editNotice.value = createdName
+      ? `默认方案为只读，已自动新建并切换至「${createdName}」并保存目标帧修订`
+      : '已保存到当前录音与构型方案';
+    if (createdName) {
+      store.pushToast(`已自动新建并切换至「${createdName}」保存目标帧修订`, 'success');
+    }
   } catch {
     editNotice.value = '本机浏览器未能保存关键帧，当前编辑仍可试听。';
   }
@@ -833,8 +901,12 @@ async function previewRecordingEdit() {
   try {
     const limits = recordingLimits.value ?? (await fetchRecordingLimits());
     recordingLimits.value = limits;
-    const expanded = expandBellKeyframesForRender(scope.m27_50hz_pa, recordingKeys.value, limits.fields);
-    const result = await renderRecordingRevision(scope.id, expanded, revisionMode.value,
+    const expandedRes = expandBellKeyframesForRender(scope.m27_50hz_pa, recordingKeys.value, limits.fields);
+    if (!expandedRes.ok) {
+      editNotice.value = expandedRes.error.hint;
+      return;
+    }
+    const result = await renderRecordingRevision(scope.id, expandedRes.keyframes, revisionMode.value,
       store.computeDevice.value === 'cuda' ? 'cuda' : 'cpu', controller.signal);
     if (!matches()) return;
     recordingRevision.value = result;
@@ -855,6 +927,7 @@ async function previewRecordingEdit() {
 /**
  * T-21: Apply edited static `editorParams` onto the selected target frame (default steady-state center `u ≈ 0.5`)
  * with a raised-cosine bell window and synthesize dynamic coarticulated audio.
+ * Rejects out-of-range parameters explicitly rather than silently clamping.
  */
 async function auditionBellDynamicFromPreset() {
   const scope = editTrack.value;
@@ -863,13 +936,24 @@ async function auditionBellDynamicFromPreset() {
   if (!recordingLimits.value || editTrack.value !== scope) return;
   const targetFrame = referenceTime.value <= 0.001 ? steadyTargetFrame.value : editClock.value;
   seekRecording(targetFrame / IPA_RECORDING_HZ);
+  const baseRow = scope.m27_50hz_pa[targetFrame];
+  if (!baseRow) return;
   const delta: Record<string, number> = {};
   for (const field of recordingLimits.value.fields) {
     if (field.index >= 17) continue;
     const raw = editorParams.value[field.key as TractParamName];
-    if (typeof raw === 'number' && Number.isFinite(raw)) {
-      delta[field.key] = Math.max(field.min, Math.min(field.max, raw));
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
+    if (Math.abs(raw - baseRow[field.index]) <= 1e-4) continue;
+    if (raw < field.min || (field.max != null && raw > field.max)) {
+      editNotice.value = `${field.key} 当前值 ${Number(raw.toFixed(3))} 超出允许范围 [${field.min}, ${field.max}]，已拒绝静默截断，请先调整该器官位置`;
+      store.pushToast(editNotice.value, 'warning');
+      return;
     }
+    delta[field.key] = raw;
+  }
+  if (!Object.keys(delta).length) {
+    editNotice.value = '当前声道构型与目标帧基准一致，请先微调至少一个器官后再动态试听';
+    return;
   }
   updateRecordingControls(delta);
   await previewRecordingEdit();
@@ -894,6 +978,18 @@ async function startRecording() {
     if (player && referenceTime.value) setRecordingTime(referenceTime.value);
   }
   if (!player) return;
+  if (pendingReferenceTime !== null && player.readyState < 1) {
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        player?.removeEventListener('loadedmetadata', done);
+        player?.removeEventListener('error', done);
+        resolve();
+      };
+      player!.addEventListener('loadedmetadata', done, { once: true });
+      player!.addEventListener('error', done, { once: true });
+    });
+    if (referenceAudio !== player || player.error) return;
+  }
   cancelAnimationFrame(referenceRaf);
   if (player.ended || (recordingDuration.value && referenceTime.value >= recordingDuration.value)) setRecordingTime(0);
   showRecordingMotion();
@@ -923,7 +1019,6 @@ async function startRecording() {
 }
 
 function toggleRecording() {
-  lockedEntry.value = true;
   if (recordingQueued.value || referenceAudio && !referenceAudio.paused) stopReferenceAudio();
   else void startRecording();
 }
@@ -948,19 +1043,24 @@ function changeVoqsHeight(value: number) {
   }
 }
 
-function showLibraryReference(item: IpaReference) {
+function applyLibraryReference(item: IpaReference) {
   stopReferenceAudio();
-  lockedEntry.value = true;
   librarySelected.value = item;
   const matches = catalog.value?.entries.filter(entry => referencesForEntry(entry).includes(item)) ?? [];
   const entry = matches.find(match => match.display === referenceTarget(item)) ?? matches[0];
   if (entry) {
     setEntryPose(entry);
   } else {
+    draftEdited.value = false;
     selectedEntry.value = null;
   }
   if (item.animation) referenceMode.value = 'static';
   else referenceMode.value = 'preset';
+}
+
+function showLibraryReference(item: IpaReference) {
+  if (librarySelected.value?.id === item.id) return;
+  guardUnsavedChanges(() => applyLibraryReference(item), '切换参考录音');
 }
 
 function selectVoqsRecording(id: string) {
@@ -972,7 +1072,7 @@ async function playReference(item: IpaReference, context: 'single' | 'medial' | 
   const personal = personalRecordings.value.has(item.id);
   if (!item.exists && !personal) return;
   stopReferenceAudio();
-  if (activeReference.value?.id !== item.id) showLibraryReference(item);
+  if (activeReference.value?.id !== item.id) applyLibraryReference(item);
   chooseRecording('audio');
   const target = context === 'full' || personal ? undefined : findTargetInterval(item, context === 'medial');
   let start = target?.start_s ?? 0;
@@ -1012,12 +1112,32 @@ const displayedReferenceTime = computed(() => {
   return target ? (target.start_s + target.end_s) / 2 : anim.duration_sec / 2;
 });
 
+const vowelMonitorTrack = computed(() => {
+  if (selectedEntry.value?.section !== 'vowels' || personalRecording.value) return null;
+  const track = recordingType.value === 'revision' ? recordingRevision.value : referenceTrack.value;
+  if (!track?.m27_50hz_pa.length) return null;
+  return {
+    rows: track.m27_50hz_pa,
+    key: `${activeReference.value?.id ?? selectedEntry.value.id}:${recordingType.value === 'revision' ? editSignature.value : 'base'}`,
+  };
+});
+
+const vowelMonitorDynamic = computed(() =>
+  selectedEntry.value?.section === 'vowels'
+  && Boolean(vowelMonitorTrack.value)
+  && !hasEditedView.value
+  && (recordingPlaying.value || recordingQueued.value || referenceMode.value === 'motion'),
+);
+
 const vowelMonitorPose = computed(() => {
-  if (recordingPlaying.value || recordingQueued.value || selectedEntry.value?.section !== 'vowels') return null;
+  if (selectedEntry.value?.section !== 'vowels') return null;
   if (hasEditedView.value) return { params: tractRecordToArray19(editedViewParams.value), ...DEFAULT_TRACT_EXTRAS };
   const track = recordingType.value === 'revision' ? recordingRevision.value : referenceTrack.value;
   if (referenceMode.value !== 'preset' && track?.m27_50hz_pa.length) {
-    const row = track.m27_50hz_pa[recordingFrameAt(displayedReferenceTime.value, track.m27_50hz_pa.length)];
+    const anim = referenceAnimation.value;
+    const target = activeReference.value ? findTargetInterval(activeReference.value) : undefined;
+    const steadyTime = target ? (target.start_s + target.end_s) / 2 : (anim ? anim.duration_sec / 2 : 0);
+    const row = track.m27_50hz_pa[recordingFrameAt(steadyTime, track.m27_50hz_pa.length)];
     return { params: tractRecordToArray19(recordingTractParams(row)), ...DEFAULT_TRACT_EXTRAS };
   }
   return { params: tractRecordToArray19(editorParams.value), ...editorExtras.value };
@@ -1043,7 +1163,7 @@ const ipaVowelChart = computed(() =>
 );
 const ipaMarkCharts = computed(() =>
   (catalog.value?.charts.ipa.filter(
-    (c): c is ListChart => c.kind === 'list' && c.id !== 'extras',
+    (c): c is ListChart => c.kind === 'list',
   ) ?? []),
 );
 
@@ -1102,11 +1222,15 @@ const searchMatches = computed<CatalogEntry[]>(() => {
     .slice(0, 120);
 });
 
-const hasCustomPoseForSelected = computed(() =>
-  selectedEntry.value ? Boolean(customIpaPoses.value[customPoseKey(selectedEntry.value.id)]) : false,
+const activeCustomPoseIds = computed(() =>
+  new Set(poseOverridesForSet(selectedIpaPoseSetId.value).map((ov) => ov.id)),
 );
 
-const customSavedCount = computed(() => Object.keys(customIpaPoses.value).length);
+const hasCustomPoseForSelected = computed(() =>
+  selectedEntry.value ? activeCustomPoseIds.value.has(selectedEntry.value.id) : false,
+);
+
+const customSavedCount = computed(() => activeCustomPoseIds.value.size);
 
 const isLongHeroExample = computed(() => {
   const entry = selectedEntry.value;
@@ -1193,7 +1317,6 @@ function setEntryPose(entry: CatalogEntry, refresh = false): void {
   const full = getFullPoseForIpa(previewSym, entry.id, activeSpeaker.value);
   editorParams.value = { ...full.params };
   editorExtras.value = cloneTractExtras(full.extras);
-  void store.requestVtlPose(editorParams.value, activeSpeaker.value, editorExtras.value);
 }
 
 function writeVoqsToTimeline(profile: VoqsProfile, take: VoqsTake, height?: number) {
@@ -1202,7 +1325,6 @@ function writeVoqsToTimeline(profile: VoqsProfile, take: VoqsTake, height?: numb
 }
 
 function selectEntry(entry: CatalogEntry): void {
-  lockedEntry.value = true;
   stopReferenceAudio();
   hideHoverCard();
   librarySelected.value = null;
@@ -1221,18 +1343,41 @@ async function copyEntrySymbol(entry: CatalogEntry): Promise<void> {
 
 function activateEntry(entry?: CatalogEntry): void {
   if (!entry) return;
-  void copyEntrySymbol(entry);
-  selectEntry(entry);
+  if (selectedEntry.value?.id === entry.id && !librarySelected.value) {
+    if (clickPlays.value) {
+      const reference = referencesForEntry(entry)[0];
+      if (reference) void playReference(reference, 'full');
+    }
+    return;
+  }
+  guardUnsavedChanges(() => selectEntry(entry), `切换至 [${entry.display}]`);
+}
+
+function switchSystem(next: 'ipa' | 'extipa' | 'voqs') {
+  showReferenceLibrary.value = false;
+  hideHoverCard();
+  if (next === 'voqs') {
+    openVoqsCatalog();
+    return;
+  }
+  activeSystem.value = next;
 }
 
 function openVoqsCatalog() {
+  showReferenceLibrary.value = false;
   activeSystem.value = 'voqs';
   hideHoverCard();
   if (isVoqsDetail.value) return;
   const initial = voqsPhonationChart.value?.ids?.[0];
   const entry = initial ? getEntryById(initial) : undefined;
-  if (entry) selectEntry(entry);
+  if (entry) activateEntry(entry);
 }
+
+watch(searchQuery, (q) => {
+  if (q.trim() && showReferenceLibrary.value) {
+    showReferenceLibrary.value = false;
+  }
+});
 
 function getEntryById(id: string): CatalogEntry | undefined {
   return entryMap.value.get(id);
@@ -1295,10 +1440,6 @@ function updateHoverPosition(): void {
 }
 
 function showHoverCard(entry: CatalogEntry, e: MouseEvent): void {
-  if (!lockedEntry.value) {
-    librarySelected.value = null;
-    setEntryPose(entry);
-  }
   hoverEntry.value = entry;
   lastHoverAnchor = e.currentTarget as HTMLElement | null;
   lastHoverPointer = { x: e.clientX, y: e.clientY };
@@ -1314,7 +1455,6 @@ async function playRendered(id:string, resource:'reconstruction' | 'audio') {
   } else {
     const demo = trillDemos.value.find(item => item.id === id);
     if (!demo) return;
-    lockedEntry.value = true;
     recordingDemo.value = { id, title: demo.label };
     referenceMode.value = canReconstructReference.value ? 'static' : 'preset';
   }
@@ -1331,13 +1471,11 @@ function hideHoverCard(): void {
 
 // ===== Right Panel Actions =====
 function onTractUpdate(delta: TractDelta): void {
-  lockedEntry.value = true;
   draftEdited.value = true;
   editorParams.value = { ...editorParams.value, ...delta };
 }
 
 function onExtrasUpdate(ex: TractPoseExtras): void {
-  lockedEntry.value = true;
   draftEdited.value = true;
   editorExtras.value = cloneTractExtras(ex);
 }
@@ -1459,18 +1597,26 @@ function writeToTimelinePhoneme(): void {
   store.pushToast(`已将 [${entry.display}] (${entry.nameZh}) 写入当前时间轴音素`, 'success');
 }
 
-function saveAsCustomPose(): void {
+async function saveAsCustomPose(): Promise<void> {
   const entry = selectedEntry.value;
   if (!entry) return;
-  if (selectedIpaPoseSetId.value === RECORDED_IPA_SET_ID) {
-    const edits = poseOverridesForSet(selectedIpaPoseSetId.value);
-    let name = '个人构型方案', suffix = 1;
-    while (ipaPoseSets.value.some(set => set.name === name)) name = '个人构型方案 ' + ++suffix;
-    if (!createIpaPoseSet(name, ipaPoseSets.value[0].poses)) return;
-    edits.forEach((ov) => {
-      saveCustomIpaPose(ov);
-      saveIpaPoseToSet(ov.symbol, tractRecordToArray19(ov.params), selectedIpaPoseSetId.value);
-    });
+  const paramsSnapshot = { ...editorParams.value };
+  const extrasSnapshot = cloneTractExtras(editorExtras.value);
+  let createdName: string | undefined;
+  let targetSetId = selectedIpaPoseSetId.value;
+  if (targetSetId === RECORDED_IPA_SET_ID) {
+    suppressKitReset = true;
+    try {
+      const created = await ensureEditablePoseSet();
+      if (!created) {
+        store.pushToast('未能自动创建可编辑的构型方案', 'warning');
+        return;
+      }
+      targetSetId = created.setId;
+      createdName = created.createdName;
+    } finally {
+      suppressKitReset = false;
+    }
   }
   const sym = entry.insertText || entry.display;
   saveCustomIpaPose({
@@ -1478,13 +1624,20 @@ function saveAsCustomPose(): void {
     symbol: sym,
     nameZh: entry.nameZh,
     system: entry.system,
-    params: { ...editorParams.value },
-    extras: cloneTractExtras(editorExtras.value),
+    params: paramsSnapshot,
+    extras: extrasSnapshot,
     savedAt: Date.now(),
   });
-  saveIpaPoseToSet(sym, tractRecordToArray19(editorParams.value), selectedIpaPoseSetId.value);
+  saveIpaPoseToSet(sym, tractRecordToArray19(paramsSnapshot), targetSetId);
+  editorParams.value = paramsSnapshot;
+  editorExtras.value = extrasSnapshot;
   draftEdited.value = false;
-  store.pushToast(`已保存 ${entry.system.toUpperCase()} 自定义构型 [${entry.display}] · ${entry.nameZh}`, 'success');
+  store.pushToast(
+    createdName
+      ? `默认方案为只读，已自动新建并切换至「${createdName}」并保存 [${entry.display}] 构型`
+      : `已保存 ${entry.system.toUpperCase()} 自定义构型 [${entry.display}] · ${entry.nameZh}`,
+    'success',
+  );
 }
 
 const poseIsProtected = computed(() => {
@@ -1492,13 +1645,13 @@ const poseIsProtected = computed(() => {
   return Boolean(entry && getProtectedIpaPose(entry.insertText || entry.display));
 });
 
-function togglePoseProtection(): void {
+async function togglePoseProtection(): Promise<void> {
   const entry = selectedEntry.value;
   if (!entry || selectedIpaPoseSetId.value === RECORDED_IPA_SET_ID) return;
   const symbol = entry.insertText || entry.display;
   const enabled = !poseIsProtected.value;
   if (enabled && !setIpaPoseProtected(symbol, true)) {
-    saveAsCustomPose();
+    await saveAsCustomPose();
   }
   if (Boolean(getProtectedIpaPose(symbol)) !== enabled && !setIpaPoseProtected(symbol, enabled)) {
     store.pushToast('无法保护当前构型，请先保存构型', 'warning');
@@ -1507,9 +1660,11 @@ function togglePoseProtection(): void {
   store.pushToast(enabled ? '已保护 [' + entry.display + '] 的构型' : '已取消 [' + entry.display + '] 的构型保护', 'info');
 }
 
-const linkedVowelId = computed(() => selectedEntry.value
-  ? customIpaPoses.value[customPoseKey(selectedEntry.value.id)]?.referenceRecordingId : undefined);
-const canLinkVowelRecording = computed(() => !personalRecording.value && selectedIpaPoseSetId.value !== 'recorded-default' &&
+const linkedVowelId = computed(() => {
+  void linkedVowelRecordings.value;
+  return selectedEntry.value ? getLinkedVowelRecording(selectedEntry.value.id) : undefined;
+});
+const canLinkVowelRecording = computed(() => !personalRecording.value && selectedIpaPoseSetId.value !== RECORDED_IPA_SET_ID &&
   selectedEntry.value?.section === 'vowels' && activeReference.value?.exists && !draftEdited.value);
 
 function selectMeasuredVowel(id: string) {
@@ -1527,22 +1682,20 @@ async function linkVowelRecording() {
     store.pushToast('该录音暂无有效的实测 F1/F2', 'info');
     return;
   }
-  saveCustomIpaPose({
-    id: entry.id, symbol, nameZh: entry.nameZh, system: entry.system,
-    params: { ...editorParams.value }, extras: cloneTractExtras(editorExtras.value),
-    referenceRecordingId: recording.id, savedAt: Date.now(),
-  });
+  setLinkedVowelRecording(entry.id, recording.id, setId);
   store.pushToast(`[${entry.display}] 已关联实测 F1/F2`, 'success');
 }
 
 function removeCustomPose(): void {
   const entry = selectedEntry.value;
   if (!entry) return;
+  const sym = entry.insertText || entry.display;
   deleteCustomIpaPose(entry.id);
+  resetIpaPoseInSet(sym, selectedIpaPoseSetId.value);
+  draftEdited.value = false;
   const full = getFullPoseForIpa(entryPreviewSymbol(entry), entry.id, activeSpeaker.value);
   editorParams.value = { ...full.params };
   editorExtras.value = cloneTractExtras(full.extras);
-  void store.requestVtlPose(editorParams.value, activeSpeaker.value, editorExtras.value);
   store.pushToast(`已恢复 [${entry.display}] 默认构型`, 'info');
 }
 
@@ -1557,17 +1710,146 @@ watch(
     const full = getFullPoseForIpa(entryPreviewSymbol(entry), entry.id, spk);
     editorParams.value = { ...full.params };
     editorExtras.value = cloneTractExtras(full.extras);
-    void store.requestVtlPose(editorParams.value, spk, editorExtras.value);
   },
 );
 
+async function loadEngineAssets(force = false): Promise<void> {
+  if (referencesLoading.value) return;
+  if (!force && references.value.length > 0 && !referencesLoadFailed.value) return;
+  referencesLoading.value = true;
+  try {
+    const [refsRes, trillsRes] = await Promise.allSettled([
+      fetchIpaReferences(),
+      fetch('/api/models/ipa-references/trill-demos', { signal: AbortSignal.timeout(10000) })
+        .then(async (r) => (r.ok ? ((await r.json()).records ?? []) : [])),
+      loadDefaultIpaPoses(),
+    ]);
+    if (refsRes.status === 'fulfilled') {
+      references.value = refsRes.value;
+      referencesLoadFailed.value = false;
+    } else {
+      referencesLoadFailed.value = true;
+    }
+    if (trillsRes.status === 'fulfilled' && Array.isArray(trillsRes.value)) {
+      trillDemos.value = trillsRes.value;
+    }
+  } finally {
+    referencesLoading.value = false;
+  }
+}
+
+watch(
+  () => store.engineStatus.value,
+  (status) => {
+    if (status === 'python-vtl' && (referencesLoadFailed.value || !references.value.length)) {
+      void loadEngineAssets(true);
+    }
+  },
+);
+
+function onWindowKeyDown(e: KeyboardEvent): void {
+  const target = e.target as HTMLElement | null;
+  const inEditable = Boolean(
+    target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable),
+  );
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    searchInputRef.value?.focus();
+    searchInputRef.value?.select();
+    return;
+  }
+  if (e.key === 'Escape') {
+    if (pendingUnsavedAction.value) {
+      e.preventDefault();
+      cancelUnsavedGuard();
+    } else if (poseSetOpen.value) {
+      e.preventDefault();
+      poseSetOpen.value = false;
+    } else if (showReferenceLibrary.value) {
+      e.preventDefault();
+      showReferenceLibrary.value = false;
+    } else if (searchQuery.value.trim()) {
+      e.preventDefault();
+      searchQuery.value = '';
+    }
+    return;
+  }
+  if (!inEditable && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === ' ' || e.key.toLowerCase() === 'p')) {
+    if (target?.tagName === 'BUTTON' && e.key === ' ') return;
+    if (recordingSource.value) {
+      e.preventDefault();
+      toggleRecording();
+    } else if (selectedEntry.value && selectedEntry.value.system !== 'voqs' && !excludedPose.value) {
+      e.preventDefault();
+      void auditionSingle();
+    }
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c' && !inEditable) {
+    const sel = window.getSelection()?.toString();
+    if (!sel && selectedEntry.value) {
+      e.preventDefault();
+      void copyEntrySymbol(selectedEntry.value);
+    }
+  }
+}
+
+async function handleIpaTourAction(ev: Event): Promise<void> {
+  const detail = (ev as CustomEvent<{
+    actionId?: string;
+    pageId?: string;
+    done?: (ok?: boolean) => void;
+  }>).detail;
+  if (!detail || detail.pageId !== 'ipa') return;
+  try {
+    if (detail.actionId === 'ipa-tour-select-y') {
+      showReferenceLibrary.value = false;
+      searchQuery.value = '';
+      activeSystem.value = 'ipa';
+      activeIpaSubSection.value = 'main';
+      const entryY = catalog.value?.entries.find((e) => e.display === 'y' && e.section === 'vowels');
+      if (entryY) selectEntry(entryY);
+      await nextTick();
+      vowelsRowRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      store.pushToast('已切换至前高圆唇元音 [y]，可对比与 [i] 的圆唇 F2/F3 差异', 'success', 2800);
+      detail.done?.(true);
+      return;
+    }
+    if (detail.actionId === 'ipa-tour-play-current') {
+      if (recordingSource.value) {
+        if (activeReference.value?.animation) referenceMode.value = 'motion';
+        await startRecording();
+      } else if (selectedEntry.value && selectedEntry.value.system !== 'voqs' && !excludedPose.value) {
+        await auditionSingle();
+      } else {
+        store.pushToast('当前音标暂无本地实录音频，请切换至含实录的音标后再试听', 'info', 2400);
+      }
+      detail.done?.(true);
+      return;
+    }
+    if (detail.actionId === 'ipa-tour-preview-voqs') {
+      showReferenceLibrary.value = false;
+      searchQuery.value = '';
+      activeSystem.value = 'voqs';
+      const breathy =
+        catalog.value?.entries.find((e) => e.system === 'voqs' && (e.display === 'V̤' || e.insertText === 'V̤'))
+        ?? catalog.value?.entries.find((e) => e.system === 'voqs' && referencesForEntry(e).length > 0)
+        ?? catalog.value?.entries.find((e) => e.system === 'voqs');
+      if (breathy) selectEntry(breathy);
+      store.pushToast('已切换至 VoQS 实录声门面板，右侧可查看 50 Hz 十维声门曲线', 'success', 2800);
+      detail.done?.(true);
+      return;
+    }
+  } catch {
+    detail.done?.(false);
+  }
+}
+
 onMounted(async () => {
-  void fetch('/api/models/ipa-references/trill-demos').then(async r => {
-    if (r.ok) trillDemos.value = (await r.json()).records ?? [];
-  }).catch(() => undefined);
-  void fetchIpaReferences().then(records => { references.value = records; }).catch(() => undefined);
-  void loadDefaultIpaPoses();
+  void loadEngineAssets(true);
   window.addEventListener('resize', hideHoverCard);
+  window.addEventListener('keydown', onWindowKeyDown);
+  window.addEventListener('vocalcut:tour-action', handleIpaTourAction);
   void preloadPtbIpaPresets(activeSpeaker.value);
   try {
     const resp = await fetch('/data/ipa-plus-catalog.json');
@@ -1577,7 +1859,7 @@ onMounted(async () => {
     const initial = data.entries.find((e) => e.display === 'i') ?? data.entries[0] ?? null;
     if (initial) setEntryPose(initial);
   } catch (err) {
-    loadErr.value = `无法加载 655 入口国际音标目录: ${String(err)}`;
+    loadErr.value = `无法加载 655 条目国际音标目录: ${String(err)}`;
   } finally {
     loading.value = false;
   }
@@ -1620,6 +1902,8 @@ onBeforeUnmount(() => {
   releaseRecordingFile();
   animationRequest++;
   window.removeEventListener('resize', hideHoverCard);
+  window.removeEventListener('keydown', onWindowKeyDown);
+  window.removeEventListener('vocalcut:tour-action', handleIpaTourAction);
 });
 </script>
 
@@ -1628,8 +1912,8 @@ onBeforeUnmount(() => {
   <div class="ipa-overlay-shell" :style="{ '--ipa-fs': `${fontSizePx}px` }">
     <!-- Top Header Strip -->
     <div class="panel ipa-topbar" data-tour="ipa-topbar">
-      <div class="ipa-tb-left">
-        <button type="button" class="btn sm" @click="store.researchTab.value = 'main'">
+      <div class="ipa-tb-left" data-tour="ipa-system-tabs">
+        <button type="button" class="btn sm" @click="guardUnsavedChanges(() => { store.researchTab.value = 'main'; }, '返回标注工作台')">
           <IconSvg name="arrow-left" :size="13" />
           <span>返回标注</span>
         </button>
@@ -1637,28 +1921,28 @@ onBeforeUnmount(() => {
         <div class="seg control-seg sm">
           <button
             type="button"
-            :class="{ active: activeSystem === 'ipa' }"
-            @click="activeSystem = 'ipa'; hideHoverCard()"
+            :class="{ active: !showReferenceLibrary && activeSystem === 'ipa' }"
+            @click="switchSystem('ipa')"
           >
             IPA ({{ catalog?.systems.ipa ?? 381 }})
           </button>
           <button
             type="button"
-            :class="{ active: activeSystem === 'extipa' }"
-            @click="activeSystem = 'extipa'; hideHoverCard()"
+            :class="{ active: !showReferenceLibrary && activeSystem === 'extipa' }"
+            @click="switchSystem('extipa')"
           >
             extIPA ({{ catalog?.systems.extipa ?? 209 }})
           </button>
           <button
             type="button"
-            :class="{ active: activeSystem === 'voqs' }"
-            @click="openVoqsCatalog"
+            :class="{ active: !showReferenceLibrary && activeSystem === 'voqs' }"
+            @click="switchSystem('voqs')"
           >
             VoQS ({{ catalog?.systems.voqs ?? 65 }})
           </button>
         </div>
 
-        <div v-if="activeSystem === 'ipa' && !searchQuery.trim()" class="seg control-seg sm">
+        <div v-if="!showReferenceLibrary && activeSystem === 'ipa' && !searchQuery.trim()" class="seg control-seg sm">
           <button
             type="button"
             :class="{ active: activeIpaSubSection === 'main' }"
@@ -1675,7 +1959,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div v-else-if="activeSystem === 'extipa' && !searchQuery.trim()" class="seg control-seg sm">
+        <div v-else-if="!showReferenceLibrary && activeSystem === 'extipa' && !searchQuery.trim()" class="seg control-seg sm">
           <button
             type="button"
             :class="{ active: activeExtIpaSubSection === 'all' }"
@@ -1715,7 +1999,7 @@ onBeforeUnmount(() => {
             aria-label="构型方案"
             :model-value="selectedIpaPoseSetId"
             :options="ipaPoseSets.map(item => ({ value: item.id, label: item.name }))"
-            @update:model-value="v => selectIpaPoseSet(String(v))"
+            @update:model-value="v => switchPoseSet(String(v))"
           />
           <template v-if="!poseSetOpen">
             <button type="button" class="btn sm primary" @click="editSet('copy')">
@@ -1758,13 +2042,14 @@ onBeforeUnmount(() => {
         </div>
         <button v-if="references.length" type="button" class="btn sm" :class="{ active: showReferenceLibrary }" @click="showReferenceLibrary = !showReferenceLibrary; hideHoverCard()">参考录音库</button>
         <label v-if="hasReferences" class="ipa-reference-toggle"><input v-model="clickPlays" type="checkbox" /> 点击音标播放</label>
-        <div class="ipa-search-wrap">
+        <div class="ipa-search-wrap" data-tour="ipa-search">
           <IconSvg name="search" :size="13" class="muted" />
           <input
+            ref="searchInputRef"
             v-model="searchQuery"
             type="text"
             class="inp ipa-search-inp"
-            placeholder="检索 655 入口：符号 / 中文名 / 英文 / U+码位"
+            placeholder="检索 655 条目：符号 / 中文名 / 英文 / U+码位"
           />
           <button v-if="searchQuery" type="button" class="btn sm icon-only" aria-label="清空音标检索" @click="searchQuery = ''">
             <IconSvg name="close" :size="11" />
@@ -1785,14 +2070,14 @@ onBeforeUnmount(() => {
           <span class="mono">{{ fontSizePx }}px</span>
         </label>
 
-        <span v-if="customSavedCount > 0" class="tree-tag">已存自定义 {{ customSavedCount }}</span>
+        <span v-if="customSavedCount > 0" class="tree-tag">当前方案自定义 {{ customSavedCount }}</span>
         <ModuleGuideButton data-tour="ipa-guide-btn" module-id="ipa" size="sm" />
       </div>
     </div>
 
     <!-- Loading / Error -->
     <div v-if="loading" class="panel ipa-loading">
-      <span>正在载入国际音标表 Plus 655 入口目录...</span>
+      <span>正在载入国际音标表 Plus 655 条目目录...</span>
     </div>
     <div v-else-if="loadErr" class="panel ipa-loading">
       <IconSvg name="warn" :size="16" />
@@ -1824,7 +2109,7 @@ onBeforeUnmount(() => {
           <template v-else-if="searchQuery.trim()">
             <div class="param-sec-title">
               <span>全表检索结果 ({{ searchMatches.length }} 条匹配)</span>
-              <span class="muted">覆盖 IPA / extIPA / VoQS 全 655 入口</span>
+              <span class="muted">覆盖 IPA / extIPA / VoQS 全 655 条目</span>
             </div>
             <div v-if="searchMatches.length" class="ipa-search-grid">
               <button
@@ -1834,12 +2119,13 @@ onBeforeUnmount(() => {
                 class="ipa-named-row"
                 :class="{
                   active: selectedEntry?.id === entry.id,
-                  custom: Boolean(customIpaPoses[entry.id]),
+                  custom: activeCustomPoseIds.has(entry.id),
                   'is-example': entry.isExample,
                 }"
                 @mouseenter="showHoverCard(entry, $event)"
                 @mouseleave="hideHoverCard"
                 @click="activateEntry(entry)"
+                @dblclick="copyEntrySymbol(entry)"
               >
                 <span class="ipa named-glyph">{{ entry.display }}</span>
                 <span class="named-meta">
@@ -1926,12 +2212,13 @@ onBeforeUnmount(() => {
                                 class="matrix-sym-btn ipa"
                                 :class="{
                                   active: selectedEntry?.id === id,
-                                  custom: Boolean(customIpaPoses[id]),
+                                  custom: activeCustomPoseIds.has(id),
                                   'is-example': getEntryById(id)?.isExample,
                                 }"
                                 @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                                 @mouseleave="hideHoverCard"
                                 @click="activateEntry(getEntryById(id))"
+                                @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                               >
                                 {{ getEntryById(id)?.display ?? '' }}
                               </button>
@@ -1956,12 +2243,13 @@ onBeforeUnmount(() => {
                                   class="matrix-sym-btn ipa"
                                   :class="{
                                     active: selectedEntry?.id === slot,
-                                    custom: Boolean(customIpaPoses[slot]),
+                                    custom: activeCustomPoseIds.has(slot),
                                     'is-example': getEntryById(slot)?.isExample,
                                   }"
                                   @mouseenter="getEntryById(slot) && showHoverCard(getEntryById(slot)!, $event)"
                                   @mouseleave="hideHoverCard"
                                   @click="activateEntry(getEntryById(slot))"
+                                  @dblclick="getEntryById(slot) && copyEntrySymbol(getEntryById(slot)!)"
                                 >
                                   {{ getEntryById(slot)?.display ?? '' }}
                                 </button>
@@ -1986,12 +2274,13 @@ onBeforeUnmount(() => {
                               class="matrix-sym-btn ipa"
                               :class="{
                                 active: selectedEntry?.id === id,
-                                custom: Boolean(customIpaPoses[id]),
+                                custom: activeCustomPoseIds.has(id),
                                 'is-example': getEntryById(id)?.isExample,
                               }"
                               @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                               @mouseleave="hideHoverCard"
                               @click="activateEntry(getEntryById(id))"
+                              @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                             >
                               {{ getEntryById(id)?.display ?? '' }}
                             </button>
@@ -2004,7 +2293,7 @@ onBeforeUnmount(() => {
               </section>
 
               <!-- 16-Point Vowel Quadrilateral + Acoustic Vowel Chart (T-20: Unified Visual Cards) -->
-              <div class="ipa-vowel-extras-row">
+              <div ref="vowelsRowRef" class="ipa-vowel-extras-row" data-tour="ipa-vowels">
                 <section v-if="ipaVowelChart" class="ipa-vowel-quad-card" aria-label="16 点经典元音四边形">
                   <header class="vq-card-head">
                     <strong>16 点经典元音四边形</strong>
@@ -2045,12 +2334,13 @@ onBeforeUnmount(() => {
                           translate="no"
                           :class="{
                             active: selectedEntry?.id === id,
-                            custom: Boolean(customIpaPoses[id]),
+                            custom: activeCustomPoseIds.has(id),
                             rounded: iIdx === 1,
                           }"
                           @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                           @mouseleave="hideHoverCard"
                           @click="activateEntry(getEntryById(id))"
+                          @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                         >
                           {{ getEntryById(id)?.display ?? '' }}
                         </button>
@@ -2063,9 +2353,16 @@ onBeforeUnmount(() => {
                 </section>
 
                 <IpaVowelComparison
-                  :speaker="vowelMonitorSpeaker" :recording="personalRecording ? undefined : activeReference?.id"
+                  :speaker="vowelMonitorSpeaker"
+                  :recording="personalRecording ? undefined : (librarySelected?.id ?? linkedVowelId ?? activeReference?.id)"
                   :symbol="selectedEntry?.section === 'vowels' ? selectedEntry.display : ''"
-                  :pose="vowelMonitorPose" @select-recording="selectMeasuredVowel"
+                  :pose="vowelMonitorPose"
+                  :track-rows="vowelMonitorTrack?.rows ?? null"
+                  :track-key="vowelMonitorTrack?.key"
+                  :playing="recordingPlaying || recordingQueued"
+                  :playback-time="displayedReferenceTime"
+                  :dynamic-active="vowelMonitorDynamic"
+                  @select-recording="selectMeasuredVowel"
                 />
               </div>
             </template>
@@ -2090,12 +2387,13 @@ onBeforeUnmount(() => {
                         class="matrix-sym-btn ipa"
                         :class="{
                           active: selectedEntry?.id === id,
-                          custom: Boolean(customIpaPoses[id]),
+                          custom: activeCustomPoseIds.has(id),
                           'is-example': getEntryById(id)?.isExample,
                         }"
                         @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                         @mouseleave="hideHoverCard"
                         @click="activateEntry(getEntryById(id))"
+                        @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                       >
                         {{ getEntryById(id)?.display ?? '' }}
                       </button>
@@ -2177,12 +2475,13 @@ onBeforeUnmount(() => {
                               class="matrix-sym-btn ipa"
                               :class="{
                                 active: selectedEntry?.id === id,
-                                custom: Boolean(customIpaPoses[id]),
+                                custom: activeCustomPoseIds.has(id),
                                 'is-example': getEntryById(id)?.isExample,
                               }"
                               @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                               @mouseleave="hideHoverCard"
                               @click="activateEntry(getEntryById(id))"
+                              @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                             >
                               {{ getEntryById(id)?.display ?? '' }}
                             </button>
@@ -2207,12 +2506,13 @@ onBeforeUnmount(() => {
                                 class="matrix-sym-btn ipa"
                                 :class="{
                                   active: selectedEntry?.id === slot,
-                                  custom: Boolean(customIpaPoses[slot]),
+                                  custom: activeCustomPoseIds.has(slot),
                                   'is-example': getEntryById(slot)?.isExample,
                                 }"
                                 @mouseenter="getEntryById(slot) && showHoverCard(getEntryById(slot)!, $event)"
                                 @mouseleave="hideHoverCard"
                                 @click="activateEntry(getEntryById(slot))"
+                                @dblclick="getEntryById(slot) && copyEntrySymbol(getEntryById(slot)!)"
                               >
                                 {{ getEntryById(slot)?.display ?? '' }}
                               </button>
@@ -2237,12 +2537,13 @@ onBeforeUnmount(() => {
                             class="matrix-sym-btn ipa"
                             :class="{
                               active: selectedEntry?.id === id,
-                              custom: Boolean(customIpaPoses[id]),
+                              custom: activeCustomPoseIds.has(id),
                               'is-example': getEntryById(id)?.isExample,
                             }"
                             @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                             @mouseleave="hideHoverCard"
                             @click="activateEntry(getEntryById(id))"
+                            @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                           >
                             {{ getEntryById(id)?.display ?? '' }}
                           </button>
@@ -2284,13 +2585,14 @@ onBeforeUnmount(() => {
                       class="matrix-sym-btn ipa"
                       :class="{
                         active: selectedEntry?.id === id,
-                        custom: Boolean(customIpaPoses[id]),
+                        custom: activeCustomPoseIds.has(id),
                         'is-example': getEntryById(id)?.isExample,
                         'is-span-btn': chart.id === 'rhythm' || chart.id === 'uncertainty',
                       }"
                       @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                       @mouseleave="hideHoverCard"
                       @click="activateEntry(getEntryById(id))"
+                      @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                     >
                       {{ getEntryById(id)?.display ?? '' }}
                     </button>
@@ -2325,11 +2627,12 @@ onBeforeUnmount(() => {
                   class="ipa-named-row"
                   :class="{
                     active: selectedEntry?.id === id,
-                    custom: Boolean(customIpaPoses[id]),
+                    custom: activeCustomPoseIds.has(id),
                   }"
                   @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                   @mouseleave="hideHoverCard"
                   @click="activateEntry(getEntryById(id))"
+                  @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                 >
                   <span class="ipa named-glyph">{{ getEntryById(id)?.display }}</span>
                   <span class="named-zh">{{ getEntryById(id)?.nameZh }}</span>
@@ -2353,11 +2656,12 @@ onBeforeUnmount(() => {
                     class="ipa-named-row"
                     :class="{
                       active: selectedEntry?.id === id,
-                      custom: Boolean(customIpaPoses[id]),
+                      custom: activeCustomPoseIds.has(id),
                     }"
                     @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                     @mouseleave="hideHoverCard"
                     @click="activateEntry(getEntryById(id))"
+                    @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                   >
                     <span class="ipa named-glyph">{{ getEntryById(id)?.display }}</span>
                     <span class="named-zh">{{ getEntryById(id)?.nameZh }}</span>
@@ -2381,12 +2685,13 @@ onBeforeUnmount(() => {
                   class="voqs-scope-chip"
                   :class="{
                     active: selectedEntry?.id === id,
-                    custom: Boolean(customIpaPoses[id]),
+                    custom: activeCustomPoseIds.has(id),
                     'is-example': getEntryById(id)?.isExample,
                   }"
                   @mouseenter="getEntryById(id) && showHoverCard(getEntryById(id)!, $event)"
                   @mouseleave="hideHoverCard"
                   @click="activateEntry(getEntryById(id))"
+                  @dblclick="getEntryById(id) && copyEntrySymbol(getEntryById(id)!)"
                 >
                   <span class="ipa scope-glyph">{{ getEntryById(id)?.display }}</span>
                   <span class="scope-name muted">{{ getEntryById(id)?.nameZh }}</span>
@@ -2396,12 +2701,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <IpaMaterialDownloads
+          data-tour="ipa-downloads"
           :current="recordingDemo ? null : activeReference"
           :personal="recordingDemo ? undefined : personalRecording"
           :count="references.filter(item => item.exists).length"
           :can-reconstruct="canReconstructReference"
         />
         <IpaRecordingTimeline v-if="!isVoqsDetail && activeSystem !== 'voqs'"
+          data-tour="ipa-timeline"
           :has-audio="Boolean(recordingSource)"
           :personal="!recordingDemo && Boolean(personalRecording)"
           :file="recordingFile"
@@ -2410,7 +2717,7 @@ onBeforeUnmount(() => {
           :duration="recordingDuration || editTrack?.animation.duration_sec || 0"
           :time="referenceTime"
           :playing="recordingPlaying || recordingQueued"
-          :status="recordingStatus || (!recordingDemo && referenceStatus ? referenceStatus : '')"
+          :status="recordingStatus || (!recordingDemo && referenceStatus ? referenceStatus : (referencesLoadFailed && !recordingSource ? '实录索引暂未载入，请确认本地引擎就绪后点击右侧重试' : ''))"
           :has-trajectory="!recordingDemo && canReconstructReference"
           :can-reconstruct="canReconstructReference"
           :source="recordingDemo ? 'demo' : recordingType"
@@ -2420,10 +2727,12 @@ onBeforeUnmount(() => {
           :target="!recordingDemo && activeReference ? findTargetInterval(activeReference) : undefined"
           :theme-key="recordingTheme"
           :loudness="recordingLoudness"
+          :can-retry-references="referencesLoadFailed"
           @toggle-play="toggleRecording"
           @seek="seekRecording"
-          @source="chooseRecording"
+          @source="playRecordingSource"
           @loudness="setRecordingLoudness"
+          @retry-references="loadEngineAssets(true)"
         />
       </div>
 
@@ -2512,29 +2821,47 @@ onBeforeUnmount(() => {
           </div>
           <button v-if="trillDemo" class="btn xs" type="button" @click="playRendered(trillDemo.id,'audio')">颤音合成示范 · 井井音色</button>
           <p v-if="excludedPose" class="unsupported-note">当前声道模型不支持这一气流机制。可查看音标说明，有录音时可试听原音。</p>
-          <div v-if="selectedEntry.system !== 'voqs' && !excludedPose" class="ipa-tract-box sci-plane">
+          <div v-if="selectedEntry.system !== 'voqs' && !excludedPose" class="ipa-tract-box sci-plane" data-tour="ipa-tract-viewport">
             <VocalTractViewport
               v-if="hasEditedView" :params="editedViewParams" :extras="DEFAULT_TRACT_EXTRAS" :metadata="editedControlsMeta"
               :interactive="Boolean(recordingLimits)" :enabled-handles="recordingTractHandles" :reference-sample="''" :show-grid="true"
+              :dock-hud="true"
               @drag-end="updateRecordingPose"
-            />
+            >
+              <template #hud-meta>
+                <small v-if="referenceStatus" class="ipa-hud-state" role="status">{{ referenceStatus }}</small>
+                <small v-else class="ipa-hud-state">目标帧声道微调</small>
+              </template>
+            </VocalTractViewport>
             <VocalTractViewport
               v-else-if="referenceMode === 'preset' || !activeReference?.animation"
               :params="editorParams"
               :extras="editorExtras"
               :show-grid="true"
+              :dock-hud="true"
               @update:params="onTractUpdate"
               @update:extras="onExtrasUpdate"
-            />
-            <svg v-else ref="referenceSvg" class="reference-anatomy" role="img" aria-label="录音反演声道构型" />
-            <small v-if="referenceStatus" class="reference-state" role="status">{{ referenceStatus }}</small>
-            <small v-else-if="referenceMode === 'preset' && !hasCustomPoseForSelected && !getSelectedIpaPoseParams(entryPreviewSymbol(selectedEntry))" class="reference-state">PhoneticToolbox 参考构型</small>
-            <small v-else-if="referenceMode === 'preset'" class="reference-state">{{ hasCustomPoseForSelected ? '已保存的自定义构型' : '构型方案 · 录音反演或自定义' }}</small>
+            >
+              <template #hud-meta>
+                <small v-if="referenceStatus" class="ipa-hud-state" role="status">{{ referenceStatus }}</small>
+                <small v-else-if="!hasCustomPoseForSelected && !getSelectedIpaPoseParams(entryPreviewSymbol(selectedEntry))" class="ipa-hud-state">PhoneticToolbox 参考构型</small>
+                <small v-else class="ipa-hud-state">{{ hasCustomPoseForSelected ? '已保存的自定义构型' : '构型方案 · 录音反演或自定义' }}</small>
+              </template>
+            </VocalTractViewport>
+            <div v-else class="reference-svg-stage">
+              <div class="reference-svg-head">
+                <span class="muted">{{ referenceMode === 'motion' ? '录音反演 · 动态构型' : '录音反演 · 静态构型' }}</span>
+                <small v-if="referenceStatus" class="ipa-hud-state" role="status">{{ referenceStatus }}</small>
+              </div>
+              <svg ref="referenceSvg" class="reference-anatomy" role="img" aria-label="录音反演声道构型" />
+            </div>
           </div>
 
           <!-- PTB-Grade Scrollable Phonetic Details Card -->
           <div class="ipa-details-scroll selectable">
-            <IpaRecordingKeyframes v-if="editOpen && editTrack" :kit="editSetName" :frame="editClock"
+            <IpaRecordingKeyframes v-if="editOpen && editTrack" :kit="editSetName"
+              :readonly-kit="selectedIpaPoseSetId === RECORDED_IPA_SET_ID"
+              :frame="editClock"
               :target-frame="steadyTargetFrame" :default-radius="defaultBellRadius"
               :size="editTrack.m27_50hz_pa.length" :keyframes="recordingKeys" :values="editControls" :limits="recordingLimits"
               :status="editNotice" :busy="revisionBusy" :dirty="editDirty" :has-changes="hasRevisionChanges"
@@ -2593,7 +2920,7 @@ onBeforeUnmount(() => {
 
             <!-- Aliases -->
             <div v-if="selectedEntry.aliases?.length" class="det-kv-row">
-              <span class="det-k muted">检索别名（含 CIN）：</span>
+              <span class="det-k muted">检索别名：</span>
               <span class="det-aliases muted">{{ selectedEntry.aliases.join(' · ') }}</span>
             </div>
 
@@ -2618,7 +2945,7 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- Bottom-Pinned Action Footer -->
-          <div v-if="selectedEntry.system !== 'voqs'" class="ipa-bottom-actions">
+          <div v-if="selectedEntry.system !== 'voqs'" class="ipa-bottom-actions" data-tour="ipa-bottom-actions">
             <div class="ipa-actions-primary">
               <button type="button" class="btn sm" :disabled="store.isSynthesizing.value || (excludedPose && !activeReference?.exists)" @click="auditionSingle">
                 <IconSvg name="play" :size="12" />
@@ -2639,7 +2966,7 @@ onBeforeUnmount(() => {
             >
               <button type="button" class="btn sm success" :disabled="!draftEdited" @click="saveAsCustomPose">
                 <IconSvg name="check" :size="12" />
-                <span>保存构型</span>
+                <span>{{ selectedIpaPoseSetId === RECORDED_IPA_SET_ID ? '另存为新方案' : '保存构型' }}</span>
               </button>
               <button
                 v-if="selectedIpaPoseSetId !== RECORDED_IPA_SET_ID"
@@ -2689,7 +3016,7 @@ onBeforeUnmount(() => {
               :symbol="activeReference.voqs_symbol" :render-height="voqsHeight" media-owned @apply="writeVoqsToTimeline" />
           </template>
           <div v-else class="reference-toolbar">
-            <div v-if="activeReference.animation" class="seg" aria-label="声道构型来源">
+            <div v-if="activeReference.animation" class="seg control-seg xs" aria-label="声道构型来源">
               <button type="button" :class="{ active: referenceMode === 'static' }" @click="editOpen = false; referenceMode = 'static'">录音反演 · 静态</button>
               <button type="button" :class="{ active: referenceMode === 'motion' && !editOpen }" @click="editOpen = false; referenceMode = 'motion'; playReference(activeReference)">动态构型</button>
             </div>
@@ -2698,16 +3025,30 @@ onBeforeUnmount(() => {
             </button>
             <button v-if="hasFrameEditor" class="btn xs" type="button" :aria-pressed="editOpen" :class="{ active: editOpen }"
               @click="editOpen ? (editOpen = false) : openRecordingEditor()">目标帧微调</button>
+            <button v-if="activeReference.animation && !activeReference.excluded" type="button" class="btn xs" @click="playRendered(activeReference.id,'reconstruction')">声道重建录音</button>
           </div>
-          <button v-if="activeReference.animation" type="button" class="btn xs" @click="playRendered(activeReference.id,'reconstruction')">声道重建录音</button>
           <div v-if="activeReference.animation" class="ipa-tract-box sci-plane">
             <VocalTractViewport v-if="hasEditedView" :params="editedViewParams" :extras="DEFAULT_TRACT_EXTRAS" :metadata="editedControlsMeta"
               :interactive="Boolean(recordingLimits)" :enabled-handles="recordingTractHandles" :reference-sample="''" :show-grid="true"
-              @drag-end="updateRecordingPose" />
-            <svg v-else ref="referenceSvg" class="reference-anatomy" role="img" aria-label="录音反演声道构型" />
+              :dock-hud="true"
+              @drag-end="updateRecordingPose">
+              <template #hud-meta>
+                <small v-if="referenceStatus" class="ipa-hud-state" role="status">{{ referenceStatus }}</small>
+                <small v-else class="ipa-hud-state">目标帧声道微调</small>
+              </template>
+            </VocalTractViewport>
+            <div v-else class="reference-svg-stage">
+              <div class="reference-svg-head">
+                <span class="muted">{{ referenceMode === 'motion' ? '录音反演 · 动态构型' : '录音反演 · 静态构型' }}</span>
+                <small v-if="referenceStatus" class="ipa-hud-state" role="status">{{ referenceStatus }}</small>
+              </div>
+              <svg ref="referenceSvg" class="reference-anatomy" role="img" aria-label="录音反演声道构型" />
+            </div>
           </div>
           <div v-if="editOpen && editTrack" class="ipa-details-scroll selectable">
-            <IpaRecordingKeyframes :kit="editSetName" :frame="editClock"
+            <IpaRecordingKeyframes :kit="editSetName"
+              :readonly-kit="selectedIpaPoseSetId === RECORDED_IPA_SET_ID"
+              :frame="editClock"
               :target-frame="steadyTargetFrame" :default-radius="defaultBellRadius"
               :size="editTrack.m27_50hz_pa.length"
               :keyframes="recordingKeys" :values="editControls" :limits="recordingLimits" :status="editNotice"
@@ -2759,7 +3100,30 @@ onBeforeUnmount(() => {
             {{ hoverEntry.codePoints.join(' ') }}
           </code>
           <span v-else>{{ hoverEntry.section }}</span>
-          <span>点击载入右栏构型</span>
+          <span>单击查看构型 · 双击复制符号</span>
+        </div>
+      </div>
+
+      <div v-if="pendingUnsavedAction" class="export-modal-mask" role="dialog" aria-modal="true" aria-label="未保存构型确认" @click.self="cancelUnsavedGuard">
+        <div class="export-modal-card ipa-unsaved-modal">
+          <div class="p-head">
+            <span>存在未保存修改</span>
+            <button type="button" class="btn xs icon-only" aria-label="关闭确认弹窗" @click="cancelUnsavedGuard">
+              <IconSvg name="close" :size="12" />
+            </button>
+          </div>
+          <div class="p-body ipa-unsaved-body">
+            <p class="det-para">
+              当前{{ selectedEntry ? ` [${selectedEntry.display}] ` : '' }}有尚未保存的{{ draftEdited && editDirty ? '构型与目标帧修订' : draftEdited ? '声道构型修改' : '目标帧修订' }}，是否在{{ unsavedGuardTitle }}前保存？
+            </p>
+            <div class="ipa-unsaved-actions">
+              <button type="button" class="btn sm primary" @click="confirmUnsavedSaveAndContinue">
+                {{ selectedIpaPoseSetId === RECORDED_IPA_SET_ID ? '另存为新方案并继续' : '保存并继续' }}
+              </button>
+              <button type="button" class="btn sm danger" @click="confirmUnsavedDiscardAndContinue">放弃修改</button>
+              <button type="button" class="btn sm" @click="cancelUnsavedGuard">留在此处</button>
+            </div>
+          </div>
         </div>
       </div>
     </Teleport>
@@ -2829,12 +3193,14 @@ onBeforeUnmount(() => {
 .reference-row { display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--panel-border); padding:4px 0; }
 .reference-row.active { background:var(--selected); }
 .reference-title { flex:1; min-width:0; justify-content:flex-start; text-align:left; }
-.reference-anatomy { display:block; width:100%; height:100%; }
-.reference-state { position:absolute; inset:6px auto auto 6px; color:var(--muted); }
+.reference-anatomy { display:block; flex:1; min-height:0; width:100%; height:100%; }
+.reference-svg-stage { display:flex; flex-direction:column; width:100%; height:100%; min-height:0; }
+.reference-svg-head { flex:none; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 8px; border-bottom:1px solid color-mix(in srgb, var(--panel-border) 72%, transparent); background:color-mix(in srgb, var(--sidebar) 64%, var(--panel)); font-size:0.833333rem; }
+.ipa-hud-state { color:var(--muted); font-size:0.816667rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 
 .ipa-size-slider {
-  width: 72px !important;
-  height: 14px !important;
+  width: 72px;
+  height: 14px;
 }
 
 .ipa-loading {
@@ -2872,6 +3238,8 @@ onBeforeUnmount(() => {
   overflow:auto;
   scrollbar-gutter: stable;
   overflow-anchor: none;
+  container-type: inline-size;
+  container-name: ipa-left;
 }
 
 .ipa-section-block {
@@ -3108,7 +3476,7 @@ onBeforeUnmount(() => {
   align-items: stretch;
 }
 
-@container desktop (max-width: 1180px) {
+@container ipa-left (max-width: 620px) {
   .ipa-vowel-extras-row {
     grid-template-columns: 1fr;
   }
@@ -3771,8 +4139,9 @@ onBeforeUnmount(() => {
 }
 
 .ipa-actions-primary {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -3787,13 +4156,31 @@ onBeforeUnmount(() => {
 }
 
 .ipa-btn-write {
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.ipa-unsaved-modal {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.ipa-unsaved-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ipa-unsaved-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* ===== Viewport-Adaptive Hover Card (#ipaHoverCard, PTB Compact Style) ===== */
 .ipa-hover-card {
   position: fixed;
-  z-index: 999;
+  z-index: var(--z-popover);
   pointer-events: none;
   box-sizing: border-box;
   overflow: hidden;

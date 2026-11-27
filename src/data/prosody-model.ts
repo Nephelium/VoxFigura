@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { F0_LIMIT_HZ, msToSamples, samplesToMs, hzToSt, stToHz, type F0PinPoint, type Syllable } from '@vocalcut/core';
+import { assertValidF0Hz, isValidF0Hz, msToSamples, samplesToMs, hzToSt, stToHz, type F0PinPoint, type Syllable } from '@vocalcut/core';
 import { analyzeJapaneseAccent } from '@vocalcut/g2p';
 import { buildSegmentsForSyllable, splitIpaToPhonemes } from '@/components/research/research-utils';
 import { mapPiecewiseTime, type PiecewiseTimePoint } from './speech-timing';
@@ -46,11 +46,6 @@ export function supportsProsodyText(text: string): boolean {
     && !/[\[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text);
 }
 
-export function supportsJapaneseProsodyText(text: string): boolean {
-  return /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text)
-    && !/[\[\]［］]/u.test(text);
-}
-
 export type ProsodyPredictionPayload = Prediction;
 
 function scaledProsodyFrameMs(frame: Frame, rateScale: number): number {
@@ -70,6 +65,7 @@ export function buildSpeechProsodyClipData(
   data: Prediction,
   speaker: string,
   rateScale = 1,
+  baseF0Hz = 165,
 ): {
   syllableOrder: string[];
   syllables: Record<string, Syllable>;
@@ -112,8 +108,8 @@ export function buildSpeechProsodyClipData(
     t_smp: msToSamples(mapPiecewiseTime(timeWarp, p.t * 1000)),
     f0_hz: p.hz,
   }));
-  const outside = pitch.find(p => !Number.isFinite(p.f0_hz) || p.f0_hz < F0_LIMIT_HZ.min || p.f0_hz > F0_LIMIT_HZ.max);
-  if (outside) throw new Error(`模型基频 ${outside.f0_hz} Hz 超出 60–600 Hz`);
+  const outside = pitch.find(p => !isValidF0Hz(p.f0_hz));
+  if (outside) throw new Error(`模型基频 ${outside.f0_hz} Hz 无效（须大于 0 Hz）`);
   const syllables: Record<string, Syllable> = {};
   for (const modelSyl of data.syllables) {
     const frames = bySyllable.get(modelSyl.id);
@@ -150,7 +146,7 @@ export function buildSpeechProsodyClipData(
       tone_levels: modelSyl.tone, reading_candidates: readings.length > 1 ? readings : undefined,
       anchor: { policy: 'speech_timing', lead_ms: null, bias_ms: 0 }, segments,
       targets: [{ id: `${id}_t0`, span_id: id, start_smp: startSmp, end_smp: endSmp, voiced: true,
-        candidates: { default: { m_st_per_s: 0, b_end_st: hzToSt(frames[nucleus].frame.f0_hz, 165), lambda_per_s: 34, source: 'default' } } }],
+        candidates: { default: { m_st_per_s: 0, b_end_st: hzToSt(frames[nucleus].frame.f0_hz, baseF0Hz > 0 ? baseF0Hz : 165), lambda_per_s: 34, source: 'default' } } }],
       overrides: { poses: [], f0_resid: [], pressure: [{ u: 0, pressure_pa: 640 }, { u: .35, pressure_pa: 840 },
         { u: .85, pressure_pa: 760 }, { u: 1, pressure_pa: 500 }], glottis: [{ u0: 0, u1: 1, preset: 'modal', blend: 1 }] },
     };
@@ -166,26 +162,34 @@ export async function predictSpeechProsody(
   speaker: string,
   rateScale = 1,
   lang?: 'auto' | 'zh' | 'en',
+  baseF0Hz?: number,
 ): Promise<{
   syllableOrder: string[];
   syllables: Record<string, Syllable>;
   totalSmp: number;
   pitch: F0PinPoint[];
 }> {
+  const safeBaseF0 = typeof baseF0Hz === 'number' && Number.isFinite(baseF0Hz) && baseF0Hz > 0 ? baseF0Hz : undefined;
   const response = await fetch('/api/models/text-prosody', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, tone_sandhi: false, ...(lang ? { lang } : {}) }),
+    body: JSON.stringify({
+      text,
+      tone_sandhi: false,
+      ...(lang ? { lang } : {}),
+      ...(safeBaseF0 !== undefined ? { base_f0: safeBaseF0 } : {}),
+    }),
     signal: AbortSignal.timeout(12000),
   });
   const data = await response.json() as Prediction | { ok: false; error?: { hint?: string }; hint?: string };
   if (!data.ok) throw new Error(data.error?.hint ?? data.hint ?? '韵律模型不可用');
-  return buildSpeechProsodyClipData(data, speaker, rateScale);
+  return buildSpeechProsodyClipData(data, speaker, rateScale, safeBaseF0 ?? 165);
 }
 
 export interface MixedProsodyRowInput {
   word: string;
   language?: 'zh' | 'en' | 'ja' | 'ipa';
+  ipaPhones?: readonly string[];
   sourceWord?: string;
   syllableIndex?: number;
   syllableCount?: number;
@@ -203,25 +207,47 @@ export interface MixedProsodyRun {
 }
 
 /**
- * Extract contiguous Mandarin/English runs from a mixed-language row sequence so
- * Text2Prosody-Lite can still predict natural intonation for Chinese/English spans
- * even when `[IPA]`, kana, VoQS scopes, or explicit tone marks appear elsewhere.
+ * Extract contiguous Mandarin/English or unmarked `[IPA]` runs from a mixed-language row
+ * sequence so Text2Prosody-Lite (incl. `LANG_IPA=3`) can predict natural durations and
+ * intonation while respecting VoQS scopes and explicit tone marks.
  */
 export function extractMixedProsodyRuns(rows: readonly MixedProsodyRowInput[]): MixedProsodyRun[] {
   const runs: MixedProsodyRun[] = [];
   let runStart = -1;
   let activeGroup: string | undefined;
+  let activeKind: 'text' | 'ipa' | undefined;
 
   const flush = (endIndex: number) => {
     if (runStart < 0 || endIndex <= runStart) {
       runStart = -1;
       activeGroup = undefined;
+      activeKind = undefined;
       return;
     }
+    const kind = activeKind ?? 'text';
     const parts: string[] = [];
-    let prevLang: 'zh' | 'en' | undefined;
+    let prevLang: 'zh' | 'en' | 'ipa' | undefined;
     for (let i = runStart; i < endIndex; i++) {
       const row = rows[i];
+      if (kind === 'ipa') {
+        const cleanPhones = (row.ipaPhones ?? [])
+          .map((p) => p.replace(/[\[\]\s]+/gu, '').trim())
+          .filter(Boolean);
+        if (cleanPhones.length > 0) {
+          if (parts.length > 0 && !parts[parts.length - 1].endsWith(' ')) {
+            parts.push(' ');
+          }
+          parts.push(`[${cleanPhones.join(' ')}]`);
+          prevLang = 'ipa';
+        }
+        // IPA space short-pause (175 ms, phraseEnd=false) keeps continuous prosody;
+        // explicit comma (180 ms), dot (350 ms), or phraseEnd emits phrase punctuation.
+        if (i + 1 < endIndex && !row.linkedToNext && (row.phraseEnd || row.pause >= 180)) {
+          parts.push(row.pause >= 300 ? '. ' : ', ');
+          prevLang = undefined;
+        }
+        continue;
+      }
       const lang = row.language === 'en' ? 'en' : 'zh';
       // Multi-syllable English words share `sourceWord`; emit the full spelling once.
       const isContinuationSyllable =
@@ -252,29 +278,37 @@ export function extractMixedProsodyRuns(rows: readonly MixedProsodyRowInput[]): 
         prevLang = undefined;
       }
     }
-    const text = parts.join('').replace(/\s+/gu, ' ').trim();
-    if (text && supportsProsodyText(text)) {
+    let text = parts.join('').replace(/\s+/gu, ' ').trim();
+    if (kind === 'ipa' && text && !/[.,!?。！？]$/u.test(text)) {
+      text = `${text}.`;
+    }
+    if (text && (kind === 'ipa' ? text.includes('[') : supportsProsodyText(text))) {
       runs.push({ startIndex: runStart, endIndex, text });
     }
     runStart = -1;
     activeGroup = undefined;
+    activeKind = undefined;
   };
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const canJoin = row.eligible && (row.language === 'zh' || row.language === 'en');
-    if (!canJoin) {
+    const isEligibleIpa = row.eligible && row.language === 'ipa' && Boolean(row.ipaPhones?.length);
+    const isEligibleText = row.eligible && (row.language === 'zh' || row.language === 'en');
+    if (!isEligibleText && !isEligibleIpa) {
       flush(i);
       continue;
     }
-    if (runStart >= 0 && row.groupKey !== activeGroup) {
+    const rowKind: 'text' | 'ipa' = isEligibleIpa ? 'ipa' : 'text';
+    if (runStart >= 0 && (row.groupKey !== activeGroup || rowKind !== activeKind)) {
       flush(i);
     }
     if (runStart < 0) {
       runStart = i;
       activeGroup = row.groupKey;
+      activeKind = rowKind;
     }
     const isLastInWord =
+      rowKind === 'ipa' ||
       !row.sourceWord ||
       typeof row.syllableIndex !== 'number' ||
       typeof row.syllableCount !== 'number' ||
@@ -342,7 +376,7 @@ export function mapProsodyRunPitchToTimeline(
   const mapped: F0PinPoint[] = [];
   for (const pt of sortedPitch) {
     if (pt.t_smp < predStart || pt.t_smp > predEnd) continue;
-    if (!Number.isFinite(pt.f0_hz) || pt.f0_hz < F0_LIMIT_HZ.min || pt.f0_hz > F0_LIMIT_HZ.max) continue;
+    if (!isValidF0Hz(pt.f0_hz)) continue;
     const t_smp = Math.max(targetStart, Math.min(targetEnd, Math.round(mapPiecewiseTime(cleanWarp, pt.t_smp))));
     const prev = mapped[mapped.length - 1];
     if (prev && prev.t_smp === t_smp) {
@@ -363,9 +397,6 @@ export function mapProsodyRunPitchToTimeline(
   ];
   return out.length >= 2 ? out : [];
 }
-
-/** Connected-speech duration compression for rule-only English G2P fallback (medium rate). */
-export const ENGLISH_RULE_SPEECH_SCALE = 0.58;
 
 export interface ProsodyDurationRowInput {
   sourceWord?: string;
@@ -457,7 +488,18 @@ export async function buildJapaneseAccentClipData(
   if (!plan.moras.length) throw new Error('日语声调词典未解析出可用音拍');
 
   const safeScale = Number.isFinite(rateScale) && rateScale > 0 ? rateScale : 1;
-  const safeBaseF0 = Number.isFinite(baseF0) && baseF0 >= F0_LIMIT_HZ.min && baseF0 <= F0_LIMIT_HZ.max ? baseF0 : 165;
+  const baseCheck = assertValidF0Hz(
+    'ja.base_f0_hz',
+    baseF0,
+    `日语声调基准基频 ${baseF0} Hz 须为正有限值 (> 0 Hz)`,
+  );
+  if (!baseCheck.ok) {
+    const err = new Error(baseCheck.error.hint) as Error & { code?: string; detail?: unknown };
+    err.code = baseCheck.error.code;
+    err.detail = baseCheck.error;
+    throw err;
+  }
+  const safeBaseF0 = baseCheck.value;
   const moraMs = Math.max(65, Math.round(145 * safeScale));
 
   const syllableOrder: string[] = [];
@@ -476,7 +518,18 @@ export async function buildJapaneseAccentClipData(
     const segments = buildSegmentsForSyllable(id, safePhones, startSmp, endSmp, speaker, poseSetId);
     const nucleus = Math.max(0, segments.findIndex((seg) => seg.role === 'nucleus'));
     const rawHz = stToHz(mora.pitchSt, safeBaseF0);
-    const f0Hz = Math.round(Math.max(F0_LIMIT_HZ.min, Math.min(F0_LIMIT_HZ.max, rawHz)) * 10) / 10;
+    const f0Hz = Math.round(rawHz * 10) / 10;
+    const moraCheck = assertValidF0Hz(
+      `ja.moras[${idx}].f0_hz`,
+      f0Hz,
+      `日语声调音拍「${mora.text}」基频 ${f0Hz} Hz 须为正有限值 (> 0 Hz)`,
+    );
+    if (!moraCheck.ok) {
+      const err = new Error(moraCheck.error.hint) as Error & { code?: string; detail?: unknown };
+      err.code = moraCheck.error.code;
+      err.detail = moraCheck.error;
+      throw err;
+    }
     const nucSeg = segments[nucleus];
     const midSmp = nucSeg ? Math.round((nucSeg.start_smp + nucSeg.end_smp) / 2) : Math.round((startSmp + endSmp) / 2);
     pitch.push({ t_smp: midSmp, f0_hz: f0Hz });

@@ -153,3 +153,93 @@ export async function measureSavedVowelPoses(speaker: string, poses: {
   if (result.speaker !== speaker || result.section_count !== 65) throw new Error('套装构型峰值与当前解剖模型不匹配');
   return result;
 }
+
+export interface VowelTrackFrame {
+  f1: number;
+  f2: number;
+  f3?: number;
+  nasal?: boolean;
+}
+
+export interface VowelTrackMeasurements {
+  speaker: string;
+  section_count: number;
+  fps: number;
+  frames: Array<VowelTrackFrame | null>;
+}
+
+const trackCache = new Map<string, Promise<VowelTrackMeasurements>>();
+
+export function interpolateVowelTrackAt(
+  frames: readonly (VowelTrackFrame | null)[],
+  timeSec: number,
+  fps = 50,
+): VowelTrackFrame | null {
+  if (!frames.length || !Number.isFinite(timeSec)) return null;
+  const pos = Math.max(0, Math.min(frames.length - 1, timeSec * fps));
+  const lo = Math.floor(pos);
+  const hi = Math.min(frames.length - 1, Math.ceil(pos));
+  const a = frames[lo];
+  const b = frames[hi];
+  if (a && b) {
+    if (lo === hi) return a;
+    const t = pos - lo;
+    const f3 =
+      a.f3 != null && b.f3 != null && Number.isFinite(a.f3) && Number.isFinite(b.f3)
+        ? a.f3 + (b.f3 - a.f3) * t
+        : (t < 0.5 ? a.f3 : b.f3);
+    return {
+      f1: a.f1 + (b.f1 - a.f1) * t,
+      f2: a.f2 + (b.f2 - a.f2) * t,
+      ...(f3 != null ? { f3 } : {}),
+      nasal: t < 0.5 ? a.nasal : b.nasal,
+    };
+  }
+  if (a) return a;
+  if (b) return b;
+  for (let d = 1; d <= 4; d++) {
+    if (lo - d >= 0 && frames[lo - d]) return frames[lo - d];
+    if (hi + d < frames.length && frames[hi + d]) return frames[hi + d];
+  }
+  return null;
+}
+
+export function measureVowelFormantTrack(
+  speaker: string,
+  symbol: string,
+  cacheId: string,
+  rows: readonly (readonly number[])[],
+  signal?: AbortSignal,
+): Promise<VowelTrackMeasurements> {
+  const key = `${speaker}:${symbol}:${cacheId}`;
+  const existing = trackCache.get(key);
+  if (existing) return existing;
+  const req = (async () => {
+    const response = await fetch('/api/models/ipa-references/vowel-track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000),
+      body: JSON.stringify({ speaker, symbol, rows }),
+    });
+    if (!response.ok) throw new Error('动态元音轨迹峰值未完成');
+    const data = (await response.json()) as Partial<VowelTrackMeasurements>;
+    if (data.speaker !== speaker || data.section_count !== 65 || !Array.isArray(data.frames)) {
+      throw new Error('动态元音轨迹与当前解剖模型不匹配');
+    }
+    return {
+      speaker: data.speaker,
+      section_count: data.section_count,
+      fps: typeof data.fps === 'number' && data.fps > 0 ? data.fps : 50,
+      frames: data.frames,
+    };
+  })().catch((err) => {
+    trackCache.delete(key);
+    throw err;
+  });
+  trackCache.set(key, req);
+  if (trackCache.size > 48) {
+    const firstKey = trackCache.keys().next().value;
+    if (firstKey !== undefined) trackCache.delete(firstKey);
+  }
+  return req;
+}

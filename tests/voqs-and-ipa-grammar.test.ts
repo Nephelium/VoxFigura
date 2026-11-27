@@ -176,6 +176,14 @@ describe('IPA multi-syllable, tone sandhi, VoQS braces & English MOP syllabifica
     expect(() => parseVoqsScopedText('[a {F "falsetto F}]')).toThrow('成对的双引号');
   });
 
+  it('marks parser-inserted boundary spaces as syntheticSpace while preserving user whitespace between VoQS scopes', () => {
+    const tight = parseVoqsScopedText('[a{F b F}]');
+    expect(tight.chunks.some((c) => c.syntheticSpace === true)).toBe(true);
+    const spaced = parseVoqsScopedText('[a {F b F} {W c W}]');
+    const midSpace = spaced.chunks.find((c) => c.text === ' ' && !c.syntheticSpace);
+    expect(midSpace).toBeTruthy();
+  });
+
   it('uses scoped register shifts for F and C, plus voiceless W and raised larynx', () => {
     const input = '[a {F a F} {C a C} {L̝ W a W L̝} a]';
     const chunks = parseVoqsScopedText(input).chunks.filter(({ text }) => text.includes('a'));

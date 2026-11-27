@@ -65,7 +65,7 @@ class TestVtlLivePull(unittest.TestCase):
             {
                 "speaker": "JD2",
                 "params": self.neutral_params,
-                "f0_hz": 45.0,
+                "f0_hz": 35.0,
                 "pressure_pa": 800.0,
             }
         )

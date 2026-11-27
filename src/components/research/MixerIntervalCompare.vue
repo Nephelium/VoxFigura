@@ -1251,11 +1251,11 @@ function exportIntervalMetricsCsv() {
 }
 
 .mx-sc-wbar .wb-before {
-  background: rgba(45, 212, 191, 0.36);
+  background: color-mix(in srgb, var(--teal) 42%, transparent);
 }
 
 .mx-sc-wbar .wb-after {
-  background: rgba(251, 136, 96, 0.34);
+  background: color-mix(in srgb, var(--danger) 38%, transparent);
   width: 60%;
 }
 
@@ -1266,7 +1266,7 @@ function exportIntervalMetricsCsv() {
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   border-left: 2px solid var(--accent);
   border-right: 2px solid var(--accent);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 14%, transparent);
   cursor: grab;
 }
 
@@ -1314,13 +1314,13 @@ function exportIntervalMetricsCsv() {
 }
 
 .lg-swatch.solid {
-  background: rgba(45, 212, 191, 0.28);
-  border-bottom: 2px solid var(--vowel-unrounded, #0d9488);
+  background: color-mix(in srgb, var(--teal) 28%, transparent);
+  border-bottom: 2px solid var(--teal);
 }
 
 .lg-swatch.dashed {
-  background: rgba(251, 136, 96, 0.26);
-  border-bottom: 2px dashed var(--vowel-rounded, #e15b38);
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+  border-bottom: 2px dashed var(--danger);
 }
 
 .mx-sc-toggles {
@@ -1423,13 +1423,13 @@ function exportIntervalMetricsCsv() {
 }
 
 .mc-delta.pos {
-  color: var(--vowel-rounded, #e15b38);
-  background: color-mix(in srgb, var(--vowel-rounded, #e15b38) 15%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 
 .mc-delta.neg {
-  color: var(--vowel-unrounded, #0d9488);
-  background: color-mix(in srgb, var(--vowel-unrounded, #0d9488) 15%, transparent);
+  color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 15%, transparent);
 }
 
 .mc-vals {
@@ -1440,7 +1440,7 @@ function exportIntervalMetricsCsv() {
 }
 
 .mc-vals .v-before {
-  color: var(--vowel-unrounded, #0d9488);
+  color: var(--teal);
 }
 
 .mc-vals .v-arrow {
@@ -1448,7 +1448,7 @@ function exportIntervalMetricsCsv() {
 }
 
 .mc-vals .v-after {
-  color: var(--vowel-rounded, #e15b38);
+  color: var(--danger);
   font-weight: 600;
 }
 

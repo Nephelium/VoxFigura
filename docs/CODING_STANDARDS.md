@@ -1,7 +1,7 @@
 # VoxFigura 工程与代码规范（CODING_STANDARDS）
 
-> 文档版本：1.0 · 2026-11-24
-> 配合 [AGENTS.md](../AGENTS.md) 与 [ARCHITECTURE.md](./ARCHITECTURE.md) 共同生效
+> 文档版本：1.1 · 2026-11-26
+> 配合 [AGENTS.md](../AGENTS.md)、[ARCHITECTURE.md](./ARCHITECTURE.md) 与 [02-ui-spec.md](./specs/02-ui-spec.md) 共同生效
 
 ## 1. 模型官方命名铁律
 
@@ -47,6 +47,26 @@
 
 ## 6. 界面与代码质量守则
 
-- **零 UI Emoji 与界面库禁用**：严禁引入 Element Plus / Ant Design Vue / Naive UI；严禁出现任何 UI Emoji 装饰（如 `⏸`），静音统一使用 `'sil'` 或空文本。
+### 6.1 界面实现（以 [AGENTS.md §5](../AGENTS.md) 为准）
+
+- **零 UI Emoji 与界面库禁用**：严禁引入 Element Plus / Ant Design Vue / Naive UI；严禁出现任何 UI Emoji 装饰（如 `⏸`），静音统一使用 `'sil'` 或空文本；乐理记号 `♯` `♭` 属于文本允许使用。
+- **真源与必须复用件**：样式真源顺序为 `src/styles/tokens.css` > `src/styles/base.css` > `src/components/common/` > `docs/specs/02-ui-spec.md`。动手前先检索已有共享实现：
+  - 图标统一使用 `IconSvg`，禁止内联 SVG 路径与图标字体；
+  - 下拉统一使用 `CustomSelect` 或 `.vc-sel` / `.vc-sel-btn` / `.vc-sel-opt`（浮层 `#vcSelectMenu`），禁止新增原生 `<select>`；
+  - 滑杆用 `CompactSlider`，分栏用 `SplitPane`；
+  - 按钮用 `.btn` 及变体 `primary / success / danger / active / icon-only / sm / xs`，禁止新建 `*-btn` 视觉类；
+  - 分段用 `.seg` / `.seg.control-seg`，输入用 `.inp`，面板用 `.panel` + `.p-head` + `.p-body`，数据展示用 `.mini-tbl` / `.metric-chip`，模态用 `.export-modal-mask` + `.export-modal-card`（`var(--overlay)`、`var(--z-modal)`）。
+- **颜色、尺寸与皮肤约束**：
+  - 新增或修改样式中禁止出现 `#hex`、`rgb()`、`rgba()`、`hsl()` 字面量，一律使用 `var(--token)`；透明度使用 `color-mix(in srgb, var(--accent) 20%, transparent)`；
+  - 禁止新增 `var(--x, #fallback)` 硬编码回退色，禁止在组件内重定义 `--text`、`--accent` 等全局 token；
+  - 圆角、阴影、动效、层级分别复用 `--r-*`、`--panel-shadow / --ctrl-shadow / --ctrl-inset`、`--dur-fast / --dur-med / --ease-out-expo`、`--z-*`；
+  - 新界面按 `2560×1600` 桌面基准设计，须在默认（`neumorphism`）、`glass`、`brutal` 三种皮肤及明暗双主题下复核。存量偏离不顺手大改，触及相关文件时只迁移改动区块。
+- **交付前界面自检（PowerShell，仅检查本次改动，新增命中须清零或逐条说明）**：
+  - `git diff -U0 -- src | Select-String '^\+' | Select-String '#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\('`
+  - `git diff -U0 -- src | Select-String '^\+' | Select-String '<select\b|z-index:\s*\d'`
+  - `git diff -U0 -- src | Select-String '^\+' | Select-String 'class="[^"]*-btn\b'`
+
+### 6.2 代码质量与变更验证基线
+
 - **超大文件治理边界**：新编写的 TS/Python 模块单个功能函数保持单一职责、浅层嵌套；对现存 >1000 行的 Vue 单文件组件，新增独立逻辑优先抽入 `.ts` composable 或纯函数工具模块，不继续膨胀单文件。
-- **变更验证基线**：任何实质改动交付前，必须实跑并通过 `npm run typecheck`、`npm test`、Python `unittest` 与双版 `npm run build` / `npm run build:hackathon`。
+- **变更验证基线**：任何实质改动交付前，必须实跑并通过 `npm run typecheck`、`npm test`、Python `unittest`，以及三版完整构建 `npm run build`、`npm run build:hackathon`、`npm run build:friends`（三版均须各自通过 `scripts/check-edition.mjs` 版本隔离检查）。

@@ -17,11 +17,42 @@ export interface QuickIpaCatalog {
   }[] }[] };
 }
 
-const simplePhone = /^[\p{Ll}\p{Lo}]̥?ʰ?$/u;
-const affricate = /^[\p{Ll}\p{Lo}][͜͡]?[\p{Ll}\p{Lo}]̥?ʰ?$/u;
+const simplePhone = /^[\p{Ll}\p{Lo}]̥?ʰ?ʼ?$/u;
+const affricate = /^[\p{Ll}\p{Lo}][͜͡]?[\p{Ll}\p{Lo}]̥?ʰ?ʼ?$/u;
+
+const AFFRICATE_ALIAS_PAIRS: ReadonlyArray<[string, string]> = [
+  ['ȶɕ', 'tɕ'],
+  ['ȡʑ', 'dʑ'],
+  ['ʈʂ', 'tʂ'],
+  ['ɖʐ', 'dʐ'],
+];
 
 export function quickIpaKey(symbol?: string): string {
-  return normalizedPhone(symbol ?? '').replace(/[͜͡]/gu, '').replaceAll('g', 'ɡ');
+  let key = normalizedPhone(symbol ?? '').replace(/[͜͡]/gu, '').replaceAll('g', 'ɡ');
+  for (const [alias, canonical] of AFFRICATE_ALIAS_PAIRS) {
+    if (key.startsWith(alias)) {
+      key = canonical + key.slice(alias.length);
+      break;
+    }
+  }
+  return key;
+}
+
+export function quickIpaAliases(symbol: string): string[] {
+  const base = normalizedPhone(symbol).replace(/[͜͡]/gu, '').replaceAll('g', 'ɡ');
+  const set = new Set<string>([symbol, base]);
+  for (const [alias, canonical] of AFFRICATE_ALIAS_PAIRS) {
+    if (base.startsWith(alias)) {
+      const rest = base.slice(alias.length);
+      set.add(canonical + rest);
+      set.add(`${canonical[0]}͡${canonical[1]}${rest}`);
+    } else if (base.startsWith(canonical)) {
+      const rest = base.slice(canonical.length);
+      set.add(alias + rest);
+      set.add(`${alias[0]}͡${alias[1]}${rest}`);
+    }
+  }
+  return [...set];
 }
 
 export function buildQuickIpaGroups(catalog: QuickIpaCatalog): QuickIpaGroup[] {
@@ -71,7 +102,7 @@ export function buildQuickIpaGroups(catalog: QuickIpaCatalog): QuickIpaGroup[] {
 
 export function findQuickIpaTake(references: IpaReference[], item: QuickIpaItem) {
   const key = quickIpaKey(item.symbol);
-  for (const reference of matchingIpaReferences(references, [item.symbol], false)) {
+  for (const reference of matchingIpaReferences(references, quickIpaAliases(item.symbol), false)) {
     for (let index = 0; index < reference.phones.length; index++) {
       const phone = reference.phones[index];
       if (quickIpaKey(phone.label) !== key || phone.end_s <= phone.start_s) continue;

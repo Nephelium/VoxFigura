@@ -8,7 +8,9 @@ import {
   DEFAULT_PALETTE,
   normalizeMode,
   normalizePalette,
+  paletteDefinition,
   paletteTokens,
+  themeBackdropColors,
   palettes,
   resolveColorMode,
   updateCustomPalette,
@@ -28,7 +30,12 @@ export type BuiltinSkinId =
   | 'bauhaus'
   | 'brutal';
 
-export type BackdropId = 'aurora' | 'spectrum' | 'radar' | 'topo' | 'nebula' | 'plain';
+export type BackdropId =
+  | 'aurora' | 'spectrum' | 'radar' | 'topo' | 'plain'
+  | 'red-canyon' | 'moss-grove' | 'alpine-ice' | 'neon-alley'
+  | 'lunar-crater' | 'glazed-tiles' | 'ringed-world';
+
+export type StyleColorMode = 'current' | 'original';
 
 export interface SkinDefinition {
   id: string;
@@ -45,7 +52,18 @@ export interface BackdropDefinition {
   id: BackdropId;
   label: string;
   desc: string;
+  artwork?: { basename: string; thumbnails?: boolean };
+  treatment?: BackdropTreatment;
 }
+
+export interface BackdropTreatment {
+  blurPx: number;
+  saturationPct: number;
+}
+
+const DEFAULT_BACKDROP_TREATMENT: Readonly<BackdropTreatment> = { blurPx: 0, saturationPct: 128 };
+export const BACKDROP_BLUR_MAX_PX = 24;
+export const BACKDROP_VEIL_MAX_PCT = 90;
 
 export interface StyleOverrides {
   rPanel?: number;
@@ -64,6 +82,7 @@ export interface AppearanceConfig {
   customAccentHex: string;
   themeMode: ThemeMode;
   surfaceStyle: string;
+  styleColorMode?: StyleColorMode;
   backdropId: BackdropId;
   backdropColorScheme: string;
   backdropCustomColors: [string, string, string];
@@ -72,7 +91,10 @@ export interface AppearanceConfig {
   cardAlpha?: number;
   surfaceOpacity?: Record<string, { panel: number; card: number }>;
   anatomy?: AnatomyAppearance;
+  bgBlur?: number | null;
+  bgVeil?: number | null;
   bgSat: number;
+  bgSatAuto?: boolean;
   bgCov: number;
   waveformColorMode: WaveformColorMode;
   waveformCustomHex: string;
@@ -139,13 +161,23 @@ export const BUILTIN_SKINS: SkinDefinition[] = [
 ];
 
 export const BUILTIN_BACKDROPS: BackdropDefinition[] = [
-  { id: 'aurora', label: '折光纸幕', desc: '侧光下的纸张折面' },
-  { id: 'spectrum', label: '潮汐海岸', desc: '从上空俯视浅滩与水纹' },
+  { id: 'aurora', label: '折光纸幕', desc: '侧光下的纸张折面', artwork: { basename: 'fold' } },
+  { id: 'spectrum', label: '潮汐海岸', desc: '从上空俯视浅滩与水纹', artwork: { basename: 'tide' } },
   { id: 'radar', label: '叠色套印', desc: '透明色面交叠的版画底纹' },
-  { id: 'topo', label: '岸边芦影', desc: '水岸边缘的细枝与倒影' },
-  { id: 'nebula', label: '丝绒色带', desc: '同色系织物般的柔和明暗' },
+  { id: 'topo', label: '岸边芦影', desc: '水岸边缘的细枝与倒影', artwork: { basename: 'reed' } },
   { id: 'plain', label: '雾面底色', desc: '轻微染色的哑光表面' },
+  { id: 'red-canyon', label: '赭岩峡谷', desc: '橙红砂岩和斜向峡谷地层', artwork: { basename: 'red-canyon', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'moss-grove', label: '苔林微光', desc: '苔绿针林与林下蕨丛', artwork: { basename: 'moss-grove', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'alpine-ice', label: '霜岭长天', desc: '钴蓝雪峰与开阔冰原', artwork: { basename: 'alpine-ice', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'neon-alley', label: '雨巷霓虹', desc: '玫瑰色旧城和湿地倒影', artwork: { basename: 'neon-alley', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'lunar-crater', label: '月面环山', desc: '银灰月壤与环形撞击坑', artwork: { basename: 'lunar-crater', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'glazed-tiles', label: '金釉拼砖', desc: '姜黄与靛蓝的手工陶片', artwork: { basename: 'glazed-tiles', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
+  { id: 'ringed-world', label: '紫暮星环', desc: '淡紫星尘和行星环', artwork: { basename: 'ringed-world', thumbnails: true }, treatment: { blurPx: 0, saturationPct: 100 } },
 ];
+
+export function isPhotoBackdrop(id: BackdropId): boolean {
+  return Boolean(BUILTIN_BACKDROPS.find((b) => b.id === id)?.artwork?.thumbnails);
+}
 
 const skinMap = new Map<string, SkinDefinition>();
 for (const s of BUILTIN_SKINS) skinMap.set(s.id, s);
@@ -158,6 +190,37 @@ export function listSkins(): SkinDefinition[] {
 
 export function listBackdrops(): BackdropDefinition[] {
   return [...BUILTIN_BACKDROPS];
+}
+
+export function backdropTreatmentDefaults(id: BackdropId | null): Readonly<BackdropTreatment> {
+  return BUILTIN_BACKDROPS.find((backdrop) => backdrop.id === id)?.treatment ?? DEFAULT_BACKDROP_TREATMENT;
+}
+
+export function backdropVeilDefault(
+  id: BackdropId | null,
+  mode: ColorMode,
+  customImage = false,
+): number {
+  if (mode === 'dark') {
+    if (customImage) return 76;
+    if (id && isPhotoBackdrop(id)) return 78;
+    return 46;
+  }
+  if (customImage) return 52;
+  if (id && isPhotoBackdrop(id)) return 62;
+  return 0;
+}
+
+export function backdropArtworkUrl(id: BackdropId, mode: ColorMode, thumbnail = false): string | undefined {
+  const artwork = BUILTIN_BACKDROPS.find((b) => b.id === id)?.artwork;
+  if (!artwork) return undefined;
+  const suffix = thumbnail && artwork.thumbnails ? '-thumb' : '';
+  return `${import.meta.env.BASE_URL}workspace-art/${artwork.basename}-${mode}${suffix}.webp`;
+}
+
+export function backdropSurfaceStyle(id: BackdropId, mode: ColorMode, thumbnail = false): Record<string, string> | undefined {
+  const image = backdropArtworkUrl(id, mode, thumbnail);
+  return image ? { '--material-image': `url("${image}")` } : undefined;
 }
 
 export function getSkin(id: string): SkinDefinition | undefined {
@@ -191,9 +254,8 @@ export function normalizeSkinId(value: unknown): string {
 }
 
 export function normalizeBackdropId(value: unknown): BackdropId {
-  return typeof value === 'string' && BUILTIN_BACKDROPS.some((b) => b.id === value)
-    ? (value as BackdropId)
-    : 'aurora';
+  const lookup = value === 'nebula' ? 'radar' : value;
+  return BUILTIN_BACKDROPS.find((b) => b.id === lookup)?.id ?? 'aurora';
 }
 
 export function defaultAppearance(): AppearanceConfig {
@@ -202,12 +264,16 @@ export function defaultAppearance(): AppearanceConfig {
     customAccentHex: '#0969da',
     themeMode: 'light',
     surfaceStyle: 'neumorphism',
+    styleColorMode: 'current',
     backdropId: 'aurora',
     backdropColorScheme: 'theme',
     backdropCustomColors: ['#0969da', '#1d7f7a', '#6f52a3'],
     glassBlur: 7,
     glassAlpha: 66,
-    bgSat: 128,
+    bgBlur: null,
+    bgVeil: null,
+    bgSat: DEFAULT_BACKDROP_TREATMENT.saturationPct,
+    bgSatAuto: true,
     bgCov: 1.18,
     waveformColorMode: 'theme',
     waveformCustomHex: '#2463eb',
@@ -339,7 +405,7 @@ export function applyAppearanceToRoot(cfg: AppearanceConfig): ColorMode {
   const cov = cfg.overrides.bgCov ?? cfg.bgCov;
 
   root.style.setProperty('--glass-blur', `${Math.max(0, Math.min(22, blur))}px`);
-  root.style.setProperty('--glass-alpha', Math.max(25, Math.min(98, alpha)) + '%');
+  root.style.setProperty('--glass-alpha', Math.max(16, Math.min(98, alpha)) + '%');
   const cardAlpha = Math.max(15, Math.min(100, cfg.cardAlpha ?? 64));
   root.style.setProperty('--card-alpha', cardAlpha + '%');
   root.style.setProperty('--ctrl-bg', 'color-mix(in srgb, var(--panel) var(--card-alpha), transparent)');
@@ -360,14 +426,9 @@ export function applyAppearanceToRoot(cfg: AppearanceConfig): ColorMode {
   }
 
   // Backdrop tri-color channels
-  if (cfg.backdropColorScheme === 'theme') {
-    root.style.setProperty('--bg-c1', 'var(--accent)');
-    root.style.setProperty('--bg-c2', 'var(--teal)');
-    root.style.setProperty('--bg-c3', 'var(--violet)');
-  } else {
-    root.style.setProperty('--bg-c1', cfg.backdropCustomColors[0]);
-    root.style.setProperty('--bg-c2', cfg.backdropCustomColors[1]);
-    root.style.setProperty('--bg-c3', cfg.backdropCustomColors[2]);
+  const backdropColors = cfg.backdropColorScheme === 'theme' ? themeBackdropColors(tokens) : cfg.backdropCustomColors;
+  for (const [index, color] of backdropColors.entries()) {
+    root.style.setProperty(`--bg-c${index + 1}`, color);
   }
 
   // Waveform color
@@ -395,9 +456,9 @@ export function parseStyleUrlParams(): UrlStyleParams {
   const style = sp.get('style');
   if (style && skinMap.has(style)) res.style = style;
   const bg = sp.get('bg');
-  if (bg && BUILTIN_BACKDROPS.some((b) => b.id === bg)) res.bg = bg as BackdropId;
+  if (bg === 'nebula' || BUILTIN_BACKDROPS.some((b) => b.id === bg)) res.bg = normalizeBackdropId(bg);
   const palette = sp.get('palette');
-  if (palette && palettes.some((p) => p.id === palette)) res.palette = palette;
+  if (palette && paletteDefinition(palette)) res.palette = palette;
   const theme = sp.get('theme');
   if (theme === 'light' || theme === 'dark' || theme === 'system') res.theme = theme;
   const blurRaw = sp.get('blur');

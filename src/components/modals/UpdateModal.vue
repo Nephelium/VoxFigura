@@ -63,13 +63,13 @@ async function copyDownloadUrl(): Promise<void> {
     <Transition name="vc-upd-fade">
       <div
         v-if="updateModalOpen"
-        class="vc-upd-backdrop"
+        class="export-modal-mask vc-upd-mask"
         role="dialog"
         aria-modal="true"
         :aria-label="`${APP_BRAND_NAME} 版本检查与更新`"
         @click.self="closeUpdateModal"
       >
-        <section class="panel vc-upd-dialog">
+        <section class="export-modal-card vc-upd-dialog">
           <header class="p-head vc-upd-head">
             <div class="vc-upd-title-row">
               <IconSvg :name="hasUpdate ? 'sparkles' : 'download'" :size="15" />
@@ -207,25 +207,14 @@ async function copyDownloadUrl(): Promise<void> {
 </template>
 
 <style scoped>
-.vc-upd-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 250;
-  background: rgba(8, 12, 22, 0.54);
-  backdrop-filter: blur(4px);
-  display: grid;
-  place-items: center;
-  padding: 20px;
+.vc-upd-mask {
+  background: var(--overlay);
+  z-index: var(--z-modal);
 }
 
 .vc-upd-dialog {
   width: min(520px, calc(100vw - 28px));
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.36);
+  max-height: 86vh;
 }
 
 .vc-upd-head {
@@ -256,8 +245,8 @@ async function copyDownloadUrl(): Promise<void> {
   flex-direction: column;
   gap: 3px;
   padding: 10px 12px;
-  border-radius: var(--r-ctrl, 7px);
-  border: 1px solid var(--panel-border);
+  border-radius: var(--r-ctrl);
+  border: var(--border-w) solid var(--panel-border);
   background: var(--ctrl-bg);
   font-size: 0.85rem;
 }
@@ -281,8 +270,8 @@ async function copyDownloadUrl(): Promise<void> {
   align-items: center;
   gap: 8px;
   padding: 9px 11px;
-  border-radius: var(--r-ctrl, 7px);
-  border: 1px solid var(--panel-border);
+  border-radius: var(--r-ctrl);
+  border: var(--border-w) solid var(--panel-border);
   font-size: 0.9rem;
 }
 
@@ -319,8 +308,8 @@ async function copyDownloadUrl(): Promise<void> {
 
 .vc-upd-notes {
   padding: 10px 12px;
-  border-radius: var(--r-ctrl, 7px);
-  border: 1px solid var(--panel-border);
+  border-radius: var(--r-ctrl);
+  border: var(--border-w) solid var(--panel-border);
   background: color-mix(in srgb, var(--app) 50%, transparent);
 }
 
@@ -352,8 +341,8 @@ async function copyDownloadUrl(): Promise<void> {
   justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
-  border-top: 1px solid var(--panel-border);
-  background: color-mix(in srgb, var(--sidebar, var(--panel)) 55%, transparent);
+  border-top: var(--border-w) solid var(--panel-border);
+  background: color-mix(in srgb, var(--sidebar) 55%, transparent);
 }
 
 .vc-upd-actions {
@@ -365,7 +354,7 @@ async function copyDownloadUrl(): Promise<void> {
 
 .vc-upd-fade-enter-active,
 .vc-upd-fade-leave-active {
-  transition: opacity 180ms ease;
+  transition: opacity var(--dur-fast) var(--ease-out-expo);
 }
 
 .vc-upd-fade-enter-from,

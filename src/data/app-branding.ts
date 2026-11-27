@@ -8,7 +8,7 @@ export const APP_BRAND_NAME = 'VoxFigura';
 export const APP_BRAND_ICON = '/app-icon.png';
 export const APP_BRAND_TAGLINE = '物理声道驱动的语音实验、标注与声乐编曲平台';
 export const APP_WINDOW_TITLE = 'VoxFigura · 语音实验与声乐编曲';
-export const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.1.1';
+export const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.0';
 export const APP_EDITION: 'public' | 'friends' | 'hackathon' =
   typeof __APP_EDITION__ !== 'undefined' ? __APP_EDITION__ : 'public';
 
@@ -92,11 +92,5 @@ export const themedBrandIconUrl = ref<string>(APP_BRAND_ICON);
 export function syncThemedBrandIcon(accentHex: string, colorMode: 'light' | 'dark' = 'light'): string {
   const next = resolveBrandIconUrl(accentHex, colorMode);
   themedBrandIconUrl.value = next;
-  if (typeof document !== 'undefined') {
-    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (link && link.getAttribute('href') !== next) {
-      link.setAttribute('href', next);
-    }
-  }
   return next;
 }

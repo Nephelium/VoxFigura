@@ -133,7 +133,7 @@ export const CARD_MODULES: ReadonlyArray<CardModuleMeta> = [
     shortTitle: '发声调音台',
     category: 'reconstruct-mixer',
     sourcePage: '发声调音台',
-    desc: '发声六档说明及双人器官怔忡混合时间包络曲线',
+    desc: '发声六档说明及双人发声器官混合时间包络曲线',
   },
   {
     id: 'continuum-grid',
@@ -686,22 +686,180 @@ export function assignModuleToLeaf(
   nextModuleId: CardModuleId | null,
 ): CardLayoutNode | null {
   if (!node) return nextModuleId ? leaf(nextModuleId) : null;
-  const rows = extractRowGrid(node);
-  let targetCell: CardGridCellDescriptor | undefined;
-  let existingHolder: CardGridCellDescriptor | undefined;
-  for (const r of rows) {
-    for (const c of r.cells) {
-      if (c.leafId === leafId) targetCell = c;
-      else if (nextModuleId !== null && c.moduleId === nextModuleId) existingHolder = c;
+  let foundTarget = false;
+  let prevTargetMod: CardModuleId | null = null;
+  let existingHolderId: string | null = null;
+
+  const inspect = (cur: CardLayoutNode): void => {
+    if (cur.kind === 'leaf') {
+      if (cur.id === leafId) {
+        foundTarget = true;
+        prevTargetMod = cur.moduleId;
+      } else if (nextModuleId !== null && cur.moduleId === nextModuleId) {
+        existingHolderId = cur.id;
+      }
+      return;
     }
+    for (const ch of cur.children) inspect(ch);
+  };
+  inspect(node);
+  if (!foundTarget) return node;
+
+  const rebuild = (cur: CardLayoutNode): CardLayoutNode => {
+    if (cur.kind === 'leaf') {
+      if (cur.id === leafId) return { ...cur, moduleId: nextModuleId };
+      if (existingHolderId && cur.id === existingHolderId) return { ...cur, moduleId: prevTargetMod };
+      return { ...cur };
+    }
+    return {
+      ...cur,
+      ratios: [...cur.ratios],
+      children: cur.children.map(rebuild),
+    };
+  };
+  return normalizeLayoutTree(rebuild(node));
+}
+
+export interface LeafSplitAncestorInfo {
+  splitId: string;
+  dir: 'row' | 'col';
+  childIndex: number;
+  siblingCount: number;
+  ratio: number;
+}
+
+export interface LeafSplitContext {
+  leafId: string;
+  moduleId: CardModuleId | null;
+  rowSplit: LeafSplitAncestorInfo | null;
+  colSplit: LeafSplitAncestorInfo | null;
+}
+
+export function isNestedLayoutTree(node: CardLayoutNode | null): boolean {
+  if (!node || node.kind === 'leaf') return false;
+  if (node.dir === 'row') {
+    return node.children.some((ch) => ch.kind === 'split');
   }
-  if (!targetCell) return node;
-  const prevMod = targetCell.moduleId;
-  targetCell.moduleId = nextModuleId;
-  if (existingHolder) {
-    existingHolder.moduleId = prevMod;
+  // node.dir === 'col' -> standard 2D row grid only allows row splits of leaves
+  return node.children.some(
+    (rowChild) => rowChild.kind === 'split' && (rowChild.dir !== 'row' || rowChild.children.some((c) => c.kind === 'split')),
+  );
+}
+
+export function hasAnyEmptyLeaf(node: CardLayoutNode | null): boolean {
+  if (!node) return false;
+  if (node.kind === 'leaf') return node.moduleId === null;
+  return node.children.some((ch) => hasAnyEmptyLeaf(ch));
+}
+
+export function findLeafSplitContext(node: CardLayoutNode | null, leafId: string): LeafSplitContext | null {
+  if (!node) return null;
+  const walk = (
+    cur: CardLayoutNode,
+    rowSplit: LeafSplitAncestorInfo | null,
+    colSplit: LeafSplitAncestorInfo | null,
+  ): LeafSplitContext | null => {
+    if (cur.kind === 'leaf') {
+      return cur.id === leafId ? { leafId: cur.id, moduleId: cur.moduleId, rowSplit, colSplit } : null;
+    }
+    const ratios = normalizeRatios(cur.ratios, cur.children.length);
+    for (let i = 0; i < cur.children.length; i++) {
+      const info: LeafSplitAncestorInfo = {
+        splitId: cur.id,
+        dir: cur.dir,
+        childIndex: i,
+        siblingCount: cur.children.length,
+        ratio: ratios[i] ?? 1 / cur.children.length,
+      };
+      const hit = walk(
+        cur.children[i],
+        cur.dir === 'row' ? info : rowSplit,
+        cur.dir === 'col' ? info : colSplit,
+      );
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return walk(node, null, null);
+}
+
+export function setSplitChildRatio(
+  node: CardLayoutNode | null,
+  splitId: string,
+  childIndex: number,
+  desiredRatio01: number,
+): CardLayoutNode | null {
+  if (!node) return null;
+  if (node.kind === 'leaf') return { ...node };
+  if (node.id === splitId) {
+    if (node.children.length < 2 || childIndex < 0 || childIndex >= node.children.length) {
+      return cloneLayoutTree(node);
+    }
+    const norm = normalizeRatios(node.ratios, node.children.length);
+    const nextRatios = adjustSingleShare(norm, childIndex, desiredRatio01);
+    return {
+      ...node,
+      ratios: nextRatios,
+      children: node.children.map((ch) => cloneLayoutTree(ch)!),
+    };
   }
-  return buildTreeFromRowGrid(rows);
+  return {
+    ...node,
+    ratios: [...node.ratios],
+    children: node.children.map((ch) => setSplitChildRatio(ch, splitId, childIndex, desiredRatio01)!),
+  };
+}
+
+export function splitLeafInTree(
+  node: CardLayoutNode | null,
+  leafId: string,
+  dir: 'row' | 'col',
+): { tree: CardLayoutNode | null; newLeafId: string | null } {
+  if (!node) return { tree: null, newLeafId: null };
+  let createdId: string | null = null;
+  const walk = (cur: CardLayoutNode): CardLayoutNode => {
+    if (cur.kind === 'leaf') {
+      if (cur.id !== leafId) return { ...cur };
+      const empty = leaf(null);
+      createdId = empty.id;
+      return split(dir, [{ ...cur }, empty], [0.5, 0.5]);
+    }
+    return {
+      ...cur,
+      ratios: [...cur.ratios],
+      children: cur.children.map(walk),
+    };
+  };
+  const next = normalizeLayoutTree(walk(node));
+  return { tree: next, newLeafId: createdId };
+}
+
+export function removeLeafFromTree(
+  tree: CardLayoutNode | null,
+  leafId: string,
+): CardLayoutNode | null {
+  if (!tree) return null;
+  if (tree.kind === 'leaf') {
+    return tree.id === leafId ? null : cloneLayoutTree(tree);
+  }
+  const keptChildren: CardLayoutNode[] = [];
+  const keptRatios: number[] = [];
+  tree.children.forEach((child, idx) => {
+    const nextChild = removeLeafFromTree(child, leafId);
+    if (nextChild) {
+      keptChildren.push(nextChild);
+      keptRatios.push(tree.ratios[idx] ?? 1);
+    }
+  });
+  if (keptChildren.length === 0) return null;
+  if (keptChildren.length === 1) return normalizeLayoutTree(keptChildren[0]);
+  return normalizeLayoutTree({
+    kind: 'split',
+    id: tree.id,
+    dir: tree.dir,
+    ratios: keptRatios,
+    children: keptChildren,
+  });
 }
 
 /**

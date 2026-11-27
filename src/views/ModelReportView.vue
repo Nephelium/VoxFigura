@@ -6,48 +6,60 @@ import {
   ENGINE_LOADING_ENDPOINTS,
   FULL_CORPUS_INVENTORY,
   FULL_MODEL_ZOO,
+  IPA32_FEATURE_SPECS,
   LOCAL_MODEL_SPECS,
   LOCAL_MODEL_TOTALS,
   M27_PARAMETER_SPECS,
+  MODEL_ARCHITECTURE_LAYERS,
   MODEL_TRAINING_REPORT_META,
   ONNX_SLOT_CONTRACTS,
   RETRAINING_RECIPES,
   SYNTH_180H_MODES,
   TRAINING_CURVES,
-  TRAINING_EXPERIENCE_HIGHLIGHTS,
   buildTrainingReportMarkdown,
   type CorpusRow,
+  type Ipa32FeatureSpec,
 } from '@/data/model-training-report';
 import { useWorkbenchStore } from '@/stores/workbench';
 import IconSvg from '@/components/common/IconSvg.vue';
 import TechChart, { type ChartThemeTokens } from '@/components/charts/TechChart.vue';
+import ModelArchDiagrams from '@/components/model-report/ModelArchDiagrams.vue';
 
 const store = useWorkbenchStore();
 const reportScrollRef = ref<HTMLElement | null>(null);
 const activeSec = ref('repOverview');
 const corpusFilter = ref<'全部' | CorpusRow['category']>('全部');
 const m27Filter = ref<'全部' | '声道 17 维' | '基频与肺压' | '声门 8 维'>('全部');
+const ipa32Filter = ref<'全部' | Ipa32FeatureSpec['group']>('全部');
 const copiedId = ref<string | null>(null);
 
 const NAV_ITEMS = [
-  { id: 'repOverview', icon: 'cpu', label: '1. 模型体系与总览' },
-  { id: 'repSpace', icon: 'sliders', label: '2. 27 维物理空间与时间契约' },
-  { id: 'repDatasets', icon: 'folder-open', label: '3. 全量训练数据集清单' },
-  { id: 'repTraining', icon: 'timeline', label: '4. 训练过程与实测曲线' },
-  { id: 'repBenchmarks', icon: 'reconstruct', label: '5. 双语评测与真人盲测' },
-  { id: 'repLessons', icon: 'warn', label: '6. 十大核心工程复盘' },
-  { id: 'repRetrain', icon: 'book', label: '7. 外部语料二次训练手册' },
-  { id: 'repEngine', icon: 'stage', label: '8. 引擎装载、契约与换模' },
+  { id: 'repOverview', icon: 'cpu', label: '1. 最新 8 模型体系与总览' },
+  { id: 'repSpace', icon: 'sliders', label: '2. 27 维物理与 32 维 IPA 特征' },
+  { id: 'repArch', icon: 'stage', label: '3. 神经网络架构详解' },
+  { id: 'repDatasets', icon: 'folder-open', label: '4. 扩充后训练语料清单' },
+  { id: 'repBenchmarks', icon: 'reconstruct', label: '5. Batch-2 最新评测结果' },
+  { id: 'repEngine', icon: 'book', label: '6. 槽位契约与方言扩展' },
 ] as const;
 
 const CORPUS_CATEGORIES: ReadonlyArray<'全部' | CorpusRow['category']> = [
   '全部',
   '本地物理合成',
   '公开朗读/方言',
+  '授权朗读语料',
   '公开情感/表现',
   '公开干声歌唱',
   '真人传感盲测',
   '派生任务缓存',
+];
+
+const IPA32_GROUPS: ReadonlyArray<'全部' | Ipa32FeatureSpec['group']> = [
+  '全部',
+  '基础类别 (3)',
+  '构音部位 (10)',
+  '构音方式 (8)',
+  '嗓音与元音 (5)',
+  '窄标扩展 (6)',
 ];
 
 const filteredCorpus = computed(() =>
@@ -60,6 +72,12 @@ const filteredM27 = computed(() =>
   m27Filter.value === '全部'
     ? M27_PARAMETER_SPECS
     : M27_PARAMETER_SPECS.filter((p) => p.group === m27Filter.value),
+);
+
+const filteredIpa32 = computed(() =>
+  ipa32Filter.value === '全部'
+    ? IPA32_FEATURE_SPECS
+    : IPA32_FEATURE_SPECS.filter((f) => f.group === ipa32Filter.value),
 );
 
 function scrollToId(id: string): void {
@@ -102,10 +120,10 @@ function downloadReportMd(): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'VoxFigura_Model_Training_Technical_Report.md';
+  a.download = 'VoxFigura_Batch2_Technical_Report.md';
   a.click();
   URL.revokeObjectURL(url);
-  store.pushToast('已导出完整模型训练与技术报告 Markdown', 'success');
+  store.pushToast('已导出最新模型训练与技术报告 Markdown', 'success');
 }
 
 async function copyCode(id: string, text: string): Promise<void> {
@@ -122,7 +140,7 @@ async function copyCode(id: string, text: string): Promise<void> {
 }
 
 /* ============================================================================
- * 9 ECharts Option Builders (100% Real Verified Data)
+ * 7 Focused Batch-2 ECharts Builders (100% Real Verified Data)
  * ============================================================================ */
 
 function baseTooltip(t: ChartThemeTokens) {
@@ -145,17 +163,17 @@ function baseLegend(t: ChartThemeTokens) {
   };
 }
 
-/** Chart 1: 9 Local ONNX Models — Params, Disk Size & CPU Latency */
+/** Chart 1: 8 Local ONNX Models — Params, Disk Size & CPU Latency */
 function buildOnnxBudgetChart(t: ChartThemeTokens): EChartsCoreOption {
   const names = LOCAL_MODEL_SPECS.map((m) => m.name);
   return {
     tooltip: { ...baseTooltip(t), trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: baseLegend(t),
-    grid: { left: 56, right: 60, top: 86, bottom: 72 },
+    grid: { left: 56, right: 60, top: 76, bottom: 68 },
     xAxis: {
       type: 'category',
       data: names,
-      axisLabel: { color: t.muted, fontSize: 10.5, rotate: 20, interval: 0 },
+      axisLabel: { color: t.muted, fontSize: 10.5, rotate: 18, interval: 0 },
       axisLine: { lineStyle: { color: t.border } },
     },
     yAxis: [
@@ -169,7 +187,7 @@ function buildOnnxBudgetChart(t: ChartThemeTokens): EChartsCoreOption {
       },
       {
         type: 'value',
-        name: 'CPU 延迟 (ms)',
+        name: 'ORT CPU (ms)',
         nameGap: 14,
         nameTextStyle: { color: t.muted, fontSize: 11, align: 'right', padding: [0, -18, 0, 0] },
         axisLabel: { color: t.muted, fontSize: 11 },
@@ -180,19 +198,19 @@ function buildOnnxBudgetChart(t: ChartThemeTokens): EChartsCoreOption {
       {
         name: '磁盘体积 (MiB)',
         type: 'bar',
-        barMaxWidth: 18,
+        barMaxWidth: 20,
         itemStyle: { color: t.series[0], borderRadius: [4, 4, 0, 0] },
         data: LOCAL_MODEL_SPECS.map((m) => m.sizeMb),
       },
       {
         name: '参数量 (M)',
         type: 'bar',
-        barMaxWidth: 18,
+        barMaxWidth: 20,
         itemStyle: { color: t.series[1], borderRadius: [4, 4, 0, 0] },
         data: LOCAL_MODEL_SPECS.map((m) => m.paramsM),
       },
       {
-        name: '端到端评测 CPU 均值 (ms)',
+        name: '3s 纯 ONNX CPU 耗时 (ms)',
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
@@ -229,17 +247,8 @@ function buildSynth180hPieChart(t: ChartThemeTokens): EChartsCoreOption {
         radius: ['36%', '60%'],
         center: ['50%', '39%'],
         avoidLabelOverlap: true,
-        itemStyle: {
-          borderRadius: 5,
-          borderColor: t.panel,
-          borderWidth: 2,
-        },
-        label: {
-          show: true,
-          color: t.text,
-          fontSize: 10.5,
-          formatter: '{d}%',
-        },
+        itemStyle: { borderRadius: 5, borderColor: t.panel, borderWidth: 2 },
+        label: { show: true, color: t.text, fontSize: 10.5, formatter: '{d}%' },
         labelLine: { length: 8, length2: 8, lineStyle: { color: t.muted } },
         data: SYNTH_180H_MODES.map((m, i) => ({
           name: m.name,
@@ -251,101 +260,9 @@ function buildSynth180hPieChart(t: ChartThemeTokens): EChartsCoreOption {
   };
 }
 
-/** Chart 3: Vox2Tract-Large Anchored vs Unanchored Ablation Curves */
-function buildInverterAnchorChart(t: ChartThemeTokens): EChartsCoreOption {
-  const anchoredTract = TRAINING_CURVES.inverterAnchoredSteps.map((s, i) => [s, TRAINING_CURVES.inverterAnchoredTract[i]]);
-  const anchoredGlot = TRAINING_CURVES.inverterAnchoredSteps.map((s, i) => [s, TRAINING_CURVES.inverterAnchoredGlottis[i]]);
-  const unanchoredTract = TRAINING_CURVES.inverterUnanchoredSteps.map((s, i) => [s, TRAINING_CURVES.inverterUnanchoredTract[i]]);
-  const unanchoredGlot = TRAINING_CURVES.inverterUnanchoredSteps.map((s, i) => [s, TRAINING_CURVES.inverterUnanchoredGlottis[i]]);
-  return {
-    tooltip: { ...baseTooltip(t), trigger: 'axis' },
-    legend: baseLegend(t),
-    grid: { left: 52, right: 24, top: 82, bottom: 42 },
-    xAxis: {
-      type: 'value',
-      name: '训练步数 (Step)',
-      nameLocation: 'middle',
-      nameGap: 25,
-      min: 0,
-      max: 32000,
-      nameTextStyle: { color: t.muted, fontSize: 11 },
-      axisLabel: { color: t.muted, fontSize: 11, formatter: (v: number) => `${v / 1000}k` },
-      splitLine: { lineStyle: { color: t.gridLine } },
-    },
-    yAxis: {
-      type: 'value',
-      name: '物理 PCC',
-      nameGap: 14,
-      min: 0.35,
-      max: 0.96,
-      nameTextStyle: { color: t.muted, fontSize: 11 },
-      axisLabel: { color: t.muted, fontSize: 11 },
-      splitLine: { lineStyle: { color: t.gridLine } },
-    },
-    series: [
-      {
-        name: '双通锚定 · 声门 8 维',
-        type: 'line',
-        smooth: 0.25,
-        symbolSize: 5,
-        lineStyle: { width: 2.5, color: t.series[1] },
-        itemStyle: { color: t.series[1] },
-        data: anchoredGlot,
-      },
-      {
-        name: '双通锚定 · 声道 17 维',
-        type: 'line',
-        smooth: 0.25,
-        symbolSize: 6,
-        lineStyle: { width: 2.8, color: t.series[0] },
-        itemStyle: { color: t.series[0] },
-        markPoint: {
-          symbolSize: 42,
-          label: { fontSize: 10, color: '#fff' },
-          data: [{ coord: [26500, 0.82], value: '0.820', itemStyle: { color: t.series[0] } }],
-        },
-        markLine: {
-          silent: true,
-          symbol: 'none',
-          lineStyle: { type: 'dashed', color: t.muted },
-          label: {
-            color: t.muted,
-            fontSize: 10.5,
-            position: 'insideStartBottom',
-            distance: 8,
-            formatter: '18k 多风格热重启',
-          },
-          data: [{ xAxis: 18000 }],
-        },
-        data: anchoredTract,
-      },
-      {
-        name: '无锚定消融 · 声门（漂移）',
-        type: 'line',
-        smooth: 0.2,
-        symbol: 'diamond',
-        symbolSize: 6,
-        lineStyle: { width: 2, type: 'dashed', color: t.series[2] },
-        itemStyle: { color: t.series[2] },
-        data: unanchoredGlot,
-      },
-      {
-        name: '无锚定消融 · 声道（坍塌）',
-        type: 'line',
-        smooth: 0.2,
-        symbol: 'diamond',
-        symbolSize: 6,
-        lineStyle: { width: 2.2, type: 'dashed', color: t.series[6] },
-        itemStyle: { color: t.series[6] },
-        data: unanchoredTract,
-      },
-    ],
-  };
-}
-
-/** Chart 4: Vox2Tract-Large 25-Dim Per-Parameter PCC */
-function buildPerDimPccChart(t: ChartThemeTokens): EChartsCoreOption {
-  const rows = [...TRAINING_CURVES.perDimPcc].reverse();
+/** Chart 3: Vox2TractAlign v4 25-Dim Per-Parameter PCC */
+function buildV4PerDimPccChart(t: ChartThemeTokens): EChartsCoreOption {
+  const rows = [...TRAINING_CURVES.v4PerDimPcc].reverse();
   return {
     tooltip: {
       ...baseTooltip(t),
@@ -356,13 +273,13 @@ function buildPerDimPccChart(t: ChartThemeTokens): EChartsCoreOption {
         const item = list[0];
         if (!item) return '';
         const src = rows[item.dataIndex];
-        return `<b>${item.name}</b>（${src.group}）<br/>实测 PCC：<b>${item.value.toFixed(4)}</b>`;
+        return `<b>${item.name}</b>（${src.group}）<br/>未见自然语音 PCC：<b>${item.value.toFixed(4)}</b>`;
       },
     },
-    grid: { left: 54, right: 48, top: 20, bottom: 32 },
+    grid: { left: 54, right: 48, top: 18, bottom: 28 },
     xAxis: {
       type: 'value',
-      min: 0.55,
+      min: 0.7,
       max: 1.0,
       axisLabel: { color: t.muted, fontSize: 11 },
       splitLine: { lineStyle: { color: t.gridLine } },
@@ -398,229 +315,84 @@ function buildPerDimPccChart(t: ChartThemeTokens): EChartsCoreOption {
   };
 }
 
-/** Chart 5: Vocoder Large vs Lite Convergence Curves */
-function buildVocoderCurveChart(t: ChartThemeTokens): EChartsCoreOption {
+/** Chart 4: 50-Sentence Offline Whisper Large-v3-Turbo ASR Gate */
+function buildWhisperAsrChart(t: ChartThemeTokens): EChartsCoreOption {
+  const rows = TRAINING_CURVES.whisperAsrGate;
   return {
-    tooltip: { ...baseTooltip(t), trigger: 'axis' },
+    tooltip: { ...baseTooltip(t), trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: baseLegend(t),
-    grid: { left: 54, right: 54, top: 88, bottom: 42 },
+    grid: { left: 52, right: 54, top: 76, bottom: 68 },
     xAxis: {
-      type: 'value',
-      name: '训练步数 (Step)',
-      nameLocation: 'middle',
-      nameGap: 25,
-      min: 2000,
-      max: 32000,
-      nameTextStyle: { color: t.muted, fontSize: 11 },
-      axisLabel: { color: t.muted, fontSize: 11, formatter: (v: number) => `${v / 1000}k` },
-      splitLine: { lineStyle: { color: t.gridLine } },
+      type: 'category',
+      data: rows.map((r) => r.name),
+      axisLabel: { color: t.muted, fontSize: 10, rotate: 16, interval: 0 },
+      axisLine: { lineStyle: { color: t.border } },
     },
     yAxis: [
       {
         type: 'value',
-        name: 'val_score ↓',
+        name: '字/词错率 (%) ↓',
         nameGap: 14,
-        min: 0,
-        max: 0.36,
+        max: 16,
         nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -24] },
-        axisLabel: { color: t.muted, fontSize: 11 },
+        axisLabel: { color: t.muted, fontSize: 11, formatter: '{value}%' },
         splitLine: { lineStyle: { color: t.gridLine } },
       },
       {
         type: 'value',
         name: 'WavLM L24 ↑',
         nameGap: 14,
-        min: 0.65,
-        max: 0.92,
-        nameTextStyle: { color: t.muted, fontSize: 11, align: 'right', padding: [0, -24, 0, 0] },
+        min: 0.84,
+        max: 0.90,
+        nameTextStyle: { color: t.muted, fontSize: 11, align: 'right', padding: [0, -20, 0, 0] },
         axisLabel: { color: t.muted, fontSize: 11 },
         splitLine: { show: false },
       },
     ],
     series: [
       {
-        name: 'Large · score',
-        type: 'line',
-        smooth: 0.2,
-        symbolSize: 5,
-        lineStyle: { width: 2.5, color: t.series[0] },
-        itemStyle: { color: t.series[0] },
-        markLine: {
-          silent: true,
-          symbol: 'none',
-          lineStyle: { type: 'dashed', color: t.series[0], opacity: 0.7 },
-          label: {
-            color: t.text,
-            fontSize: 10,
-            position: 'insideEndTop',
-            distance: 6,
-            formatter: '28k 低LR精调',
-          },
-          data: [{ xAxis: 28000 }],
-        },
-        data: TRAINING_CURVES.vocoderLargeSteps.map((s, i) => [s, TRAINING_CURVES.vocoderLargeScore[i]]),
+        name: '中英均值错率 (%) ↓',
+        type: 'bar',
+        barMaxWidth: 22,
+        itemStyle: { color: t.series[0], borderRadius: [4, 4, 0, 0] },
+        label: { show: true, position: 'top', distance: 5, color: t.text, fontSize: 10, formatter: '{c}%' },
+        data: rows.map((r) => r.meanErr),
       },
       {
-        name: 'Lite · score',
-        type: 'line',
-        smooth: 0.2,
-        symbolSize: 6,
-        lineStyle: { width: 2.5, color: t.series[2] },
-        itemStyle: { color: t.series[2] },
-        markPoint: {
-          symbolSize: 40,
-          label: { fontSize: 10, color: '#fff' },
-          data: [{ coord: [17000, 0.0626], value: '@17k', itemStyle: { color: t.series[2] } }],
-        },
-        data: TRAINING_CURVES.vocoderLiteSteps.map((s, i) => [s, TRAINING_CURVES.vocoderLiteScore[i]]),
+        name: '中文 CER (%)',
+        type: 'bar',
+        barMaxWidth: 14,
+        itemStyle: { color: t.series[4], opacity: 0.7, borderRadius: [4, 4, 0, 0] },
+        data: rows.map((r) => r.zhCer),
       },
       {
-        name: 'Large · L24',
+        name: '英文 WER (%)',
+        type: 'bar',
+        barMaxWidth: 14,
+        itemStyle: { color: t.series[1], opacity: 0.75, borderRadius: [4, 4, 0, 0] },
+        data: rows.map((r) => r.enWer),
+      },
+      {
+        name: '语义相似度 L24 ↑',
         type: 'line',
         yAxisIndex: 1,
-        smooth: 0.25,
-        symbol: 'none',
-        lineStyle: { width: 2, type: 'dashed', color: t.series[1] },
-        itemStyle: { color: t.series[1] },
-        data: TRAINING_CURVES.vocoderLargeSteps.map((s, i) => [s, TRAINING_CURVES.vocoderLargeL24[i]]),
-      },
-      {
-        name: 'Lite · L24',
-        type: 'line',
-        yAxisIndex: 1,
-        smooth: 0.25,
-        symbol: 'none',
-        lineStyle: { width: 2, type: 'dashed', color: t.series[4] },
-        itemStyle: { color: t.series[4] },
-        data: TRAINING_CURVES.vocoderLiteSteps.map((s, i) => [s, TRAINING_CURVES.vocoderLiteL24[i]]),
-      },
-    ],
-  };
-}
-
-/** Chart 6: IPA2Tract-Lite Human EMA 7-Articulator Radar */
-function buildEmaRadarChart(t: ChartThemeTokens): EChartsCoreOption {
-  return {
-    tooltip: { ...baseTooltip(t), trigger: 'item' },
-    radar: {
-      radius: '55%',
-      center: ['50%', '53%'],
-      splitNumber: 4,
-      axisNameGap: 8,
-      axisName: { color: t.text, fontSize: 11, fontWeight: 600 },
-      splitLine: { lineStyle: { color: t.gridLine } },
-      splitArea: { areaStyle: { color: ['transparent', t.isDark ? 'rgba(148,163,184,0.04)' : 'rgba(15,23,42,0.03)'] } },
-      axisLine: { lineStyle: { color: t.border } },
-      indicator: TRAINING_CURVES.emaRadar.map((r) => ({ name: r.axis, max: 0.8 })),
-    },
-    series: [
-      {
-        name: 'USC-TIMIT 真人 EMA 盲测 PCC',
-        type: 'radar',
-        symbol: 'circle',
-        symbolSize: 6,
-        lineStyle: { width: 2.6, color: t.series[0] },
-        itemStyle: { color: t.series[0] },
-        areaStyle: { color: t.series[0], opacity: 0.22 },
-        data: [
-          {
-            value: TRAINING_CURVES.emaRadar.map((r) => r.pcc),
-            name: 'IPA2Tract-Lite (20 份未见真人测试文件)',
-          },
-        ],
-      },
-    ],
-  };
-}
-
-/** Chart 7A: Vox2Align-Lite v2 20k Training Curve */
-function buildAlignV2Chart(t: ChartThemeTokens): EChartsCoreOption {
-  return {
-    tooltip: { ...baseTooltip(t), trigger: 'axis', valueFormatter: (v: unknown) => `${Number(v).toFixed(2)}%` },
-    legend: { ...baseLegend(t), itemGap: 10 },
-    grid: { left: 50, right: 20, top: 90, bottom: 36 },
-    xAxis: {
-      type: 'category',
-      data: TRAINING_CURVES.alignV2Steps.map((s) => `${s / 1000}k`),
-      axisLabel: { color: t.muted, fontSize: 11 },
-      axisLine: { lineStyle: { color: t.border } },
-    },
-    yAxis: {
-      type: 'value',
-      name: '准确率 / 命中率',
-      nameGap: 12,
-      min: 74,
-      max: 100,
-      nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -24] },
-      axisLabel: { color: t.muted, fontSize: 11, formatter: '{value}%' },
-      splitLine: { lineStyle: { color: t.gridLine } },
-    },
-    series: [
-      {
-        name: '静音 Mask F1',
-        type: 'line',
         smooth: true,
-        symbolSize: 5,
-        lineStyle: { width: 2.4, color: t.series[1] },
-        itemStyle: { color: t.series[1] },
-        data: [...TRAINING_CURVES.alignV2MaskF1],
-      },
-      {
-        name: '英语 ≤20ms',
-        type: 'line',
-        smooth: true,
-        symbolSize: 5,
-        lineStyle: { width: 2.3, color: t.series[0] },
-        itemStyle: { color: t.series[0] },
-        data: [...TRAINING_CURVES.alignV2EnBnd20],
-      },
-      {
-        name: '中文 ≤20ms',
-        type: 'line',
-        smooth: true,
-        symbolSize: 5,
-        lineStyle: { width: 2.3, color: t.series[5] },
-        itemStyle: { color: t.series[5] },
-        data: [...TRAINING_CURVES.alignV2ZhBnd20],
-      },
-      {
-        name: '中文音节准',
-        type: 'line',
-        smooth: true,
-        symbolSize: 5,
+        symbolSize: 7,
         lineStyle: { width: 2.3, color: t.series[2] },
         itemStyle: { color: t.series[2] },
-        data: [...TRAINING_CURVES.alignV2ZhSyl],
-      },
-      {
-        name: '中文帧准',
-        type: 'line',
-        smooth: true,
-        symbolSize: 4,
-        lineStyle: { width: 1.8, type: 'dashed', color: t.series[4] },
-        itemStyle: { color: t.series[4] },
-        data: [...TRAINING_CURVES.alignV2ZhFrame],
-      },
-      {
-        name: '英语帧准',
-        type: 'line',
-        smooth: true,
-        symbolSize: 4,
-        lineStyle: { width: 1.8, type: 'dashed', color: t.series[3] },
-        itemStyle: { color: t.series[3] },
-        data: [...TRAINING_CURVES.alignV2EnFrame],
+        data: rows.map((r) => r.l24),
       },
     ],
   };
 }
 
-/** Chart 7B: Text2Prosody-Lite 4-Domain Metrics */
-function buildProsodyDomainChart(t: ChartThemeTokens): EChartsCoreOption {
-  const rows = TRAINING_CURVES.prosodyDomains;
+/** Chart 5: Text2Prosody-Lite v4 (32D) 5-Domain Metrics */
+function buildProsodyV4Chart(t: ChartThemeTokens): EChartsCoreOption {
+  const rows = TRAINING_CURVES.prosodyV4Domains;
   return {
     tooltip: { ...baseTooltip(t), trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: baseLegend(t),
-    grid: { left: 52, right: 52, top: 84, bottom: 52 },
+    grid: { left: 52, right: 52, top: 76, bottom: 52 },
     xAxis: {
       type: 'category',
       data: rows.map((r) => r.domain.replace(' (', '\n(')),
@@ -632,7 +404,7 @@ function buildProsodyDomainChart(t: ChartThemeTokens): EChartsCoreOption {
         type: 'value',
         name: '时长 MAE (ms)',
         nameGap: 14,
-        max: 48,
+        max: 52,
         nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -24] },
         axisLabel: { color: t.muted, fontSize: 11 },
         splitLine: { lineStyle: { color: t.gridLine } },
@@ -652,9 +424,9 @@ function buildProsodyDomainChart(t: ChartThemeTokens): EChartsCoreOption {
       {
         name: '音素时长 MAE (ms)',
         type: 'bar',
-        barMaxWidth: 28,
+        barMaxWidth: 26,
         itemStyle: { color: t.series[0], borderRadius: [5, 5, 0, 0] },
-        label: { show: true, position: 'top', distance: 6, color: t.muted, fontSize: 10.5, formatter: '{c} ms' },
+        label: { show: true, position: 'top', distance: 5, color: t.muted, fontSize: 10, formatter: '{c} ms' },
         data: rows.map((r) => r.durMaeMs),
       },
       {
@@ -671,59 +443,94 @@ function buildProsodyDomainChart(t: ChartThemeTokens): EChartsCoreOption {
   };
 }
 
-/** Chart 8: 8-Clip End-to-End Audition Benchmark */
-function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
-  const rows = TRAINING_CURVES.audition8Clips;
+/** Chart 6: IPA2Tract-Lite v4 (32D) Human EMA 7-Articulator Radar */
+function buildEmaRadarChart(t: ChartThemeTokens): EChartsCoreOption {
+  return {
+    tooltip: { ...baseTooltip(t), trigger: 'item' },
+    radar: {
+      radius: '56%',
+      center: ['50%', '53%'],
+      splitNumber: 4,
+      axisNameGap: 8,
+      axisName: { color: t.text, fontSize: 11, fontWeight: 600 },
+      splitLine: { lineStyle: { color: t.gridLine } },
+      splitArea: { areaStyle: { color: ['transparent', t.isDark ? 'rgba(148,163,184,0.04)' : 'rgba(15,23,42,0.03)'] } },
+      axisLine: { lineStyle: { color: t.border } },
+      indicator: TRAINING_CURVES.emaRadarV4.map((r) => ({ name: r.axis, max: 0.8 })),
+    },
+    series: [
+      {
+        name: 'USC-TIMIT 真人 EMA 盲测 PCC',
+        type: 'radar',
+        symbol: 'circle',
+        symbolSize: 6,
+        lineStyle: { width: 2.6, color: t.series[0] },
+        itemStyle: { color: t.series[0] },
+        areaStyle: { color: t.series[0], opacity: 0.22 },
+        data: [
+          {
+            value: TRAINING_CURVES.emaRadarV4.map((r) => r.pcc),
+            name: 'IPA2Tract-Lite v4 32D（20 份未见真人文件）',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Chart 7: Vox2Spk-v2.1 Speaker Fidelity & Discrimination Comparison */
+function buildVox2SpkChart(t: ChartThemeTokens): EChartsCoreOption {
+  const rows = TRAINING_CURVES.vox2spkCompare;
   return {
     tooltip: { ...baseTooltip(t), trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { ...baseLegend(t), itemGap: 12 },
-    grid: { left: 50, right: 20, top: 88, bottom: 48 },
+    legend: baseLegend(t),
+    grid: { left: 52, right: 24, top: 76, bottom: 48 },
     xAxis: {
       type: 'category',
-      data: rows.map((r) => r.label),
-      axisLabel: { color: t.muted, fontSize: 10.5, interval: 0, rotate: 16 },
+      data: rows.map((r) => r.name),
+      axisLabel: { color: t.muted, fontSize: 10.5, interval: 0 },
       axisLine: { lineStyle: { color: t.border } },
     },
     yAxis: {
       type: 'value',
-      name: '余弦相似度',
+      name: '余弦 / 区分度',
       nameGap: 14,
-      min: 0.65,
-      max: 0.98,
-      nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -22] },
+      min: 0.2,
+      max: 1.02,
+      nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -24] },
       axisLabel: { color: t.muted, fontSize: 11 },
       splitLine: { lineStyle: { color: t.gridLine } },
     },
     series: [
       {
-        name: '教师 Large (L24)',
+        name: '常规人声 Teacher Cos',
         type: 'bar',
-        barMaxWidth: 14,
+        barMaxWidth: 20,
         itemStyle: { color: t.series[0], borderRadius: [4, 4, 0, 0] },
-        data: rows.map((r) => r.teacherL24),
+        data: rows.map((r) => r.spCos),
       },
       {
-        name: '紧凑 Lite (L24)',
+        name: '165 Hz 实时换声 Self Cos',
         type: 'bar',
-        barMaxWidth: 14,
+        barMaxWidth: 20,
         itemStyle: { color: t.series[1], borderRadius: [4, 4, 0, 0] },
-        data: rows.map((r) => r.liteL24),
+        data: rows.map((r) => r.tts165Cos),
       },
       {
-        name: '端侧闭环 E2E (L24)',
+        name: '女声歌唱类间 Gap',
         type: 'bar',
-        barMaxWidth: 14,
-        itemStyle: { color: t.series[4], borderRadius: [4, 4, 0, 0] },
-        data: rows.map((r) => r.e2eL24),
+        barMaxWidth: 20,
+        itemStyle: { color: t.series[2], borderRadius: [4, 4, 0, 0] },
+        data: rows.map((r) => r.femGap),
       },
       {
-        name: '端侧声纹 (Spk Cos)',
+        name: '女声歌唱 Top-1',
         type: 'line',
         smooth: true,
-        symbolSize: 7,
-        lineStyle: { width: 2.4, color: t.series[2] },
-        itemStyle: { color: t.series[2] },
-        data: rows.map((r) => r.e2eSpk),
+        symbolSize: 8,
+        lineStyle: { width: 2.4, color: t.series[4] },
+        itemStyle: { color: t.series[4] },
+        data: rows.map((r) => r.femTop1),
       },
     ],
   };
@@ -781,7 +588,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
     <!-- Main Report Body -->
     <section ref="reportScrollRef" class="set-content" @scroll="onReportScroll">
       <div class="set-full-pane rep-pane">
-        <!-- Hero Overview Card -->
+        <!-- Chapter 1: Overview & 8-Model Matrix -->
         <div id="repOverview" class="panel">
           <div class="p-head">
             <span>{{ APP_BRAND_NAME }} · 模型训练与技术报告</span>
@@ -789,127 +596,128 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
           </div>
           <div class="p-body rep-body">
             <div class="editorial-card rep-hero-card selectable">
-              <strong style="font-size: 1.08rem">{{ MODEL_TRAINING_REPORT_META.suiteName }}</strong>
-              <p class="muted rep-p">
-                {{ MODEL_TRAINING_REPORT_META.updatedNote }}
-              </p>
+              <strong style="font-size: 1.06rem">{{ MODEL_TRAINING_REPORT_META.suiteName }}</strong>
+              <p class="muted rep-p">{{ MODEL_TRAINING_REPORT_META.updatedNote }}</p>
               <div class="rep-kpi-grid">
                 <div class="rep-kpi-box">
-                  <span class="muted">本地纯 ONNX 矩阵</span>
+                  <span class="muted">默认端侧纯 ONNX 矩阵</span>
                   <strong class="mono">{{ LOCAL_MODEL_TOTALS.count }} 模 · {{ LOCAL_MODEL_TOTALS.totalSizeText }}</strong>
-                  <span class="muted">{{ LOCAL_MODEL_TOTALS.totalParamsText }} 参数 · 零 PyTorch 依赖</span>
+                  <span class="muted">{{ LOCAL_MODEL_TOTALS.totalParamsText }} 参数 · 零 PyTorch 运行时</span>
                 </div>
                 <div class="rep-kpi-box">
-                  <span class="muted">物理可控合成语料</span>
-                  <strong class="mono">270.05 小时</strong>
-                  <span class="muted">180h 全发声态 27 维 + 90h 早期 22 维升格</span>
+                  <span class="muted">扩充后总语料规模</span>
+                  <strong class="mono">450+ 小时 / 18 项数据源</strong>
+                  <span class="muted">物理合成 + 多语朗读 + 情感配音 + 戏曲歌唱</span>
                 </div>
                 <div class="rep-kpi-box">
-                  <span class="muted">自然与表现性训练语料</span>
-                  <strong class="mono">168k+ 句 / 495 人</strong>
-                  <span class="muted">AISHELL-3 / LibriSpeech / ESD / Expresso / 歌唱</span>
+                  <span class="muted">50 句双语 Whisper 门禁</span>
+                  <strong class="mono">7.18% 均值错率 (Lite v3)</strong>
+                  <span class="muted">Large v2 7.31% · 较旧 Lite v1 降 2.40%</span>
                 </div>
                 <div class="rep-kpi-box">
-                  <span class="muted">训练硬件与基准几何</span>
-                  <strong class="mono">RTX 5090 24G · JD2</strong>
-                  <span class="muted">65 截面声道 · 50 Hz 控制 · 48 kHz 输出</span>
+                  <span class="muted">物理空间与 IPA 编码</span>
+                  <strong class="mono">27D 物理 · 32D 窄标 IPA</strong>
+                  <span class="muted">20–1200 Hz 宽音域 · 293 键构型库</span>
                 </div>
               </div>
             </div>
 
-            <!-- System Evolution Vector Pipeline SVG -->
+            <!-- Batch-2 Dual-Path Topology SVG -->
             <div class="rep-svg-box">
               <div class="param-sec-title">
-                <span>系统四代演进与旗舰向端侧 ONNX 蒸馏拓扑</span>
-                <span class="mono muted">Vector Architecture Diagram</span>
+                <span>Batch-2 双链路协同拓扑（8 项纯 ONNX 矩阵）</span>
+                <span class="mono muted">50 Hz 27D Physical Bridge</span>
               </div>
-              <svg class="rep-flow-svg" viewBox="0 0 980 218" role="img" aria-label="模型家族演进与蒸馏拓扑图">
+              <svg class="rep-flow-svg" viewBox="0 0 980 210" role="img" aria-label="Batch-2 8模型双链路拓扑图">
                 <defs>
                   <marker id="repArr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                     <path d="M 0 1.5 L 8.5 5 L 0 8.5 z" fill="currentColor" />
                   </marker>
                 </defs>
-                <!-- Column 1: Data Sources -->
-                <rect x="12" y="16" width="196" height="58" rx="8" class="svg-node accent" />
-                <text x="110" y="39" class="svg-title">VTL JD2 物理合成引擎</text>
-                <text x="110" y="59" class="svg-sub">180h 全发声态 + 90h 早期基线</text>
+                <!-- Left: Inputs -->
+                <rect x="12" y="16" width="192" height="72" rx="8" class="svg-node" />
+                <text x="108" y="42" class="svg-title">链路 A · 录音与声纹输入</text>
+                <text x="108" y="61" class="svg-sub">DPDFNet (48k 降噪)</text>
+                <text x="108" y="77" class="svg-sub">SwiftF0 (47–2094 Hz)</text>
 
-                <rect x="12" y="92" width="196" height="58" rx="8" class="svg-node" />
-                <text x="110" y="115" class="svg-title">多语种自然与表现性语料</text>
-                <text x="110" y="135" class="svg-sub">朗读 · 情感 · 干声歌唱 · TIMIT</text>
+                <rect x="12" y="114" width="192" height="78" rx="8" class="svg-node" />
+                <text x="108" y="140" class="svg-title">链路 B · 文本与窄标 IPA</text>
+                <text x="108" y="159" class="svg-sub">普通话 / 英语 / 日语 / [IPA]</text>
+                <text x="108" y="176" class="svg-sub">32 维发音特征 + 293 键构型</text>
 
-                <rect x="12" y="164" width="196" height="42" rx="8" class="svg-node subtle" />
-                <text x="110" y="189" class="svg-sub">USC-TIMIT 真人 EMA (276 条盲测)</text>
+                <!-- Mid-Left: Encoders / Planners -->
+                <rect x="252" y="12" width="222" height="44" rx="8" class="svg-node primary" />
+                <text x="363" y="31" class="svg-title">Vox2TractAlign v4 (9.40M)</text>
+                <text x="363" y="47" class="svg-sub">单次前向：27D 轨迹 + 7 路中英对齐</text>
 
-                <!-- Column 2: Flagship Teachers -->
-                <rect x="264" y="16" width="214" height="72" rx="8" class="svg-node" />
-                <text x="371" y="39" class="svg-title">旗舰教师链 (RTX 5090)</text>
-                <text x="371" y="57" class="svg-sub">Vox2Tract-PR + Tract2Feat-Proxy</text>
-                <text x="371" y="74" class="svg-sub">Vox2Tract-Large (22.62M) 双通锚定</text>
+                <rect x="252" y="64" width="222" height="36" rx="8" class="svg-node accent" />
+                <text x="363" y="81" class="svg-title">Vox2Spk-v2.1 (4.60M)</text>
+                <text x="363" y="95" class="svg-sub">512D 高区分度声纹嵌入</text>
 
-                <rect x="264" y="106" width="214" height="54" rx="8" class="svg-node" />
-                <text x="371" y="129" class="svg-title">Tract2Vox-Large (14.36M)</text>
-                <text x="371" y="148" class="svg-sub">Glottis-NSF v3 + 512 维声纹 FiLM</text>
+                <rect x="252" y="114" width="222" height="36" rx="8" class="svg-node" />
+                <text x="363" y="131" class="svg-title">Text2Prosody-Lite v4 (1.98M)</text>
+                <text x="363" y="145" class="svg-sub">32D 时长 / 停顿 / 3 点半音 F0</text>
 
-                <!-- Column 3: Shared Cache -->
-                <rect x="530" y="16" width="178" height="144" rx="8" class="svg-node accent" />
-                <text x="619" y="54" class="svg-title">共享蒸馏与任务缓存</text>
-                <text x="619" y="76" class="svg-sub">60k 蒸馏 (7.48 GB RAM)</text>
-                <text x="619" y="96" class="svg-sub">91k 关键帧协同动腔</text>
-                <text x="619" y="116" class="svg-sub">70k 双语对齐 · 52k 韵律</text>
-                <text x="619" y="136" class="svg-sub">300k 管面积采样真值</text>
+                <rect x="252" y="158" width="222" height="38" rx="8" class="svg-node accent" />
+                <text x="363" y="175" class="svg-title">IPA2Tract-Lite v4 (4.23M)</text>
+                <text x="363" y="190" class="svg-sub">qTA 基线 + 零初残差 + Area-Proxy</text>
 
-                <!-- Column 4: Complete 9 Local ONNX Runtime Matrix -->
-                <rect x="752" y="10" width="218" height="198" rx="10" class="svg-node primary" />
-                <text x="861" y="31" class="svg-title">端侧纯 ONNX 9 模矩阵</text>
-                <text x="861" y="50" class="svg-sub">Vox2Tract-Lite (7.64M)</text>
-                <text x="861" y="66" class="svg-sub">Vox2Align-Lite v2 (4.33M)</text>
-                <text x="861" y="82" class="svg-sub">IPA2Tract-Lite (4.23M)</text>
-                <text x="861" y="98" class="svg-sub">Tract2Vox-Lite (3.72M)</text>
-                <text x="861" y="114" class="svg-sub">Vox2Spk-Lite (2.90M)</text>
-                <text x="861" y="130" class="svg-sub">Text2Prosody-Lite (1.98M)</text>
-                <text x="861" y="146" class="svg-sub">Tract2Area-Proxy (0.23M)</text>
-                <text x="861" y="162" class="svg-sub">DPDFNet (2.58M) · SwiftF0 (0.03M)</text>
-                <text x="861" y="190" class="svg-sub">{{ LOCAL_MODEL_TOTALS.totalParamsText }} · {{ LOCAL_MODEL_TOTALS.totalSizeText }} · 热插拔</text>
+                <!-- Center: Physical 27D Bridge -->
+                <rect x="524" y="44" width="176" height="118" rx="10" class="svg-node primary" />
+                <text x="612" y="74" class="svg-title">27D 物理控制桥梁</text>
+                <text x="612" y="95" class="svg-sub">17 维声道 + 宽域 F0</text>
+                <text x="612" y="113" class="svg-sub">1 维肺压 + 8 维声门</text>
+                <text x="612" y="135" class="svg-sub">3D 声道编辑 / VoQS 曲线</text>
+                <text x="612" y="151" class="svg-sub">实时器官移植与连续统</text>
+
+                <!-- Right: Renderers -->
+                <rect x="748" y="24" width="220" height="72" rx="8" class="svg-node primary" />
+                <text x="858" y="48" class="svg-title">Tract2Vox-Large v2.1 (14.4M)</text>
+                <text x="858" y="66" class="svg-sub">Glottis-NSF v4 神经声码器</text>
+                <text x="858" y="83" class="svg-sub">可选极速档：Lite v3 (3.73M)</text>
+
+                <rect x="748" y="116" width="220" height="62" rx="8" class="svg-node subtle" />
+                <text x="858" y="142" class="svg-title">VocalTractLab 2.4 原生求解</text>
+                <text x="858" y="161" class="svg-sub">65 截面 200 Hz → 48 kHz 物理发声</text>
 
                 <!-- Arrows -->
-                <path d="M 208 45 L 260 45" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 208 118 L 236 118 L 236 64 L 260 64" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 208 130 L 260 130" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 478 46 L 526 46" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 478 132 L 504 132 L 504 82 L 526 82" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 708 86 L 748 86" class="svg-arrow" marker-end="url(#repArr)" />
-                <path d="M 208 185 L 748 185" class="svg-arrow dashed" marker-end="url(#repArr)" />
+                <path d="M 204 40 L 248 34" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 204 64 L 248 80" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 204 140 L 248 132" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 204 168 L 248 175" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 474 34 L 520 76" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 474 176 L 520 130" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 474 82 L 502 82 L 502 18 L 726 18 L 726 48 L 744 48" class="svg-arrow dashed" marker-end="url(#repArr)" />
+                <path d="M 700 84 L 744 64" class="svg-arrow" marker-end="url(#repArr)" />
+                <path d="M 700 124 L 744 144" class="svg-arrow dashed" marker-end="url(#repArr)" />
               </svg>
             </div>
 
-            <!-- Chart 1: Local 9 ONNX Budget -->
             <TechChart
-              title="图 1 · 本地 9 项纯 ONNX 模型体积、参数量与 CPU 端到端评测耗时"
-              subtitle="零 PyTorch 运行时依赖，合计 58.96 MiB；折线展示含特征与后处理的端到端评测均值"
-              badge="9 ONNX · 58.96 MiB"
-              :height="325"
+              title="图 1 · 默认 8 项纯 ONNX 模型体积、参数量与 CPU 前向耗时"
+              subtitle="Vox2TractAlign v4 合并原独立对齐模型，合计 37.44 M / 77.61 MiB（可按需换用 3.73 M Lite v3 极速声码器）"
+              badge="8 ONNX · 77.61 MiB"
+              :height="305"
               :option-builder="buildOnnxBudgetChart"
-              :caption="`文件体积核实自 engine/model_bundle/**/*.onnx；${MODEL_TRAINING_REPORT_META.cpuBenchmarkProtocol}`"
+              :caption="MODEL_TRAINING_REPORT_META.cpuBenchmarkProtocol"
             />
 
-            <!-- Full Model Zoo Table -->
             <div class="rep-table-card selectable">
               <div class="param-sec-title">
-                <span>关联模型总表（Model Zoo · 14 项）</span>
-                <span class="mono muted">旗舰教师 + 端侧 ONNX + 历史归档</span>
+                <span>Batch-2 最新模型总表（8 项核心 + 2 项可选扩展）</span>
+                <span class="mono muted">Pure ONNX Runtime</span>
               </div>
               <div class="rep-table-scroll">
                 <table class="mini-tbl rep-tbl">
                   <thead>
                     <tr>
-                      <th>官方模型名</th>
-                      <th>层级</th>
+                      <th>模型名</th>
+                      <th>定位</th>
                       <th>核心网络结构</th>
                       <th>参数量</th>
                       <th>导出体积</th>
-                      <th>训练步数与状态</th>
-                      <th>核心实测指标</th>
+                      <th>训练周期</th>
+                      <th>最新实测指标</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -929,35 +737,36 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
           </div>
         </div>
 
-        <!-- Chapter 2: Physical Control Space & Grid Contract -->
+        <!-- Chapter 2: 27D Physical Space & 32D IPA Feature System -->
         <div id="repSpace" class="panel">
           <div class="p-head">
-            <span>2. 27 维声道—声门物理控制空间与严格时间网格对齐</span>
-            <span class="tree-tag mono">50 Hz ↔ 200 Hz ↔ 48 kHz</span>
+            <span>2. 27 维物理控制空间与 32 维国际音标发音特征</span>
+            <span class="tree-tag mono">27D Physical · 32D IPA</span>
           </div>
           <div class="p-body rep-body">
             <div class="settings-grid-2 selectable">
               <div class="editorial-card rep-card">
-                <strong>三频同步无半帧漂移时间契约</strong>
+                <strong>三频同步锁相与宽域基频契约</strong>
                 <ul class="rep-ul">
-                  <li><strong>分析侧（16 kHz / 50 Hz）</strong>：帧移严格锁定 <code class="mono">320</code> 样点（20 ms），单条有效音频截断为 <code class="mono">T × 320</code> 样点。</li>
-                  <li><strong>前端中心对称锁相</strong>：<code class="mono">PureLogMel50Hz</code> 采用 <code class="mono">n_fft=1024, win=640, hop=320, center=False</code> 并手动左右各反射填充 <code class="mono">352</code> 样点，使每帧中心精确落在 <code class="mono">(k+0.5)×320</code>，与 WavLM 25 层感受野 1:1 锁相。</li>
-                  <li><strong>物理管段与输出（200 Hz → 48 kHz）</strong>：50 Hz 轨按帧心升频至 200 Hz（每 5 ms 步进 240 样点）驱动 VTL 2.4 生成 48 kHz 波形；时间坐标全仓使用 48 kHz 整数采样与半开区间 <code class="mono">[start_smp, end_smp)</code>。</li>
+                  <li><strong>50 Hz 神经分析（16 kHz / hop 320）</strong>：前端 80-Mel 对称填充 352 样点，与 WavLM 帧心 1:1 对齐，零半帧漂移。</li>
+                  <li><strong>200 Hz 物理求解 → 48 kHz 输出</strong>：时间轴全仓使用 48 kHz 整数采样与半开区间；气压 UI 统一 <code class="mono">0–1600 Pa</code>，引擎边界换算 <code class="mono">dPa</code>。</li>
+                  <li><strong>宽域 F0 对数外延</strong>：保留 <code class="mono">[40, 600] Hz</code> 锚点不变，平滑外延至 <code class="mono">20–1200 Hz</code> 覆盖深嘎裂与超高音花腔。</li>
                 </ul>
               </div>
               <div class="editorial-card rep-card">
-                <strong>27 维声道—声门参数与 IPA2Tract-Lite 111 维条件张量</strong>
+                <strong>32 维窄标 IPA 特征与 121 维动腔条件</strong>
                 <ul class="rep-ul">
-                  <li><strong>JD2 19→17 维独立声道</strong>：剔除引擎自动求解的舌根坐标 <code class="mono">TRX/TRY</code>，保留 17 维独立构音参数 + 1 维对数基频 <code class="mono">F0</code> + 1 维肺压 <code class="mono">PR</code> + 8 维全声门发声态参数。</li>
-                  <li><strong>安全单位边界</strong>：前端与适配器层气压统一暴露 <code class="mono">0–1600 Pa</code>，仅在 Python 原生引擎边界换算为 <code class="mono">0–16000 dPa</code>，越界一律报错拒绝。</li>
-                  <li><strong>111 维协同构音输入</strong>：<code class="mono">x_base(26) + g_masked(26) + w_mask(26) + f0(1) + 相位(5) + 阻塞事件(4) + 通用音标调音特征(22) + has_phon(1)</code>，未约束通道严格置零保证零上下文泄漏。</li>
+                  <li><strong>32 维特征（PHON_FEAT_NAMES_32）</strong>：在原 22 维基础类别、部位、方式与元音坐标上新增 10 维窄标分辨维度（齿音、有咝擦音、小舌、咽音、成音节、唯闭、音段气声/嘎裂及声门/软腭气流机制）。</li>
+                  <li><strong>IPA2Tract-Lite v4 121 维输入</strong>：<code class="mono">x_base(26) + g_masked(26) + w_mask(26) + f0(1) + 相位(5) + 阻塞(4) + IPA特征(32) + has_phon(1)</code>，配套 293 键窄标构型库。</li>
+                  <li><strong>Text2Prosody-Lite v4 直通</strong>：以 32 维特征 + <code class="mono">LANG_IPA=3</code> 直接为任意无标调国际音标串预测自然语调与停顿。</li>
                 </ul>
               </div>
             </div>
 
+            <!-- 27D Physical Parameter Table -->
             <div class="rep-table-card selectable">
               <div class="rep-filter-bar">
-                <strong>27 维声道—声门完整参数边界与生理意义表</strong>
+                <strong>27 维声道—声门物理控制参数表（{{ filteredM27.length }} / 27 维）</strong>
                 <div class="rep-filter-pills">
                   <button
                     v-for="tab in (['全部', '声道 17 维', '基频与肺压', '声门 8 维'] as const)"
@@ -977,11 +786,11 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
                     <tr>
                       <th>下标</th>
                       <th>缩写</th>
-                      <th>所属分支</th>
+                      <th>分组</th>
                       <th>下界</th>
                       <th>上界</th>
                       <th>单位</th>
-                      <th>归一化方式</th>
+                      <th>归一化</th>
                       <th>生理与声学意义</th>
                     </tr>
                   </thead>
@@ -1000,45 +809,136 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
                 </table>
               </div>
             </div>
+
+            <!-- 32D Universal IPA Feature Table -->
+            <div class="rep-table-card selectable">
+              <div class="rep-filter-bar">
+                <strong>32 维通用国际音标发音特征表（{{ filteredIpa32.length }} / 32 维）</strong>
+                <div class="rep-filter-pills">
+                  <button
+                    v-for="grp in IPA32_GROUPS"
+                    :key="grp"
+                    type="button"
+                    class="btn xs"
+                    :class="{ active: ipa32Filter === grp }"
+                    @click="ipa32Filter = grp"
+                  >
+                    {{ grp }}
+                  </button>
+                </div>
+              </div>
+              <div class="rep-table-scroll">
+                <table class="mini-tbl rep-tbl">
+                  <thead>
+                    <tr>
+                      <th>下标</th>
+                      <th>特征键名</th>
+                      <th>分组</th>
+                      <th>取值</th>
+                      <th>代表音标</th>
+                      <th>语音学意义</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="f in filteredIpa32" :key="f.idx">
+                      <td class="mono">{{ f.idx }}</td>
+                      <td class="mono"><strong>{{ f.key }}</strong></td>
+                      <td><span class="tree-tag">{{ f.group }}</span></td>
+                      <td class="mono">{{ f.range }}</td>
+                      <td class="mono">{{ f.examples }}</td>
+                      <td class="muted">{{ f.meaning }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Chapter 3: Full Corpus Inventory -->
+        <!-- Chapter 3: Detailed Neural Architectures (CNN / Conformer / RNN) -->
+        <div id="repArch" class="panel">
+          <div class="p-head">
+            <span>3. 神经网络架构详解（CNN / Conformer / RNN 分层拆解）</span>
+            <span class="tree-tag mono">Hybrid Physical-Neural Design</span>
+          </div>
+          <div class="p-body rep-body">
+            <div class="rep-table-card selectable">
+              <div class="param-sec-title">
+                <span>自研模型网络层数与结构家族对照（直接核验自工程源码）</span>
+                <span class="mono muted">Conv1d / BiLSTM / BiGRU / ConformerBlock</span>
+              </div>
+              <div class="rep-table-scroll">
+                <table class="mini-tbl rep-tbl">
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th>阶段</th>
+                      <th>参数量</th>
+                      <th>架构家族</th>
+                      <th>CNN 卷积层</th>
+                      <th>RNN 层</th>
+                      <th>Attention / Conformer</th>
+                      <th>Linear 层</th>
+                      <th>设计核心</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="a in MODEL_ARCHITECTURE_LAYERS" :key="a.name">
+                      <td class="mono"><strong>{{ a.name }}</strong></td>
+                      <td>{{ a.stage }}</td>
+                      <td class="mono">{{ a.params }}</td>
+                      <td class="mono">{{ a.family }}</td>
+                      <td class="mono">{{ a.cnn }}</td>
+                      <td class="mono">{{ a.rnn }}</td>
+                      <td class="mono">{{ a.attention }}</td>
+                      <td class="mono">{{ a.linear }}</td>
+                      <td class="muted">{{ a.highlight }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <ModelArchDiagrams />
+          </div>
+        </div>
+
+        <!-- Chapter 4: Expanded Corpus Inventory -->
         <div id="repDatasets" class="panel">
           <div class="p-head">
-            <span>3. 全量训练语料清单、180h 多发声态配比与合规边界</span>
-            <span class="tree-tag mono">16 项数据源 · 隐私零混入</span>
+            <span>4. 扩充后训练与评测语料清单</span>
+            <span class="tree-tag mono">{{ FULL_CORPUS_INVENTORY.length }} 项数据源 · 隐私零混入</span>
           </div>
           <div class="p-body rep-body">
             <div class="rep-chart-grid-2">
               <TechChart
                 title="图 2 · 180 小时全发声态物理合成语料分布"
-                subtitle="总计 170,550 条（179.89 h），单发声态占 70.2%，句内多态渐变占 29.8%"
+                subtitle="170,550 条（179.89 h），另新增 20–1200 Hz 宽域合成与 12,000 条神经飞轮闭环语料"
                 badge="170,550 条 · 8 模式"
-                :height="340"
+                :height="325"
                 :option-builder="buildSynth180hPieChart"
-                caption="数据统计自 synth_full_glottis_180h/manifest.jsonl 全量累加：50,756 条句内渐变在随机 2–3 段边界上以 50–200 ms 余弦平滑过渡，覆盖声门动力学全连续空间。"
+                caption="70.2% 单发声态 + 29.8% 句内多态余弦渐变；Batch-2 新增 45,136 条情感配音、京剧独唱、呼麦与喉声泛音真实语料。"
               />
               <div class="editorial-card rep-card selectable" style="justify-content: space-between">
                 <div>
-                  <strong style="font-size: 1.02rem">多源数据工程与开源合规设计</strong>
+                  <strong style="font-size: 1rem">Batch-2 语料扩充重点与合规隔离</strong>
                   <ul class="rep-ul" style="margin-top: 8px">
-                    <li><strong>百 GB 级语料零解压流式读取</strong>：对 AISHELL-3 未压缩 <code class="mono">.tar</code> 建立字节偏移索引，对 KeSpeech 分卷设计 <code class="mono">MultiPartRawStream</code> 内存级流式解码，避免磁盘解压爆炸。</li>
-                    <li><strong>共享内存蒸馏缓存（63.61 h / 7.48 GB）</strong>：由旗舰教师一次性生成 120 分片，供 <code class="mono">Vox2Tract-Lite</code>、<code class="mono">Vox2Spk-Lite</code> 与 <code class="mono">Tract2Vox-Lite</code> 复用，训练期全量预载内存达 100% RAM 命中率。</li>
-                    <li><strong>7 项 MFA 质量拒识门控</strong>：<code class="mono">Text2Prosody-Lite</code> 数据构建阶段自动筛除 4,466 条高时长偏差（1,334）、低似然（1,767）、塌缩（962）与元音无声漂移（257）标注，确保韵律纯净。</li>
-                    <li><strong>严格隐私与盲测隔离</strong>：多说话人索引强制设置 <code class="mono">include_voiceover=False</code> 屏蔽私有配音；验证集 84 名说话人与 USC-TIMIT 真人 EMA 276 条全程零泄漏进训练集。</li>
+                    <li><strong>多情感与配音大幅扩充</strong>：在原 ESD / Expresso 基础上新增 <code class="mono">EmotionTalk</code>（22.9 h）、<code class="mono">CSEMOTIONS</code>（9.6 h）、<code class="mono">EmoV-DB</code>（8.9 h）与 <code class="mono">RAVDESS</code>（1.7 h）。</li>
+                    <li><strong>高音戏曲与特殊发声态补全</strong>：新增 <code class="mono">JACRC 京剧独唱</code>（10.5 h）及 <code class="mono">EMVD / AVP / Beatbox / 图瓦呼麦与喉声泛音库</code>（4.2 h），同步扩展 <code class="mono">20–1200 Hz</code> 宽域物理合成。</li>
+                    <li><strong>窄标构型与神经飞轮</strong>：构建 293 键窄标库 <code class="mono">kf_dataset_narrow_v2</code>（63k 动腔 + 52k 韵律）与 12,000 条 <code class="mono">flywheel_large_v2_12k</code> 闭环数据。</li>
+                    <li><strong>严格盲测与版权边界</strong>：84 位验证说话人、USC-TIMIT EMA 276 条与 236 条金标准 IPA/VoQS 实录严格隔离；第三方语料均不随包再分发原音频。</li>
                   </ul>
                 </div>
                 <div class="rep-callout-inline">
                   <IconSvg name="shield" :size="14" />
-                  <span>第三方公开语料严禁随仓库再分发原音频，复现者请按原语料协议获取并由脚本流式索引。</span>
+                  <span>训练脚本全程采用流式索引与内存分片缓存，复现者按原语料协议获取即可。</span>
                 </div>
               </div>
             </div>
 
             <div class="rep-table-card selectable">
               <div class="rep-filter-bar">
-                <strong>全项目训练与评测语料总清单（{{ filteredCorpus.length }} / {{ FULL_CORPUS_INVENTORY.length }} 项）</strong>
+                <strong>全量训练与评测数据源清单（{{ filteredCorpus.length }} / {{ FULL_CORPUS_INVENTORY.length }} 项）</strong>
                 <div class="rep-filter-pills">
                   <button
                     v-for="cat in CORPUS_CATEGORIES"
@@ -1058,10 +958,10 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
                     <tr>
                       <th>数据集名称</th>
                       <th>类别</th>
-                      <th>条目 / 分片规模</th>
-                      <th>时长 / 说话人构成</th>
+                      <th>规模</th>
+                      <th>时长 / 构成</th>
                       <th>服务模型</th>
-                      <th>工程处理与标注说明</th>
+                      <th>说明</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1080,174 +980,133 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
           </div>
         </div>
 
-        <!-- Chapter 4: Training Procedures & Real Convergence Curves -->
-        <div id="repTraining" class="panel">
-          <div class="p-head">
-            <span>4. 各模型训练流程、损失函数设计与实测收敛曲线</span>
-            <span class="tree-tag mono">Verified Training Logs</span>
-          </div>
-          <div class="p-body rep-body">
-            <div class="settings-grid-2 selectable">
-              <div class="editorial-card rep-card">
-                <strong>A. 旗舰教师链（肺压 → 声学代理 → 双分支反演 → 锚定微调 → 神经声码器）</strong>
-                <ul class="rep-ul">
-                  <li><strong>Vox2Tract-PR（肺压编码，30k 步）</strong>：25 层加权 WavLM + 3 维增益不变音质前端 → 8×ConvNeXt + BiLSTM，180h 训练达成 <code class="mono">PR PCC 0.9811</code>。</li>
-                  <li><strong>Tract2Feat-Proxy（声学代理，50k 步）</strong>：8 层 Conformer-256 并行预测 WavLM L24（音段）与 L6（发声态），270h 联合训练达 <code class="mono">Cos24 0.8809 / Cos6 0.8408</code>。</li>
-                  <li><strong>Vox2Tract-Large（合成预热 45k → 锚定微调 32k 步）</strong>：声道/声门双分支解耦，自然语音微调引入 Pass 1 真实语音 + Pass 2 合成锚定（权重 0.045），17 维声道 PCC 从 0.6309 跃升至 <code class="mono">0.8200</code>，8 维声门达 <code class="mono">0.9040</code>。</li>
-                  <li><strong>Tract2Vox-Large（神经声码器，32k 步）</strong>：12 谐波 + 0.5F0 嘎裂次谐波 + 裂隙吸气噪声 <code class="mono">GlottisAwareSourceModule</code>，28k 后以 4,000 步低 LR 余弦精调将 <code class="mono">val_score</code> 压低至 <code class="mono">0.03534</code>。</li>
-                </ul>
-              </div>
-              <div class="editorial-card rep-card">
-                <strong>B. 端侧零 WavLM 7 项自研轻量模型</strong>
-                <ul class="rep-ul">
-                  <li><strong>Vox2Tract-Lite (55k, 132 min)</strong>：167 维纯声学前端 + 6 层 Conformer-192，65% 蒸馏缓存 + 35% 180h 真值 + 冻结双头声学感知蒸馏（8×L24 + 6×L6），未见自然 <code class="mono">T17 PCC 0.9102</code>。</li>
-                  <li><strong>Vox2Spk-Lite (30k, 12.4 min)</strong>：80-Mel CMN + 3 层 ECAPA-TDNN，PK 采样 32×4，对齐 WavLM-SV 512 维空间，余弦达 <code class="mono">0.9172</code>，CPU 仅 <code class="mono">12.3 ms</code>。</li>
-                  <li><strong>Tract2Vox-Lite (21k, 45.3 min)</strong>：保留完整 Glottis-NSF v3 且通道减半（ch=256），叠加教师音频 Mel 蒸馏与双声纹交替约束，第 17,000 步达最优 <code class="mono">val_score 0.06264</code>。</li>
-                  <li><strong>IPA2Tract-Lite（合成预热 15k + 自然扩展 30k 步）</strong>：异步 3 阶 qTA 零滞后物理基线 + 零初始化双残差 + <code class="mono">Tract2Area-Proxy</code> 闭塞/开口护栏，较基线降误差 <code class="mono">35.88%</code>。</li>
-                </ul>
-              </div>
-            </div>
-
-            <!-- Chart 3: Vox2Tract-Large Anchored vs Unanchored -->
-            <TechChart
-              title="图 3 · Vox2Tract-Large 双通物理锚定 vs 无锚定消融实验真实训练曲线"
-              subtitle="脱离合成物理锚定时，仅 5,500 步声道 PCC 便从 0.6299 降至 0.4076；加入 Pass 2 锚定后稳步攀升至 0.8200"
-              badge="关键消融实证"
-              :height="335"
-              :option-builder="buildInverterAnchorChart"
-              caption="采样自上游归档训练日志 motor_natural/metrics.jsonl 与对照组日志。第 18,000 步起进入多风格表现语料热重启，并入 ESD/Expresso 情感与 GTSinger/M4/VocalSet 歌唱语料。"
-            />
-
-            <div class="rep-chart-grid-2">
-              <!-- Chart 4: 25-dim Per-parameter PCC -->
-              <TechChart
-                title="图 4 · Vox2Tract-Large 25 维声道与声门逐维实测 PCC"
-                subtitle="第 26,500 步最优模型：声门 8 维均值 0.9040（绿），声道 17 维均值 0.8200（蓝），横轴截断起自 0.55"
-                badge="25 维全览"
-                :height="560"
-                :option-builder="buildPerDimPccChart"
-                caption="核心控制维 XT (0.9663)、XB (0.9645)、TCX (0.9512)、RA (0.9496)、VO (0.9429) 与 SHIM (0.9293) 均超过 0.92（注：横轴起始值为 0.55 以突出参数间差异）。"
-              />
-              <!-- Chart 5: Vocoder Large vs Lite -->
-              <TechChart
-                title="图 5 · Tract2Vox-Large 与 Tract2Vox-Lite 声码器收敛对比"
-                subtitle="左轴 val_score（越低越好），右轴 WavLM L24 语义相似度；28k 步竖线起进入低 LR 精调"
-                badge="Large 14.4M vs Lite 3.72M"
-                :height="560"
-                :option-builder="buildVocoderCurveChart"
-                caption="Tract2Vox-Lite 以不足教师 26% 的参数量，在第 17,000 步达成 val_score 0.06264、L24 0.8588、端侧声纹闭环 Spk Cos 0.8736。"
-              />
-            </div>
-          </div>
-        </div>
-
-        <!-- Chapter 5: Benchmarks, EMA, Vox2Align v2 & Text2Prosody -->
+        <!-- Chapter 5: Batch-2 Latest Evaluation Results -->
         <div id="repBenchmarks" class="panel">
           <div class="p-head">
-            <span>5. 最新双语对齐/韵律模型、真人 EMA 检验与 8 句端到端评测</span>
-            <span class="tree-tag mono">2026-11-24 Latest Runs</span>
+            <span>5. Batch-2 最新训练结果与实测评测</span>
+            <span class="tree-tag mono">Verified Batch-2 Benchmarks</span>
           </div>
           <div class="p-body rep-body">
-            <div class="settings-grid-2 selectable">
-              <div class="editorial-card rep-card">
-                <strong>Vox2Align-Lite v2（4.33 M · 20,000 步 · 66.9 min）</strong>
-                <ul class="rep-ul">
-                  <li><strong>核心升级</strong>：外部接收 163 维 80-Mel+Δ+能量，在算子图内实时计算 80-ΔΔ 拼接为 243 维送入 4 层 Conformer-192，经可学习残差门控与 <code class="mono">Vox2Tract-Lite</code> 先验融合，配合 15% 模态丢弃，既可挂接声道反演也能独立对齐原始音频。</li>
-                  <li><strong>零非法拼音音节</strong>：新增 415 类合法汉语拼音音节 CTC 头，结合 <code class="mono">UntPhesoca 宽式</code>规则展开音素边界，并联动语音掩码 Viterbi 约束消除尾音拖入静音。</li>
-                  <li><strong>500 句全验证成绩</strong>：中文 ≤20 ms 边界 <code class="mono">93.66%</code>（均值 11.23 ms），英语 ≤20 ms 边界 <code class="mono">95.47%</code>（均值 8.78 ms），中文合法音节准确率 <code class="mono">90.71%</code>，静音 Mask F1 <code class="mono">0.9885</code>，CPU 仅 <code class="mono">41.37 ms</code>。</li>
-                </ul>
-              </div>
-              <div class="editorial-card rep-card">
-                <strong>Text2Prosody-Lite（1.98 M · 最佳 @7,500 步 · 19.3 min）</strong>
-                <ul class="rep-ul">
-                  <li><strong>中英混排无缝韵律</strong>：基于 22 维通用音标特征、10 维句法结构位置与 4 路离散嵌入，在说话人无关的相对半音空间预测单音时长、3 点基频轮廓与边界停顿。</li>
-                  <li><strong>在线增强策略</strong>：训练期施加 18% 在线中英句子拼接（带自然句中停顿与 -0.7 st 语调自然下倾）以及 30% 三声连读半三声增强。</li>
-                  <li><strong>实测精度</strong>：普通话时长 MAE <code class="mono">22.94 ms</code> / F0 MAE <code class="mono">1.198 st</code>（PCC 0.7743），英语时长 MAE <code class="mono">17.37 ms</code> / F0 MAE <code class="mono">1.203 st</code>，纯 CPU 推理仅 <code class="mono">18.52 ms</code>。</li>
-                </ul>
-              </div>
-            </div>
-
             <div class="rep-chart-grid-2">
               <TechChart
-                title="图 6 · Vox2Align-Lite v2 20k 步多任务收敛曲线"
-                subtitle="70,000+ 中英朗读与歌唱语料，中/英边界 20 ms 命中率分别突破 93.7% 与 95.5%"
-                badge="4.33M · CPU 41.4 ms"
-                :height="375"
-                :option-builder="buildAlignV2Chart"
-                caption="数据采样自上游归档日志 vox2align_v2/metrics.jsonl，第 20,000 步取得综合最优 val_score 0.9170（全验证 500 句达 0.9192）。"
+                title="图 3 · Vox2TractAlign v4 25 维声道与声门逐维实测 PCC"
+                subtitle="未见自然语音声道均值 0.9108（TCX 0.9656 / LD 0.9557 / VO 0.9499），同模型中/英 ≤20ms 对齐达 93.0% / 94.9%"
+                badge="9.40M · CPU 24.3 ms"
+                :height="520"
+                :option-builder="buildV4PerDimPccChart"
+                caption="数据来自 runs/vox2tract_align_v4_flywheel/summary.json（best @8k）：宽域 20–1200 Hz 声门 PCC 达 0.9200，中文合法音节准 91.38%，静音 Mask F1 0.9889。"
               />
               <TechChart
-                title="图 7 · Text2Prosody-Lite 四类语域时长误差与基频相关性"
-                subtitle="中英朗读、中英混排（CS）与孤立单字（ISO）四域实测对照"
-                badge="1.98M · CPU 18.5 ms"
-                :height="375"
-                :option-builder="buildProsodyDomainChart"
-                caption="数据来自上游评估记录 text2prosody_v1/summary.json（best @7,500 步）：中英自然句子音素时长 MAE 控制在 17–23 ms 内，音高偏差约 1.2 个半音。"
+                title="图 4 · 50 句离线 Whisper Large-v3-Turbo 双语可懂度门禁"
+                subtitle="25 句 AISHELL-3 + 25 句 LibriSpeech：Lite v3 (3.73M) 达成 7.18% 全场最低均值错率，Large v2.1 L24 语义 0.8829 最高"
+                badge="ASR Gate · 50 句"
+                :height="520"
+                :option-builder="buildWhisperAsrChart"
+                caption="数据来自 runs/tract2vox_lite_v3/asr_gate/asr_gate_summary.json 与 runs/tract2vox_large_v2*：默认 Large v2.1 保真与发声态细节最佳，3.73M Lite v3 可作极速低占替代。"
               />
             </div>
 
             <div class="rep-chart-grid-2">
               <TechChart
-                title="图 8 · IPA2Tract-Lite 真人 EMA 电磁发音仪 7 器官盲测"
-                subtitle="USC-TIMIT 20 份完全未见真人传感器记录，验证模型预测轨迹与人类真实构音运动一致性"
-                badge="零训练泄露盲测"
-                :height="370"
+                title="图 5 · Text2Prosody-Lite v4 (32D) 五域实测精度"
+                subtitle="新增任意手写 [IPA] (LANG_IPA=3) 域，时长 MAE 21.44 ms，中/英朗读分别为 22.55 / 17.33 ms"
+                badge="1.98M · CPU 1.5 ms"
+                :height="355"
+                :option-builder="buildProsodyV4Chart"
+                caption="数据来自 runs/prosody_ipa_joint_v4_32d/summary.json（best @2.4k）：普通话 F0 PCC 0.7786，英语 0.6728，纯 IPA 0.5883。"
+              />
+              <TechChart
+                title="图 6 · IPA2Tract-Lite v4 (32D) 真人 EMA 7 器官盲测"
+                subtitle="USC-TIMIT 20 份零训练泄漏真人传感器记录；Clean 降误差 43.41%，宽域 20–1200 Hz 降误差 50.69%"
+                badge="4.23M · 零泄漏 0.0"
+                :height="355"
                 :option-builder="buildEmaRadarChart"
-                caption="数据来自上游协同动腔规划评估报告（零训练泄露盲测）：脏上下文零泄漏验证 max_abs_diff = 0.0；VCV /abu/ 与 /uba/ 闭塞期内准确产生跨辅音舌体协同预移。"
-              />
-              <TechChart
-                title="图 9 · 8 句端到端实测对比：旗舰教师 vs Lite 声码器 vs 端侧闭环"
-                subtitle="覆盖普通话四声、中英自然句及气声/紧嗓/嘎裂/假声/五态连续渐变"
-                badge="端到端 8 句基准"
-                :height="370"
-                :option-builder="buildAudition8Chart"
-                caption="数据来自上游声码器 8 句对比评估汇总：Tract2Vox-Lite 均值 L24 0.8478（Tract2Vox-Large 教师均值 0.8561），全端侧无 WavLM 闭环 L24 0.8052 / Spk 0.8470。"
+                caption="数据来自 runs/prosody_ipa_joint_v4_32d/summary.json：脏上下文零泄漏 max_abs_diff = 0.0，唇开口 LD 0.7013，舌尖前后 TTX 0.6674。"
               />
             </div>
+
+            <TechChart
+              title="图 7 · Vox2Spk-v2.1 音色保真度与类间区分度实测对比"
+              subtitle="常规人声保住 Teacher Cos 0.9422，女声歌唱 Gap 跃升至 0.3531（Top-1 46.2%），4 人 165 Hz 实时换声 Cos 0.8013 追平 94M 教师"
+              badge="4.60M · CPU 4.3 ms"
+              :height="320"
+              :option-builder="buildVox2SpkChart"
+              caption="数据来自 runs/vox2spk_v2_1/summary.json（best @4.2k）与 Tract2Vox-Large v2.1 端到端 4 人换声实测（margin +0.0649 领先 v2 的 +0.0589 与 v1 的 +0.0503）。"
+            />
           </div>
         </div>
 
-        <!-- Chapter 6: 10 Engineering Lessons -->
-        <div id="repLessons" class="panel">
+        <!-- Chapter 6: Engine Loading, ONNX Slot Contracts & Dialect Retraining -->
+        <div id="repEngine" class="panel">
           <div class="p-head">
-            <span>6. 研发过程十大工程复盘</span>
-            <span class="tree-tag mono">10 Verified Lessons</span>
+            <span>6. 引擎装载、ONNX 槽位契约与方言/多语种扩展</span>
+            <span class="tree-tag mono">8 Core + 1 Optional Aligner</span>
           </div>
           <div class="p-body rep-body">
             <div class="settings-grid-2 selectable">
-              <div v-for="(item, idx) in TRAINING_EXPERIENCE_HIGHLIGHTS" :key="item.id" class="editorial-card lesson-card">
-                <div class="lesson-head">
-                  <div style="display: flex; align-items: center; gap: 6px; min-width: 0">
-                    <span class="mono lesson-idx">{{ String(idx + 1).padStart(2, '0') }}</span>
-                    <strong>{{ item.title }}</strong>
-                  </div>
-                  <span class="tree-tag">{{ item.category }}</span>
+              <div class="editorial-card rep-card">
+                <strong>8 项默认模型矩阵与可选独立对齐槽位</strong>
+                <ul class="rep-ul">
+                  <li><strong>联合反演对齐默认精简</strong>：<code class="mono">Vox2Tract-Lite</code> 挂载联合权重 <code class="mono">Vox2TractAlign v4</code> 后自动完成声道反演、静音门控与中英对齐，不再默认装载独立的 <code class="mono">Vox2Align-Lite v2</code>。</li>
+                  <li><strong>保留小语种与方言自训入口</strong>：若研究者需要针对其他语种或方言自行训练对齐模型，可在「设置 → 声学引擎与模型」底部展开可选槽位 <code class="mono">Vox2Align-Lite v2</code> 并挂载自训 ONNX，启用后自动接管对齐。</li>
+                  <li><strong>一键换模与严格校验</strong>：支持单槽换模与目录批量扫描（本机路径上限 256 MiB，浏览器上传上限 64 MiB），状态持久写入 <code class="mono">.cache/local-model-registry.json</code>。</li>
+                </ul>
+                <div style="margin-top: 6px">
+                  <button type="button" class="btn primary sm" @click="store.openOverlay('settings', 'engine')">
+                    <IconSvg name="cpu" :size="13" />
+                    <span>前往「本地轻量化模型矩阵」装载 / 换模</span>
+                  </button>
                 </div>
-                <p class="muted lesson-p"><strong>现象与根因：</strong>{{ item.finding }}</p>
-                <p class="lesson-p"><strong>工程解法：</strong>{{ item.remedy }}</p>
+              </div>
+              <div class="editorial-card rep-card">
+                <strong>自定义导出兼容 ONNX 的 4 条核心规则</strong>
+                <ul class="rep-ul">
+                  <li><strong>纯 ONNX 算子</strong>：导出前移除 <code class="mono">weight_norm</code>，避免复数 STFT 与图内随机数（声码器噪声由 <code class="mono">env_rand</code>、<code class="mono">n_wb</code> 显式传入）。</li>
+                  <li><strong>动态时间与批维</strong>：保留动态 <code class="mono">B</code> 与帧长 <code class="mono">T</code>（或音素长 <code class="mono">L</code>），特征尾维精确匹配下表契约。</li>
+                  <li><strong>权重存储格式</strong>：大权重建议导出 FP16 存储 + FP32 算子计算（误差 &lt; 1e-3），截面积代理 <code class="mono">Tract2Area-Proxy</code> 保持 FP32。</li>
+                  <li><strong>平滑降级</strong>：卸载 <code class="mono">Text2Prosody-Lite</code> 退回规则韵律，卸载 <code class="mono">IPA2Tract-Lite</code> 退回 qTA 基线，卸载 <code class="mono">Tract2Vox-Lite</code> 保留 VTL 物理发声。</li>
+                </ul>
               </div>
             </div>
-          </div>
-        </div>
 
-        <!-- Chapter 7: Retraining & Custom Corpus Manual -->
-        <div id="repRetrain" class="panel">
-          <div class="p-head">
-            <span>7. 使用更多语料二次训练、微调与 ONNX 导出指南</span>
-            <span class="tree-tag mono">Open Reproducibility</span>
-          </div>
-          <div class="p-body rep-body">
-            <div class="editorial-card rep-hero-card selectable">
-              <strong>外部研究者接入自定义语料的基本原则</strong>
-              <p class="muted rep-p">
-                所有音频训练前统一转码至 16 kHz 单声道（DPDFNet 与 VTL 物理渲染侧为 48 kHz），并确保帧率严格对齐 50 Hz（hop 320）。若训练语料含声乐或方言高音，请过滤有声帧 95 分位基频高于 550 Hz 的切片；微调反演器或声码器时务必保留 12%–35% 的 VTL 物理合成真值作为锚定，避免物理构音空间漂移。
-              </p>
+            <!-- Slot Contracts Table -->
+            <div class="rep-table-card selectable">
+              <div class="param-sec-title">
+                <span>ONNX 槽位输入输出张量契约（8 项核心 + 1 项可选方言对齐槽位）</span>
+                <span class="mono muted">engine/model_registry_runtime.py</span>
+              </div>
+              <div class="rep-table-scroll">
+                <table class="mini-tbl rep-tbl">
+                  <thead>
+                    <tr>
+                      <th>槽位名称</th>
+                      <th>输入张量契约</th>
+                      <th>输出张量契约</th>
+                      <th>目录匹配关键词</th>
+                      <th>降级与扩展说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="c in ONNX_SLOT_CONTRACTS" :key="c.slug">
+                      <td class="mono">
+                        <strong>{{ c.name }}</strong>
+                        <span v-if="c.optionalNote" class="tree-tag" style="margin-left: 6px">可选扩展</span>
+                      </td>
+                      <td class="mono">{{ c.inputs }}</td>
+                      <td class="mono">{{ c.outputs }}</td>
+                      <td class="mono muted">{{ c.patterns }}</td>
+                      <td class="muted">{{ c.fallback }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
 
+            <!-- Concise Retraining Recipes -->
             <div class="rep-recipe-list">
               <div v-for="rec in RETRAINING_RECIPES" :key="rec.id" class="editorial-card rep-recipe-card selectable">
                 <div class="lesson-head">
-                  <strong style="font-size: 1rem">{{ rec.scenario }}</strong>
+                  <strong style="font-size: 0.98rem">{{ rec.scenario }}</strong>
                   <span class="tree-tag">{{ rec.difficulty }}</span>
                 </div>
                 <div class="rep-meta-line">
@@ -1259,7 +1118,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
                 </ol>
                 <div class="rep-code-box">
                   <div class="rep-code-head">
-                    <span class="mono muted">PowerShell / Python 复现命令</span>
+                    <span class="mono muted">复现与微调命令</span>
                     <button type="button" class="btn xs" @click="copyCode(rec.id, rec.commands)">
                       <span>{{ copiedId === rec.id ? '已复制' : '复制命令' }}</span>
                     </button>
@@ -1269,84 +1128,10 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
               </div>
             </div>
 
-            <div class="editorial-card rep-card selectable">
-              <strong>导出兼容 {{ APP_BRAND_NAME }} 的自定义 ONNX 必须满足的 4 条规则</strong>
-              <ul class="rep-ul">
-                <li><strong>去除动态非 ONNX 算子</strong>：导出前移除 <code class="mono">weight_norm</code>，禁止图内包含复数 STFT、<code class="mono">pack_padded_sequence</code> 或图内随机数生成器（<code class="mono">Tract2Vox-Lite</code> 的随机包络与宽带噪声作为显式输入张量 <code class="mono">env_rand</code>、<code class="mono">n_wb</code> 传入）。</li>
-                <li><strong>保留动态批与时间轴</strong>：Batch 维与时间帧维 <code class="mono">T</code>（或音素长度 <code class="mono">L</code>）须导出为动态符号维度，特征尾维须严格匹配下表契约。</li>
-                <li><strong>张量名与 Dtype 精确一致</strong>：引擎装载时会执行严格校验，若输入/输出名、阶数、数据类型或固定维度不符，将直接拒绝装载并保留原可用权重。</li>
-                <li><strong>单文件体积上限</strong>：每个外置 <code class="mono">.onnx</code> 文件需大于 1 KB；通过浏览器界面上传（<code class="mono">/mount-binary</code>）受 HTTP 代理包体保护上限为 <strong>64 MiB</strong>，若需加载更大模型（上限 <strong>256 MiB</strong>）请在「从文件夹装载」填入本机目录路径挂载。建议权重量化为 FP16 存储（面积敏感的 <code class="mono">Tract2Area-Proxy</code> 保持 FP32）。</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <!-- Chapter 8: Engine Loading, Hot-Plug & ONNX Slot Contracts -->
-        <div id="repEngine" class="panel">
-          <div class="p-head">
-            <span>8. 生成引擎、本地模型装载与热插拔换模机制</span>
-            <span class="tree-tag mono">Pure ONNX Runtime · Hot-Plug</span>
-          </div>
-          <div class="p-body rep-body">
-            <div class="settings-grid-2 selectable">
-              <div class="editorial-card rep-card">
-                <strong>物理声道引擎三层路由 + 纯 ONNX 懒加载隔离</strong>
-                <ul class="rep-ul">
-                  <li><strong>物理求解优先顺序</strong>：浏览器本地 WASM Worker（预留）→ 本地 Python 原生 VTL 2.4 DLL 服务（<code class="mono">127.0.0.1:8765</code>，当前主通道）→ 预渲染样本只读兜底。</li>
-                  <li><strong>零 PyTorch 推理栈</strong>：全部 9 个模型由 <code class="mono">engine/model_registry_runtime.py</code>（<code class="mono">LocalModelManager</code>）统一管理，前端特征在 <code class="mono">onnx_frontends.py</code> 中以纯 NumPy/SciPy 复现，不依赖数 GB 的 PyTorch 运行时。</li>
-                  <li><strong>内存会话按需收放</strong>：点击任意模型卡片的「装载」将创建并校验 <code class="mono">InferenceSession</code>；点击「卸载」会释放内存并触发垃圾回收，相关可选模块（如韵律、协同构音）会自动平滑降级至物理规则基线。</li>
-                </ul>
-              </div>
-              <div class="editorial-card rep-card">
-                <strong>界面一键换模与目录批量扫描装载</strong>
-                <ul class="rep-ul">
-                  <li><strong>单槽换模</strong>：在「设置 → 声学引擎与模型」的 9 模型矩阵中点击目标卡片的「换模」，选取任意符合契约的 <code class="mono">.onnx</code> 文件上传；引擎自动校验后持久化至 <code class="mono">.cache/custom-models/&lt;slug&gt;/</code> 并生效热切换。</li>
-                  <li><strong>从文件夹装载</strong>：点击矩阵右上角「从文件夹装载」，既可输入本地目录绝对路径扫描（最大递归深度 2，单文件上限 256 MiB），也可通过浏览器目录选择器批量上传（单文件上限 64 MiB）；系统先按文件名关键词匹配槽位，再以输入输出张量契约逐一校验。</li>
-                  <li><strong>一键回退与状态持久</strong>：外置路径与开关状态写入 <code class="mono">.cache/local-model-registry.json</code>，重启自动延续；点击「恢复内置」或「全部恢复内置」即可切回随包默认权重。</li>
-                </ul>
-                <div style="margin-top: 6px">
-                  <button type="button" class="btn primary sm" @click="store.openOverlay('settings', 'engine')">
-                    <IconSvg name="cpu" :size="13" />
-                    <span>前往「本地轻量化模型矩阵」实操装载 / 换模</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- 9 ONNX Slot Tensor Contract Table -->
+            <!-- REST Endpoints -->
             <div class="rep-table-card selectable">
               <div class="param-sec-title">
-                <span>9 个本地 ONNX 槽位精确输入输出张量契约（换模校验真源）</span>
-                <span class="mono muted">engine/model_registry_runtime.py</span>
-              </div>
-              <div class="rep-table-scroll">
-                <table class="mini-tbl rep-tbl">
-                  <thead>
-                    <tr>
-                      <th>槽位名称</th>
-                      <th>输入张量契约</th>
-                      <th>输出张量契约</th>
-                      <th>目录匹配关键词</th>
-                      <th>卸载时降级行为</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="c in ONNX_SLOT_CONTRACTS" :key="c.slug">
-                      <td class="mono"><strong>{{ c.name }}</strong></td>
-                      <td class="mono">{{ c.inputs }}</td>
-                      <td class="mono">{{ c.outputs }}</td>
-                      <td class="mono muted">{{ c.patterns }}</td>
-                      <td class="muted">{{ c.fallback }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <!-- 6 REST Endpoints -->
-            <div class="rep-table-card selectable">
-              <div class="param-sec-title">
-                <span>热插拔与外置模型装载 HTTP API 清单</span>
+                <span>热插拔与外置模型装载 HTTP API</span>
                 <span class="mono muted">Node Proxy → Python Engine</span>
               </div>
               <div class="rep-table-scroll">
@@ -1429,8 +1214,8 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 
 .rep-p {
   margin: 0;
-  font-size: 0.94rem;
-  line-height: 1.65;
+  font-size: 0.93rem;
+  line-height: 1.62;
 }
 
 .rep-kpi-grid {
@@ -1452,7 +1237,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 }
 
 .rep-kpi-box strong {
-  font-size: 1.04rem;
+  font-size: 1.03rem;
   color: var(--accent);
 }
 
@@ -1467,8 +1252,8 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  font-size: 0.92rem;
-  line-height: 1.62;
+  font-size: 0.91rem;
+  line-height: 1.6;
   color: var(--muted);
 }
 
@@ -1480,6 +1265,51 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
   gap: 12px;
+}
+
+.rep-arch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+  gap: 12px;
+}
+
+.rep-arch-card {
+  box-shadow: none;
+  gap: 8px;
+}
+
+.rep-arch-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rep-arch-step {
+  padding: 7px 10px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid var(--panel-border);
+  background: var(--ctrl-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rep-arch-step.accent {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--panel-border));
+  background: color-mix(in srgb, var(--selected) 48%, var(--ctrl-bg));
+}
+
+.rep-arch-step-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.rep-arch-step-detail {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding-left: 28px;
 }
 
 .rep-table-card {
@@ -1499,7 +1329,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 .rep-tbl th,
 .rep-tbl td {
   padding: 6px 9px;
-  font-size: 0.885rem;
+  font-size: 0.88rem;
   line-height: 1.48;
   vertical-align: top;
 }
@@ -1510,7 +1340,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 0.95rem;
+  font-size: 0.94rem;
 }
 
 .rep-filter-pills {
@@ -1520,8 +1350,8 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 }
 
 .rep-callout-inline {
-  margin-top: 10px;
-  padding: 8px 10px;
+  margin-top: 8px;
+  padding: 7px 10px;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--panel-border);
   border-left: 3px solid var(--accent);
@@ -1529,13 +1359,8 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 0.875rem;
+  font-size: 0.86rem;
   color: var(--text);
-}
-
-.lesson-card {
-  box-shadow: none;
-  gap: 6px;
 }
 
 .lesson-head {
@@ -1547,7 +1372,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 }
 
 .lesson-idx {
-  font-size: 0.82rem;
+  font-size: 0.8rem;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--selected);
@@ -1555,16 +1380,10 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   font-weight: 700;
 }
 
-.lesson-p {
-  margin: 0;
-  font-size: 0.91rem;
-  line-height: 1.6;
-}
-
 .rep-recipe-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .rep-recipe-card {
@@ -1576,7 +1395,7 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 0.9rem;
+  font-size: 0.89rem;
   color: var(--muted);
 }
 
@@ -1590,8 +1409,8 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 0.915rem;
-  line-height: 1.6;
+  font-size: 0.9rem;
+  line-height: 1.58;
   color: var(--text);
 }
 
@@ -1660,14 +1479,14 @@ function buildAudition8Chart(t: ChartThemeTokens): EChartsCoreOption {
 
 .svg-title {
   fill: var(--text);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 700;
   text-anchor: middle;
 }
 
 .svg-sub {
   fill: var(--muted);
-  font-size: 11px;
+  font-size: 10.5px;
   text-anchor: middle;
 }
 

@@ -71,13 +71,25 @@ GLOTTIS8_MAX = np.array([0.30, 0.30, 0.25, 3.1415, 1.0, 1.0, 100.0, 100.0], dtyp
 GLOTTIS8_UNITS: Tuple[str, ...] = ("cm", "cm", "cm2", "rad", "ratio", "ratio", "%", "%")
 
 
+def _safe_value_repr(value: Any) -> str:
+    """Format an invalid/non-finite/overflowing numeric value safely for error responses."""
+    try:
+        text = str(value) if isinstance(value, (int, float, np.number)) else repr(value)
+    except Exception:
+        return "<unrepresentable>"
+    if len(text) > 48:
+        return text[:24] + "..." + text[-12:]
+    return text
+
+
 def is_finite_number(value: Any) -> bool:
-    """Return True for numeric non-bool finite values."""
-    return (
-        not isinstance(value, (bool, np.bool_))
-        and isinstance(value, (int, float, np.number))
-        and math.isfinite(float(value))
-    )
+    """Return True for numeric non-bool finite values (catching OverflowError on huge ints)."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.number)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def validation_error(field: str, hint: str, code: str = "validation_error") -> Dict[str, Any]:
@@ -104,6 +116,59 @@ def out_of_range_error(
     }
 
 
+def positive_scalar_error(
+    field: str,
+    value: Any,
+    unit: str = "Hz",
+    hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "ok": False,
+        "error": {
+            "code": "out_of_range",
+            "field": field,
+            "value": value,
+            "allowed": {"min": 0.0, "exclusiveMin": True, "unit": unit},
+            "hint": hint or f"{field} ({value} {unit}) 须为有限正数 (> 0 {unit})",
+        },
+    }
+
+
+def validate_positive_scalar(
+    field: str,
+    value: Any,
+    unit: str = "Hz",
+    hint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if not is_finite_number(value):
+        return positive_scalar_error(field, _safe_value_repr(value), unit, hint)
+    num = float(value)
+    if num <= 0.0:
+        return positive_scalar_error(field, num, unit, hint)
+    return None
+
+
+def validate_positive_series(
+    field: str,
+    values: Any,
+    expected_len: int,
+    unit: str = "Hz",
+) -> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]:
+    if not isinstance(values, (list, tuple, np.ndarray)):
+        return None, validation_error(field, f"{field} 必须为长度为 {expected_len} 的数值数组")
+    if isinstance(values, np.ndarray) and values.ndim != 1:
+        return None, validation_error(field, f"{field} 必须为一维数组")
+    if len(values) != expected_len:
+        return None, validation_error(field, f"{field} 长度 ({len(values)}) 与主控制轨 ({expected_len}) 不一致")
+    for idx, val in enumerate(values):
+        if not is_finite_number(val):
+            return None, positive_scalar_error(f"{field}[{idx}]", _safe_value_repr(val), unit)
+        num = float(val)
+        if num <= 0.0:
+            return None, positive_scalar_error(f"{field}[{idx}]", num, unit)
+    return np.asarray(values, dtype=np.float64), None
+
+
 def validate_scalar_range(
     field: str,
     value: Any,
@@ -114,7 +179,7 @@ def validate_scalar_range(
     tol: float = CONTROL_TOL,
 ) -> Optional[Dict[str, Any]]:
     if not is_finite_number(value):
-        return out_of_range_error(field, repr(value) if not isinstance(value, (int, float)) else str(value), lo, hi, unit)
+        return out_of_range_error(field, _safe_value_repr(value), lo, hi, unit)
     num = float(value)
     if num < lo - tol or num > hi + tol:
         return out_of_range_error(field, num, lo, hi, unit)
@@ -139,7 +204,7 @@ def validate_scalar_series(
         return None, validation_error(field, f"{field} 长度 ({len(values)}) 与主控制轨 ({expected_len}) 不一致")
     for idx, val in enumerate(values):
         if not is_finite_number(val):
-            return None, out_of_range_error(f"{field}[{idx}]", repr(val), lo, hi, unit)
+            return None, out_of_range_error(f"{field}[{idx}]", _safe_value_repr(val), lo, hi, unit)
         num = float(val)
         if num < lo - tol or num > hi + tol:
             return None, out_of_range_error(f"{field}[{idx}]", num, lo, hi, unit)
@@ -170,7 +235,7 @@ def validate_tract19_frames(
             name = names[c_idx]
             lo, hi = mins_f[c_idx], maxs_f[c_idx]
             if not is_finite_number(val):
-                return None, out_of_range_error(f"{field}[{r_idx}][{name}]", repr(val), lo, hi, "vtl")
+                return None, out_of_range_error(f"{field}[{r_idx}][{name}]", _safe_value_repr(val), lo, hi, "vtl")
             num = float(val)
             if num < lo - tol or num > hi + tol:
                 return None, out_of_range_error(f"{field}[{r_idx}][{name}]", num, lo, hi, "vtl")
@@ -185,6 +250,13 @@ def validate_glottis_frames(
     field: str = "glottis_frames",
     tol: float = CONTROL_TOL,
 ) -> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]:
+    """Validate per-frame glottis controls.
+
+    Canonical contract is 8-dim `[xb_cm, xt_cm, ca_cm2, lag_rad, ra, ps, fl, shim]`.
+    Legacy 7-dim rows omitting `shim` are accepted for backward compatibility and
+    treated by downstream synthesizers (`dense_channel`, `m27_bridge`, `keyframe_lite`)
+    as `shim = 0.0`.
+    """
     if not isinstance(frames, (list, tuple, np.ndarray)):
         return None, validation_error(field, f"{field} 必须为声门帧数组")
     if len(frames) != expected_len:
@@ -192,16 +264,16 @@ def validate_glottis_frames(
     cols_len: Optional[int] = None
     for r_idx, row in enumerate(frames):
         if not isinstance(row, (list, tuple, np.ndarray)) or len(row) not in (7, 8):
-            return None, validation_error(f"{field}[{r_idx}]", "每帧声门控制须为 7 或 8 维")
+            return None, validation_error(f"{field}[{r_idx}]", "每帧声门控制须为 8 维（兼容省略 shim 的旧 7 维格式）")
         if cols_len is None:
             cols_len = len(row)
         elif len(row) != cols_len:
-            return None, validation_error(f"{field}[{r_idx}]", "各帧声门控制维数必须一致（统一 7 维或 8 维）")
+            return None, validation_error(f"{field}[{r_idx}]", "各帧声门控制维数必须一致（统一 8 维或兼容 7 维）")
         for c_idx, val in enumerate(row):
             name = GLOTTIS8_NAMES[c_idx]
             lo, hi, unit = float(GLOTTIS8_MIN[c_idx]), float(GLOTTIS8_MAX[c_idx]), GLOTTIS8_UNITS[c_idx]
             if not is_finite_number(val):
-                return None, out_of_range_error(f"{field}[{r_idx}][{name}]", repr(val), lo, hi, unit)
+                return None, out_of_range_error(f"{field}[{r_idx}][{name}]", _safe_value_repr(val), lo, hi, unit)
             num = float(val)
             if num < lo - tol or num > hi + tol:
                 return None, out_of_range_error(f"{field}[{r_idx}][{name}]", num, lo, hi, unit)
@@ -216,8 +288,8 @@ def validate_m27_pa(
     field: str = "m27_50hz_pa",
     min_frames: int = 1,
     max_frames: int = 3000,
-    f0_min: float = 60.0,
-    f0_max: float = 600.0,
+    f0_min: Optional[float] = None,
+    f0_max: Optional[float] = None,
     tol: float = CONTROL_TOL,
 ) -> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]:
     """Validate an (T, 27) M27 trajectory in physical units (PR in Pa, F0 in Hz)."""
@@ -237,17 +309,39 @@ def validate_m27_pa(
         )
     mins = M27_MIN_PA.copy()
     maxs = M27_MAX_PA.copy()
-    mins[17] = float(f0_min)
-    maxs[17] = float(f0_max)
+    bounded_f0 = (f0_min is not None) or (f0_max is not None)
+    eff_f0_min = float(f0_min) if f0_min is not None else 0.0
+    eff_f0_max = float(f0_max) if f0_max is not None else float("inf")
+    if bounded_f0:
+        mins[17] = eff_f0_min
+        maxs[17] = eff_f0_max
 
     for r_idx, row in enumerate(rows):
         if not isinstance(row, (list, tuple, np.ndarray)) or len(row) != 27:
             return None, validation_error(f"{field}[{r_idx}]", "每帧必须为 27 维数值列表")
         for c_idx, val in enumerate(row):
-            lo, hi, unit = float(mins[c_idx]), float(maxs[c_idx]), M27_UNITS[c_idx]
+            unit = M27_UNITS[c_idx]
             name = M27_PARAM_NAMES[c_idx]
+            if c_idx == 17 and not bounded_f0:
+                if not is_finite_number(val):
+                    return None, positive_scalar_error(
+                        f"{field}[{r_idx}][{c_idx}]",
+                        _safe_value_repr(val),
+                        unit,
+                        f"第 {r_idx} 帧 {name} 含有非有限数值或无效类型",
+                    )
+                num = float(val)
+                if num <= 0.0:
+                    return None, positive_scalar_error(
+                        f"{field}[{r_idx}][{c_idx}]",
+                        num,
+                        unit,
+                        f"第 {r_idx} 帧 {name} ({num} {unit}) 须为有限正数 (> 0 {unit})",
+                    )
+                continue
+            lo, hi = float(mins[c_idx]), float(maxs[c_idx])
             if not is_finite_number(val):
-                return None, out_of_range_error(f"{field}[{r_idx}][{c_idx}]", repr(val), lo, hi, unit,
+                return None, out_of_range_error(f"{field}[{r_idx}][{c_idx}]", _safe_value_repr(val), lo, hi, unit,
                                                 f"第 {r_idx} 帧 {name} 含有非有限数值或无效类型")
             num = float(val)
             if num < lo - tol or num > hi + tol:
@@ -260,7 +354,12 @@ def validate_m27_pa(
                     f"第 {r_idx} 帧 {name} ({num} {unit}) 超出合法范围 [{lo}, {hi}] {unit}",
                 )
     arr = np.asarray(rows, dtype=np.float64)
-    return np.clip(arr, mins, maxs), None
+    if bounded_f0:
+        return np.clip(arr, mins, maxs), None
+    f0_col = arr[:, 17].copy()
+    clipped = np.clip(arr, mins, maxs)
+    clipped[:, 17] = f0_col
+    return clipped, None
 
 
 def validate_shape_frames(
@@ -281,7 +380,7 @@ def validate_shape_frames(
             return validation_error(f"{field}[{r_idx}]", f"{field} 每帧须为 4 维向量或 null")
         for c_idx, val in enumerate(row):
             if not is_finite_number(val):
-                return out_of_range_error(f"{field}[{r_idx}][{c_idx}]", repr(val), lo, hi, "ratio")
+                return out_of_range_error(f"{field}[{r_idx}][{c_idx}]", _safe_value_repr(val), lo, hi, "ratio")
             num = float(val)
             if num < lo - CONTROL_TOL or num > hi + CONTROL_TOL:
                 return out_of_range_error(f"{field}[{r_idx}][{c_idx}]", num, lo, hi, "ratio")
@@ -331,7 +430,7 @@ def validate_pose_target_or_delta(
                     lo = -span if is_delta else float(TRACT19_JD2_MIN[c_i])
                     hi = span if is_delta else float(TRACT19_JD2_MAX[c_i])
                     if not is_finite_number(val):
-                        return None, None, out_of_range_error(f"{sub_field}[{name}]", repr(val), lo, hi, "vtl")
+                        return None, None, out_of_range_error(f"{sub_field}[{name}]", _safe_value_repr(val), lo, hi, "vtl")
                     num = float(val)
                     if num < lo - tol or num > hi + tol:
                         return None, None, out_of_range_error(f"{sub_field}[{name}]", num, lo, hi, "vtl")
@@ -349,7 +448,7 @@ def validate_pose_target_or_delta(
                     hi = span if is_delta else float(M27_MAX_PA[m_col])
                     unit = M27_UNITS[m_col]
                     if not is_finite_number(val):
-                        return None, None, out_of_range_error(f"{sub_field}[{name}]", repr(val), lo, hi, unit)
+                        return None, None, out_of_range_error(f"{sub_field}[{name}]", _safe_value_repr(val), lo, hi, unit)
                     num = float(val)
                     if num < lo - tol or num > hi + tol:
                         return None, None, out_of_range_error(f"{sub_field}[{name}]", num, lo, hi, unit)
@@ -364,13 +463,21 @@ def validate_pose_target_or_delta(
                     return None, None, validation_error(sub_field, f"{sub_field} 参数键名须为字符串")
                 if key in m27_idx:
                     m_col = m27_idx[key]
-                    base_lo = 60.0 if m_col == 17 else float(M27_MIN_PA[m_col])
+                    unit = M27_UNITS[m_col]
+                    if m_col == 17:
+                        if not is_finite_number(val):
+                            return None, None, positive_scalar_error(f"{sub_field}.{key}", _safe_value_repr(val), unit)
+                        num = float(val)
+                        if not is_delta and num <= 0.0:
+                            return None, None, positive_scalar_error(f"{sub_field}.{key}", num, unit)
+                        m27_map[m_col] = num
+                        continue
+                    base_lo = float(M27_MIN_PA[m_col])
                     base_hi = float(M27_MAX_PA[m_col])
                     span = base_hi - base_lo
                     lo, hi = (-span, span) if is_delta else (base_lo, base_hi)
-                    unit = M27_UNITS[m_col]
                     if not is_finite_number(val):
-                        return None, None, out_of_range_error(f"{sub_field}.{key}", repr(val), lo, hi, unit)
+                        return None, None, out_of_range_error(f"{sub_field}.{key}", _safe_value_repr(val), lo, hi, unit)
                     num = float(val)
                     if num < lo - tol or num > hi + tol:
                         return None, None, out_of_range_error(f"{sub_field}.{key}", num, lo, hi, unit)
@@ -384,7 +491,7 @@ def validate_pose_target_or_delta(
                     lo = -span if is_delta else float(TRACT19_JD2_MIN[t_col])
                     hi = span if is_delta else float(TRACT19_JD2_MAX[t_col])
                     if not is_finite_number(val):
-                        return None, None, out_of_range_error(f"{sub_field}.{key}", repr(val), lo, hi, "vtl")
+                        return None, None, out_of_range_error(f"{sub_field}.{key}", _safe_value_repr(val), lo, hi, "vtl")
                     num = float(val)
                     if num < lo - tol or num > hi + tol:
                         return None, None, out_of_range_error(f"{sub_field}.{key}", num, lo, hi, "vtl")

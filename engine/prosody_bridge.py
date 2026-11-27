@@ -32,17 +32,35 @@ class ProsodyBridge:
 
         def _num_opt(name: str, default: float, lo: float, hi: float) -> float:
             raw = payload.get(name, default)
-            if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(float(raw)):
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
                 raise ValueError(f"{name} 须为有限数值")
-            val = float(raw)
+            try:
+                val = float(raw)
+            except OverflowError as exc:
+                raise ValueError(f"{name} 数值溢出，超出允许范围 [{lo}, {hi}]") from exc
+            if not math.isfinite(val):
+                raise ValueError(f"{name} 须为有限数值")
             if val < lo or val > hi:
                 raise ValueError(f"{name} ({val}) 超出允许范围 [{lo}, {hi}]")
             return val
 
-        base_f0 = _num_opt("base_f0", 165.0, 60.0, 600.0)
+        def _pos_opt(name: str, default: float) -> float:
+            raw = payload.get(name, default)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"{name} 须为有限正数")
+            try:
+                val = float(raw)
+            except OverflowError as exc:
+                raise ValueError(f"{name} 数值溢出，须为有限正数 (> 0)") from exc
+            if not math.isfinite(val) or val <= 0.0:
+                raise ValueError(f"{name} ({val}) 须为有限正数 (> 0)")
+            return val
+
+        base_f0 = _pos_opt("base_f0", 165.0)
         speed_scale = _num_opt("speed_scale", 1.0, 0.5, 2.0)
         pitch_scale = _num_opt("pitch_scale", 1.35, 0.5, 2.5)
-        f0_min_hz = _num_opt("f0_min_hz", 60.0, 40.0, 120.0)
+        raw_floor = payload.get("f0_min_hz")
+        f0_min_hz = _pos_opt("f0_min_hz", 0.0) if raw_floor is not None else None
         tone_sandhi = payload.get("tone_sandhi", True)
         if type(tone_sandhi) is not bool:
             raise ValueError("tone_sandhi 须为布尔值")
@@ -71,18 +89,15 @@ class ProsodyBridge:
         knots = []
         for pt in result["f0_knots_neural"]:
             hz = float(pt["hz"])
-            if hz < f0_min_hz:
+            if f0_min_hz is not None and hz < f0_min_hz:
                 hz = round(f0_min_hz, 1)
-                adjusted_count += 1
-            elif hz > 600.0:
-                hz = 600.0
                 adjusted_count += 1
             knots.append({"t": pt["t"], "hz": hz})
 
         keyframes = []
         for kf in result["keyframes_neural"]:
             item = dict(kf)
-            if isinstance(item.get("f0_hz"), (int, float)) and float(item["f0_hz"]) < f0_min_hz:
+            if f0_min_hz is not None and isinstance(item.get("f0_hz"), (int, float)) and float(item["f0_hz"]) < f0_min_hz:
                 item["f0_hz"] = round(f0_min_hz, 1)
             keyframes.append(item)
 

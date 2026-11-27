@@ -42,7 +42,7 @@ export function referenceFrame(clip: ReferenceClip, timeSec = 0): ReferenceFrame
   while (index > 0 && frames[index].t_s > timeSec) index--;
   return frames[index] ?? null;
 }
-export function paintReferenceFrame(svg: SVGSVGElement, frame: PaintableTractFrame, options: { labels?: boolean; background?: string; showHead?: boolean; controls?: boolean; viewBox?: TractViewBox } = {}) {
+export function paintReferenceFrame(svg: SVGSVGElement, frame: PaintableTractFrame, options: { labels?: boolean; background?: string; showHead?: boolean; bustBase?: boolean; controls?: boolean; viewBox?: TractViewBox } = {}) {
   const clamp = (v: number, lo: number, hi: number) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo);
   renderM27TractSvg(svg, {}, {
     parts: frame.contours,
@@ -50,7 +50,7 @@ export function paintReferenceFrame(svg: SVGSVGElement, frame: PaintableTractFra
     nasal: Math.max(0, Number.isFinite(frame.nasal_area_cm2) ? frame.nasal_area_cm2 : 0),
     ja: clamp(frame.params[3], -7.0, 0.0),
     jx: clamp(frame.params[2], -0.5, 0.0),
-  }, { showLabels: options.labels ?? false, showGhost: false, showHead: options.showHead, showControls: options.controls,
+  }, { showLabels: options.labels ?? false, showGhost: false, showHead: options.showHead, bustBase: options.bustBase, showControls: options.controls,
     viewBox: options.viewBox, theme: { anatomyBg: options.background ?? 'transparent' } });
 }
 

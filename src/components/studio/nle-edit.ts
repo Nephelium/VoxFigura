@@ -77,7 +77,10 @@ export function splitTimelineClips(
       const sourceStartSmp = clip.sourceStartSmp + startSmp - clip.startSmp;
       const matches = names?.find(syllable => syllable.start_smp < sourceStartSmp + endSmp - startSmp &&
         sourceStartSmp < syllable.end_smp);
-      const label = names ? matches?.text ?? '间隔' : index ? clip.label + ' (2)' : clip.label;
+      const suffixMatch = clip.label.match(/\s*\((\d+)\)$/);
+      const baseLabel = suffixMatch ? clip.label.slice(0, suffixMatch.index) : clip.label;
+      const startIndex = suffixMatch ? Number(suffixMatch[1]) : 1;
+      const label = names ? matches?.text ?? '间隔' : index ? `${baseLabel} (${startIndex + index})` : clip.label;
       return { ...clip, id: index ? crypto.randomUUID() : clip.id, startSmp, endSmp, sourceStartSmp, label };
     }));
   }

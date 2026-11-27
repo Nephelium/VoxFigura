@@ -61,18 +61,22 @@ _LOG_F0_MAX = float(np.log(600.0))
 
 
 def normalize_m27_phys(m27_phys: np.ndarray) -> np.ndarray:
-    """Self-contained exact M27 normalization matching tt3.m27_contract."""
-    arr = np.clip(np.asarray(m27_phys, dtype=np.float32), M27_MIN_PHYS, M27_MAX_PHYS)
-    out = 2.0 * (arr - M27_MIN_PHYS) / (M27_MAX_PHYS - M27_MIN_PHYS) - 1.0
-    out[..., F0_INDEX] = (2.0 * (np.log(arr[..., F0_INDEX]) - _LOG_F0_MIN) / (_LOG_F0_MAX - _LOG_F0_MIN) - 1.0)
-    return np.clip(out, -1.0, 1.0).astype(np.float32)
+    """Self-contained exact M27 normalization matching tt3.m27_contract (unclamped log-F0)."""
+    raw = np.asarray(m27_phys, dtype=np.float32)
+    arr = np.clip(raw, M27_MIN_PHYS, M27_MAX_PHYS)
+    out = np.clip(2.0 * (arr - M27_MIN_PHYS) / (M27_MAX_PHYS - M27_MIN_PHYS) - 1.0, -1.0, 1.0)
+    f0_safe = np.maximum(raw[..., F0_INDEX], np.float32(1e-3))
+    out[..., F0_INDEX] = (2.0 * (np.log(f0_safe) - _LOG_F0_MIN) / (_LOG_F0_MAX - _LOG_F0_MIN) - 1.0)
+    return out.astype(np.float32)
 
 
 def denormalize_m27_norm(m27_norm: np.ndarray) -> np.ndarray:
-    """Self-contained exact M27 denormalization matching tt3.m27_contract."""
-    arr = np.clip(np.asarray(m27_norm, dtype=np.float32), -1.0, 1.0)
+    """Self-contained exact M27 denormalization matching tt3.m27_contract (unclamped log-F0)."""
+    raw = np.asarray(m27_norm, dtype=np.float32)
+    arr = np.clip(raw, -1.0, 1.0)
     out = 0.5 * (arr + 1.0) * (M27_MAX_PHYS - M27_MIN_PHYS) + M27_MIN_PHYS
-    out[..., F0_INDEX] = np.exp(0.5 * (arr[..., F0_INDEX] + 1.0) * (_LOG_F0_MAX - _LOG_F0_MIN) + _LOG_F0_MIN)
+    f0_n = np.clip(raw[..., F0_INDEX], np.float32(-10.0), np.float32(10.0))
+    out[..., F0_INDEX] = np.exp(0.5 * (f0_n + 1.0) * (_LOG_F0_MAX - _LOG_F0_MIN) + _LOG_F0_MIN)
     return out.astype(np.float32)
 
 
@@ -87,8 +91,247 @@ class PresetMorphConfig:
     f0_shift_semitones: Optional[float] = None  # None -> use the preset's register target or semitone shift
     f0_coupling_strength: float = 1.0
     pr_modulation_ratio: float = 0.60     # Scales natural PR envelope toward preset PR without flattening prosody
+    creak_irregularity: float = 0.30      # 0.0 = regular periodic pulses, 1.0 = strong irregular creak jitter/shimmer
+    diplophonia_mode: str = "parallel"    # "parallel" | "ventricular" | "vertical"
+    diplophonia_ratio: float = 0.73       # Secondary/primary vibration frequency ratio f2/f1
     fps: float = 50.0
     output_f0_range_hz: Optional[Tuple[float, float]] = None
+
+
+DIPLOPHONIA_MODES: Dict[str, Dict[str, Any]] = {
+    "parallel": {
+        "default_ratio": 0.73,
+        "ratio_b_max": 0.38,
+        "am_depth_max": 0.0,
+        "contour_tracking": 1.0,
+        "slow_drift": 0.0,
+        "source_blend": 0.35,
+        "secondary_source9_phys": [9200.0, -0.008, -0.010, -0.015, 1.85, 0.85, 0.75, 22.0, 18.0],
+    },
+    "ventricular": {
+        "default_ratio": 0.58,
+        "ratio_b_max": 0.36,
+        "am_depth_max": 0.28,
+        "contour_tracking": 0.28,
+        "slow_drift": 0.025,
+        "source_blend": 0.50,
+        "secondary_source9_phys": [9200.0, -0.008, -0.010, -0.015, 1.85, 0.85, 0.75, 22.0, 18.0],
+    },
+    "vertical": {
+        "default_ratio": 1.37,
+        "ratio_b_max": 0.34,
+        "am_depth_max": 0.16,
+        "contour_tracking": 1.0,
+        "slow_drift": 0.010,
+        "source_blend": 0.55,
+        "secondary_source9_phys": [8200.0, 0.018, 0.022, 0.010, 0.65, 0.45, 0.05, 16.0, 10.0],
+    },
+}
+
+
+def _smooth_1d_gaussian(arr: np.ndarray, sigma: float) -> np.ndarray:
+    """Pure-NumPy 1D Gaussian smoothing with edge padding for click-free sample gates."""
+    x = np.asarray(arr, dtype=np.float64)
+    if sigma < 0.75 or x.size < 4:
+        return x
+    radius = max(1, int(round(3.0 * sigma)))
+    grid = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (grid / sigma) ** 2)
+    kernel /= float(np.sum(kernel))
+    padded = np.pad(x, (radius, radius), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def mix_diplophonia_audio(
+    wav_primary: np.ndarray,
+    wav_secondary: np.ndarray,
+    mix_curve_50hz: np.ndarray,
+    f_b_50hz: np.ndarray,
+    sample_rate: int,
+    *,
+    ratio_b_max: float = 0.36,
+    am_depth_max: float = 0.0,
+    fps: float = 50.0,
+) -> np.ndarray:
+    """Mix two shared-tract tracks along `mix_curve_50hz` with constant-power crossfade and optional series AM."""
+    a = np.asarray(wav_primary, dtype=np.float64).reshape(-1)
+    b = np.asarray(wav_secondary, dtype=np.float64).reshape(-1)
+    n = min(a.size, b.size)
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    a = a[:n].copy()
+    b = b[:n].copy()
+
+    curve = np.asarray(mix_curve_50hz, dtype=np.float64).reshape(-1)
+    if curve.size == 0 or float(np.max(curve)) <= 1e-5:
+        return a.astype(np.float32)
+
+    t_frames = (np.arange(curve.size, dtype=np.float64) + 0.5) / float(fps)
+    t_samp = np.arange(n, dtype=np.float64) / float(sample_rate)
+    w_raw = np.interp(t_samp, t_frames, curve)
+    w_s = np.clip(_smooth_1d_gaussian(w_raw, sigma=max(1.0, 0.012 * float(sample_rate))), 0.0, 1.0)
+
+    # Match track B's voiced-region RMS to track A's voiced-region RMS before applying mix ratio
+    active = w_s > 0.25
+    if not np.any(active):
+        active = w_s > 0.05
+    if np.any(active):
+        rms_a = float(np.sqrt(np.mean(a[active] ** 2)) + 1e-12)
+        rms_b = float(np.sqrt(np.mean(b[active] ** 2)) + 1e-12)
+        if rms_b > 1e-6:
+            b = b * (rms_a / rms_b)
+
+    # Optional series envelope modulation at instantaneous secondary frequency f_b(t) -> a +/- b sidebands
+    if am_depth_max > 1e-5 and np.asarray(f_b_50hz).size > 0:
+        fb_arr = np.asarray(f_b_50hz, dtype=np.float64).reshape(-1)
+        t_fb = (np.arange(fb_arr.size, dtype=np.float64) + 0.5) / float(fps)
+        fb_s = np.maximum(1.0, np.interp(t_samp, t_fb, fb_arr))
+        phi_b = 2.0 * np.pi * np.cumsum(fb_s) / float(sample_rate)
+        m_t = float(np.clip(am_depth_max, 0.0, 0.65)) * w_s
+        wave = 0.85 * np.cos(phi_b) + 0.15 * np.cos(2.0 * phi_b)
+        norm_rms = np.sqrt(1.0 + 0.5 * (0.85**2 + 0.15**2) * (m_t**2))
+        a = a * ((1.0 + m_t * wave) / norm_rms)
+
+    rb = float(np.clip(ratio_b_max, 0.0, 0.85))
+    theta_max = float(np.arctan(rb / max(1e-4, 1.0 - rb)))
+    theta = theta_max * w_s
+    mixed = np.cos(theta) * a + np.sin(theta) * b
+    return np.ascontiguousarray(mixed, dtype=np.float32)
+
+
+def _zero_phase_butter2_split(x: np.ndarray, cutoff_hz: float, sample_rate: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Pure-NumPy zero-phase 2nd-order Butterworth split: |H_lo(f)|^2 = 1 / (1 + (f / fc)^4)."""
+    arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    n = arr.size
+    if n < 8 or cutoff_hz <= 0.0 or cutoff_hz >= 0.49 * float(sample_rate):
+        return arr.copy(), np.zeros_like(arr)
+    pad = min(n - 1, max(32, int(round(0.015 * float(sample_rate)))))
+    padded = np.pad(arr, (pad, pad), mode="reflect")
+    m = padded.size
+    nfft = 1 << (m - 1).bit_length()
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / float(sample_rate))
+    ratio4 = np.power(freqs / float(cutoff_hz), 4.0)
+    h_lo = 1.0 / (1.0 + ratio4)
+    spec = np.fft.rfft(padded, n=nfft)
+    lo_full = np.fft.irfft(spec * h_lo, n=nfft)[pad : pad + n]
+    return lo_full, arr - lo_full
+
+
+def apply_voiced_falsetto_softening(
+    wav: np.ndarray,
+    w_eff_50hz: np.ndarray,
+    sample_rate: int,
+    *,
+    cutoff_hz: float = 950.0,
+    atten_db: float = -10.0,
+    fps: float = 50.0,
+) -> np.ndarray:
+    """Voiced-only sinusoidal falsetto spectral-tilt softening (attenuates chest-voice buzz while keeping consonants crisp)."""
+    x = np.asarray(wav, dtype=np.float64).reshape(-1)
+    n = x.size
+    curve = np.asarray(w_eff_50hz, dtype=np.float64).reshape(-1)
+    if n == 0 or curve.size == 0 or float(np.max(curve)) <= 1e-5:
+        return np.ascontiguousarray(x, dtype=np.float32)
+
+    t_f = (np.arange(curve.size, dtype=np.float64) + 0.5) / float(fps)
+    t_s = np.arange(n, dtype=np.float64) / float(sample_rate)
+    g = np.clip(_smooth_1d_gaussian(np.interp(t_s, t_f, curve), sigma=max(1.0, 0.012 * float(sample_rate))), 0.0, 1.0)
+
+    x_lo, x_hi = _zero_phase_butter2_split(x, cutoff_hz, sample_rate)
+    hi_gain = float(10.0 ** (float(atten_db) / 20.0))
+    x_soft = x_lo + hi_gain * x_hi
+
+    v = g > 0.5
+    if np.any(v):
+        r0 = float(np.sqrt(np.mean(x[v] ** 2)) + 1e-12)
+        r1 = float(np.sqrt(np.mean(x_soft[v] ** 2)) + 1e-12)
+        if r1 > 1e-6:
+            x_soft = x_soft * (r0 / r1)
+
+    return np.ascontiguousarray(x * (1.0 - g) + x_soft * g, dtype=np.float32)
+
+
+def apply_subharmonic_creaky_falsetto(
+    wav: np.ndarray,
+    f0_50hz: np.ndarray,
+    w_eff_50hz: np.ndarray,
+    sample_rate: int,
+    *,
+    w2: float = 0.28,
+    w3: float = 0.44,
+    w4: float = 0.28,
+    sharpness: float = 2.0,
+    floor_lvl: float = 0.14,
+    irregularity: float = 0.30,
+    bifurcation: bool = True,
+    crisp_shelf_db: float = 5.8,
+    crisp_hz: float = 1050.0,
+    fps: float = 50.0,
+) -> np.ndarray:
+    """Laver Fig. 17b-2/3 faithful F0-locked period-2/3/4 subharmonic creaky-falsetto modulator (pure NumPy)."""
+    x = np.asarray(wav, dtype=np.float64).reshape(-1)
+    n = x.size
+    curve = np.asarray(w_eff_50hz, dtype=np.float64).reshape(-1)
+    f0_arr = np.asarray(f0_50hz, dtype=np.float64).reshape(-1)
+    if n == 0 or curve.size == 0 or f0_arr.size == 0 or float(np.max(curve)) <= 1e-5:
+        return np.ascontiguousarray(x, dtype=np.float32)
+
+    t_f = (np.arange(curve.size, dtype=np.float64) + 0.5) / float(fps)
+    t_f0 = (np.arange(f0_arr.size, dtype=np.float64) + 0.5) / float(fps)
+    t_s = np.arange(n, dtype=np.float64) / float(sample_rate)
+    g = np.clip(_smooth_1d_gaussian(np.interp(t_s, t_f, curve), sigma=max(1.0, 0.010 * float(sample_rate))), 0.0, 1.0)
+    f0_s = np.maximum(60.0, np.interp(t_s, t_f0, f0_arr))
+
+    ir = float(np.clip(irregularity, 0.0, 1.0))
+    micro_jit = 1.0 + 0.075 * ir * (
+        0.55 * np.sin(2.0 * np.pi * 13.7 * t_s + 0.4)
+        + 0.45 * np.sin(2.0 * np.pi * 23.3 * t_s + 1.9)
+    )
+    phi0 = 2.0 * np.pi * np.cumsum(f0_s * micro_jit) / float(sample_rate)
+
+    p2 = np.power(0.5 + 0.5 * np.cos(0.5 * phi0), sharpness)
+    p3 = np.power(0.5 + 0.5 * np.cos((1.0 / 3.0) * phi0 + 0.7), sharpness)
+    p4 = np.power(0.5 + 0.5 * np.cos(0.25 * phi0 + 1.6), sharpness)
+
+    if bifurcation and ir > 1e-4:
+        sw = 0.5 + 0.5 * np.sin(2.0 * np.pi * 5.3 * t_s + 0.6 * np.sin(2.0 * np.pi * 2.1 * t_s))
+        eff_w2 = w2 * (0.45 + 0.55 * sw)
+        eff_w3 = w3 * (0.45 + 0.55 * (1.0 - sw))
+        eff_w4 = w4 * (0.35 + 0.65 * (1.0 - sw))
+    else:
+        eff_w2, eff_w3, eff_w4 = w2, w3, w4
+
+    alt = (eff_w2 * p2 + eff_w3 * p3 + eff_w4 * p4) / (eff_w2 + eff_w3 + eff_w4 + 1e-12)
+    shimmer = 1.0 + 0.28 * ir * (
+        0.60 * np.sin(2.0 * np.pi * 17.3 * t_s + 1.1)
+        + 0.40 * np.sin(2.0 * np.pi * 29.1 * t_s + 2.3)
+    )
+    alt = np.clip(alt * shimmer, 0.0, 1.25)
+
+    env_sub = floor_lvl + (1.0 - floor_lvl) * alt
+    env_rms = float(np.sqrt(np.mean(env_sub**2)) + 1e-12)
+    env_norm = env_sub / env_rms
+
+    if crisp_shelf_db > 0.1:
+        _, x_hi = _zero_phase_butter2_split(x, crisp_hz, sample_rate)
+        spike_gate = np.clip((alt - 0.35) / 0.65, 0.0, 1.0)
+        hi_boost = (10.0 ** (float(crisp_shelf_db) / 20.0) - 1.0) * (0.35 + 0.65 * spike_gate) * g
+        x_crisp = x + hi_boost * x_hi
+    else:
+        x_crisp = x
+
+    y = x_crisp * env_norm
+    v = g > 0.5
+    if np.any(v):
+        peak_v = float(np.percentile(np.abs(y[v]), 98) + 1e-12)
+        yn = y / peak_v
+        y_asym = (yn + 0.14 * np.maximum(0.0, yn) ** 2) * peak_v
+        r0 = float(np.sqrt(np.mean(x[v] ** 2)) + 1e-12)
+        r1 = float(np.sqrt(np.mean(y_asym[v] ** 2)) + 1e-12)
+        if r1 > 1e-6:
+            y = y_asym * (r0 / r1)
+
+    return np.ascontiguousarray(x * (1.0 - g) + y * g, dtype=np.float32)
 
 
 @dataclass
@@ -106,41 +349,77 @@ class DualMorphConfig:
     output_f0_range_hz: Optional[Tuple[float, float]] = None
 
 
-def _raise_f0_register(
+def _shift_f0_register(
     f0_hz: np.ndarray,
     curve: np.ndarray,
     voiced_gate: np.ndarray,
     config: PresetMorphConfig,
     target_hz: float,
-) -> Tuple[np.ndarray, float]:
-    """Raise the high-weight voiced register while retaining the input pitch contour."""
-    lo, hi = config.output_f0_range_hz or (float(M27_MIN_PHYS[F0_INDEX]), float(M27_MAX_PHYS[F0_INDEX]))
-    if not lo <= target_hz <= hi:
-        raise F0ShiftOutOfRange(target_hz)
+    *,
+    min_lift_semitones: float = 0.0,
+) -> Tuple[np.ndarray, float, float]:
+    """Shift the high-weight voiced register up (falsetto, speaker-adaptive) or down (creaky/creak) while retaining pitch contour."""
+    if config.output_f0_range_hz is not None:
+        lo, hi = config.output_f0_range_hz
+        if not lo <= target_hz <= hi:
+            raise F0ShiftOutOfRange(target_hz)
+    else:
+        lo, hi = None, None
     voiced = (voiced_gate >= 0.5) & (curve > 1e-4)
     if not np.any(voiced) or config.f0_coupling_strength <= 0.0:
-        return f0_hz, 0.0
+        return f0_hz, 0.0, target_hz
 
     # A steady 80% modulation reaches the target. Weaker weights ease into the register.
     full_weight = 0.8
     reference_frames = voiced & (curve >= min(full_weight, 0.9 * float(np.max(curve[voiced]))))
     reference_hz = float(np.median(f0_hz[reference_frames]))
-    if reference_hz >= target_hz:
-        return f0_hz, 0.0
+    lowering = target_hz < 100.0
+    effective_target_hz = float(target_hz)
+    if not lowering and min_lift_semitones > 0.0:
+        # Adapt falsetto register upward for high-pitched / female speakers whose modal F0 is already 200-360 Hz.
+        adaptive_hz = reference_hz * float(2.0 ** (min_lift_semitones / 12.0))
+        if hi is not None:
+            adaptive_hz = min(adaptive_hz, hi * 0.96)
+        effective_target_hz = max(effective_target_hz, adaptive_hz)
+
+    if lowering and reference_hz <= effective_target_hz:
+        return f0_hz, 0.0, effective_target_hz
+    if not lowering and reference_hz >= effective_target_hz:
+        return f0_hz, 0.0, effective_target_hz
 
     mix = np.minimum(curve / full_weight, 1.0)
     if config.enable_voicing_gate:
         # SwiftF0-confirmed voicing contributes 0.75 to the shared soft gate.
         mix *= np.minimum(voiced_gate / 0.75, 1.0)
-    pitch_octaves = np.log2(f0_hz.astype(np.float64) / reference_hz)
-    high_excursion = float(np.max(pitch_octaves[mix > 0.0]))
-    headroom = np.log2(hi / target_hz)
-    contour_scale = headroom / high_excursion if high_excursion > headroom else 1.0
-    register_shift = np.log2(target_hz / reference_hz)
-    # Reduce the contour's span only when its high excursions would exceed the model range.
-    shift_octaves = np.maximum(0.0, register_shift + (contour_scale - 1.0) * pitch_octaves)
+    pitch_octaves = np.log2(np.maximum(f0_hz.astype(np.float64), 1e-3) / max(reference_hz, 1e-3))
+    register_shift = np.log2(effective_target_hz / max(reference_hz, 1e-3))
+    if lowering:
+        floor_hz = lo if lo is not None else min(36.0, max(20.0, effective_target_hz * 0.80))
+        low_excursion = float(np.min(pitch_octaves[mix > 0.0]))
+        footroom = np.log2(min(floor_hz, effective_target_hz) / effective_target_hz)
+        if low_excursion < footroom and abs(low_excursion) > 1e-9:
+            contour_scale = max(0.0, footroom / low_excursion)
+        else:
+            contour_scale = 1.0
+        shift_octaves = np.minimum(0.0, register_shift + (contour_scale - 1.0) * pitch_octaves)
+    else:
+        high_excursion = float(np.max(pitch_octaves[mix > 0.0]))
+        if hi is not None:
+            headroom = np.log2(hi / effective_target_hz)
+            contour_scale = headroom / high_excursion if high_excursion > headroom else 1.0
+        else:
+            contour_scale = 1.0
+        # Reduce the contour's span only when its high excursions would exceed the model range.
+        shift_octaves = np.maximum(0.0, register_shift + (contour_scale - 1.0) * pitch_octaves)
     applied_octaves = mix * min(config.f0_coupling_strength, 1.0) * shift_octaves
-    return (f0_hz * np.exp2(applied_octaves)).astype(np.float32), float(12.0 * np.median(applied_octaves[reference_frames]))
+    return (
+        (f0_hz * np.exp2(applied_octaves)).astype(np.float32),
+        float(12.0 * np.median(applied_octaves[reference_frames])),
+        round(effective_target_hz, 1),
+    )
+
+
+_raise_f0_register = _shift_f0_register
 
 
 def apply_preset_phonation_morph(
@@ -163,6 +442,7 @@ def apply_preset_phonation_morph(
     target_pr = float(src9[0])
     target_glot8 = src9[1:9]  # [XB, XT, CA, LAG, RA, PS, FL, SHIM]
     is_voiceless_target = bool(preset.get("is_voiceless_target", False))
+    is_diplophonia = bool(preset.get("supports_diplophonia", False))
 
     w_raw = sample_curve_50hz(
         config.knots,
@@ -184,15 +464,26 @@ def apply_preset_phonation_morph(
 
     phys_out = phys_in.copy()
 
-    # 1. Blend 8-dim glottis smoothly toward target preset
-    w_col = w_eff[:, None]
-    phys_out[:, 19:27] = (1.0 - w_col) * phys_in[:, 19:27] + w_col * target_glot8[None, :]
+    if not is_diplophonia:
+        # 1. Blend 8-dim glottis smoothly toward target preset
+        w_col = w_eff[:, None]
+        phys_out[:, 19:27] = (1.0 - w_col) * phys_in[:, 19:27] + w_col * target_glot8[None, :]
 
-    # 2. Modulate PR relative to modal baseline (8200 dPa) while preserving natural loudness contour & silence
-    modal_pr = 8200.0
-    pr_ratio = np.clip(target_pr / modal_pr, 0.35, 1.80)
-    pr_scale = 1.0 + w_eff * (pr_ratio - 1.0) * float(np.clip(config.pr_modulation_ratio, 0.0, 1.0))
-    phys_out[:, PR_INDEX] = np.clip(phys_in[:, PR_INDEX] * pr_scale, 0.0, 16000.0)
+        # 1b. Optional larynx height offset (HY index = 1, cm) for VoQS L̝ / L̞ presets
+        hy_delta = preset.get("larynx_hy_delta_cm")
+        if isinstance(hy_delta, (int, float)) and abs(float(hy_delta)) > 1e-5:
+            phys_out[:, 1] = np.clip(
+                phys_in[:, 1] + w_eff * float(hy_delta),
+                float(M27_MIN_PHYS[1]),
+                float(M27_MAX_PHYS[1]),
+            )
+
+        # 2. Modulate PR relative to modal baseline (8200 dPa) while preserving natural loudness contour & silence
+        modal_pr = 8200.0
+        pr_ratio = np.clip(target_pr / modal_pr, 0.20, 1.80)
+        pr_mod_ratio = float(preset.get("pr_modulation_ratio", config.pr_modulation_ratio))
+        pr_scale = 1.0 + w_eff * (pr_ratio - 1.0) * float(np.clip(pr_mod_ratio, 0.0, 1.0))
+        phys_out[:, PR_INDEX] = np.clip(phys_in[:, PR_INDEX] * pr_scale, 0.0, 16000.0)
 
     # 3. Optional F0 coupling (strictly gated on voiced frames so unvoiced segments never get distorted)
     f0_before = phys_in[:, F0_INDEX].copy()
@@ -204,12 +495,13 @@ def apply_preset_phonation_morph(
     applied_semitones = 0.0
     applied_target_hz = None
     target_hz = preset.get("f0_target_hz") if config.f0_shift_semitones is None else None
+    min_lift_st = float(preset.get("f0_min_lift_semitones") or 0.0)
     if config.enable_f0_coupling and target_hz is not None:
-        phys_out[:, F0_INDEX], applied_semitones = _raise_f0_register(
-            f0_before, w_smooth, voiced_gate, config, float(target_hz),
+        phys_out[:, F0_INDEX], applied_semitones, effective_target = _shift_f0_register(
+            f0_before, w_smooth, voiced_gate, config, float(target_hz), min_lift_semitones=min_lift_st,
         )
-        if applied_semitones > 0.0:
-            applied_target_hz = target_hz
+        if abs(applied_semitones) > 1e-4:
+            applied_target_hz = effective_target
     elif config.enable_f0_coupling and abs(semitones) > 1e-4:
         f0_gate = w_smooth * voiced_gate if config.enable_voicing_gate else w_smooth
         phys_out[:, F0_INDEX] = apply_f0_semitone_coupling(
@@ -220,6 +512,149 @@ def apply_preset_phonation_morph(
             output_range_hz=config.output_f0_range_hz,
         )
         applied_semitones = semitones * config.f0_coupling_strength
+
+    # 3b. Deterministic regular <-> irregular F0 jitter & crisp pulse-amplitude shimmer for creak / creaky presets
+    f0_jitter_ratio = float(preset.get("f0_jitter_ratio") or 0.0)
+    pr_pulse_ratio = float(preset.get("pr_pulse_ratio") or 0.0)
+    if (f0_jitter_ratio > 1e-4 or pr_pulse_ratio > 1e-4) and n_frames > 0:
+        irreg = float(np.clip(config.creak_irregularity, 0.0, 1.0))
+        irreg_scale = irreg / 0.70  # 0.0 -> 0x (regular), 0.70 -> 1.0x (default), 1.0 -> 1.43x (strong fry)
+        t_sec = np.arange(n_frames, dtype=np.float64) / float(config.fps)
+        jitter_gate = (
+            (w_smooth * np.minimum(voiced_gate / 0.75, 1.0)).astype(np.float64)
+            if config.enable_voicing_gate
+            else w_smooth.astype(np.float64)
+        )
+        # Scale FL (25) & SHIM (26) perturbation channels with irregularity so 0% yields clean regular pulses
+        fl_shim_scale = 0.30 + 0.70 * min(1.30, irreg_scale)
+        for dim_idx in (25, 26):
+            target_pert = float(np.clip(target_glot8[dim_idx - 19] * fl_shim_scale, 0.0, 100.0))
+            phys_out[:, dim_idx] = ((1.0 - w_eff) * phys_in[:, dim_idx] + w_eff * target_pert).astype(np.float32)
+
+        if f0_jitter_ratio > 1e-4 and irreg > 1e-4:
+            # Sub-Nyquist incommensurate waves on 50 Hz grid -> irregular diplophonic / vocal fry pitch flutter
+            f0_wave = (
+                0.50 * np.sin(2.0 * np.pi * 19.3 * t_sec + 0.4)
+                + 0.32 * np.sin(2.0 * np.pi * 11.7 * t_sec + 1.9)
+                + 0.18 * np.sin(2.0 * np.pi * 6.1 * t_sec + 3.1)
+            )
+            f0_next = phys_out[:, F0_INDEX].astype(np.float64) * np.exp(
+                jitter_gate * (f0_jitter_ratio * irreg_scale) * f0_wave
+            )
+            if config.output_f0_range_hz is not None:
+                lo_j, hi_j = config.output_f0_range_hz
+                f0_next = np.clip(f0_next, lo_j, hi_j)
+            else:
+                f0_next = np.maximum(f0_next, 20.0)
+            phys_out[:, F0_INDEX] = f0_next.astype(np.float32)
+        if pr_pulse_ratio > 1e-4:
+            # Blend from clean periodic pulse train (irreg=0) to sharp asymmetric irregular creak pulses (irreg>0)
+            reg_wave = np.sin(2.0 * np.pi * 12.5 * t_sec)
+            irreg_raw = (
+                0.52 * np.sin(2.0 * np.pi * 17.3 * t_sec + 1.1)
+                + 0.30 * np.sin(2.0 * np.pi * 9.7 * t_sec + 2.6)
+                + 0.18 * np.sin(2.0 * np.pi * 4.9 * t_sec + 0.2)
+            )
+            # Carve sharper inter-pulse troughs so discrete creak pulses punch cleanly even in falsetto register
+            irreg_sharp = 2.0 * np.power(np.clip(0.5 + 0.5 * irreg_raw, 0.0, 1.0), 1.75) - 1.0
+            amp_wave = (1.0 - irreg) * (0.55 * reg_wave) + irreg * irreg_sharp
+            pulse_strength = pr_pulse_ratio * (0.45 + 0.55 * irreg_scale)
+            pulse_gain = np.clip(1.0 + jitter_gate * pulse_strength * amp_wave, 0.18, 1.55)
+            phys_out[:, PR_INDEX] = np.clip(phys_out[:, PR_INDEX] * pulse_gain, 0.0, 16000.0).astype(np.float32)
+            ra_pulse = np.clip(1.0 + jitter_gate * (0.85 * pulse_strength) * amp_wave, 0.05, 1.35)
+            phys_out[:, 23] = np.clip(phys_out[:, 23] * ra_pulse, -1.0, 1.0).astype(np.float32)
+
+    # 3c. Dual-source shared-tract diplophonia (V‼) secondary vocal source track
+    diplophonia_payload: Optional[Dict[str, Any]] = None
+    if is_diplophonia:
+        dip_mode = config.diplophonia_mode if config.diplophonia_mode in DIPLOPHONIA_MODES else str(
+            preset.get("default_diplophonia_mode", "parallel")
+        )
+        spec = DIPLOPHONIA_MODES[dip_mode]
+        ratio = float(config.diplophonia_ratio)
+        if not np.isfinite(ratio) or ratio <= 0.0:
+            raise F0ShiftOutOfRange(ratio)
+
+        f0_primary = phys_out[:, F0_INDEX].astype(np.float64)
+        v_mask = voiced_gate >= 0.5
+        med_f0 = float(np.median(f0_primary[v_mask])) if np.any(v_mask) else float(np.median(f0_primary))
+        tracking = float(spec["contour_tracking"])
+        base_contour = (1.0 - tracking) * med_f0 + tracking * f0_primary
+        f0_sec_raw = base_contour * ratio
+        slow_drift = float(spec["slow_drift"])
+        if slow_drift > 0.0 and n_frames > 0:
+            t_sec = np.arange(n_frames, dtype=np.float64) / float(config.fps)
+            drift = (
+                1.0
+                + slow_drift * np.sin(2.0 * np.pi * 2.7 * t_sec)
+                + 0.6 * slow_drift * np.sin(2.0 * np.pi * 6.3 * t_sec + 1.1)
+            )
+            f0_sec_raw = f0_sec_raw * drift
+
+        active_v = v_mask & (w_smooth > 1e-4)
+        if config.output_f0_range_hz is not None and np.any(active_v):
+            lo_d, hi_d = config.output_f0_range_hz
+            min_v = float(np.min(f0_sec_raw[active_v]))
+            max_v = float(np.max(f0_sec_raw[active_v]))
+            if min_v < lo_d:
+                raise F0ShiftOutOfRange(min_v)
+            if max_v > hi_d:
+                raise F0ShiftOutOfRange(max_v)
+        elif np.any(active_v):
+            min_v = float(np.min(f0_sec_raw[active_v]))
+            if not np.isfinite(min_v) or min_v <= 0.0:
+                raise F0ShiftOutOfRange(min_v)
+
+        vg = voiced_gate.astype(np.float64)
+        f0_sec = f0_primary * (1.0 - vg) + f0_sec_raw * vg
+        phys_secondary = phys_out.copy()
+        phys_secondary[:, F0_INDEX] = f0_sec.astype(np.float32)
+        sec_src9 = np.asarray(spec["secondary_source9_phys"], dtype=np.float32)
+        blend_w = (float(spec["source_blend"]) * voiced_gate)[:, None].astype(np.float32)
+        phys_secondary[:, 18:27] = (1.0 - blend_w) * phys_out[:, 18:27] + blend_w * sec_src9[None, :]
+        phys_secondary[:, PR_INDEX] = np.clip(phys_secondary[:, PR_INDEX], 0.0, 16000.0)
+
+        diplophonia_payload = {
+            "mode": dip_mode,
+            "ratio": round(ratio, 3),
+            "m27_secondary_phys": phys_secondary,
+            "m27_secondary_norm": normalize_m27_phys(phys_secondary),
+            "f_b_50hz": phys_secondary[:, F0_INDEX].copy(),
+            "mix_curve_50hz": w_eff.copy(),
+            "ratio_b_max": float(spec["ratio_b_max"]),
+            "am_depth_max": float(spec["am_depth_max"]),
+        }
+
+    # 3d. Optional preset-specific audio post-processing specs (sinusoidal falsetto softening, F0-locked
+    #     Laver 17b-2/3 subharmonic creaky-falsetto, and shared-tract continuous posterior-chink whisper air)
+    audio_post: Optional[Dict[str, Any]] = None
+    post_soft = preset.get("post_soft_falsetto")
+    post_sub = preset.get("post_subharmonic_creak")
+    post_air = float(preset.get("post_whisper_air_ratio") or 0.0)
+    if post_soft or post_sub or post_air > 1e-4:
+        audio_post = {}
+        if isinstance(post_soft, dict):
+            audio_post["soft_falsetto"] = dict(post_soft)
+        if isinstance(post_sub, dict):
+            audio_post["subharmonic_creak"] = {
+                **post_sub,
+                "irregularity": float(np.clip(config.creak_irregularity, 0.0, 1.0)),
+            }
+        if post_air > 1e-4:
+            whisper_src9 = np.asarray(BUILTIN_PHONATION_PRESETS["whisper"]["source9_phys"], dtype=np.float32)
+            w_air = (w_smooth * speech_gate).astype(np.float32) if config.enable_voicing_gate else w_smooth.copy()
+            phys_air = phys_in.copy()
+            w_air_col = w_air[:, None]
+            phys_air[:, 19:27] = (1.0 - w_air_col) * phys_in[:, 19:27] + w_air_col * whisper_src9[1:9][None, :]
+            pr_air_ratio = float(np.clip(float(whisper_src9[0]) / 8200.0, 0.20, 1.80))
+            pr_air_scale = 1.0 + w_air * (pr_air_ratio - 1.0) * float(np.clip(config.pr_modulation_ratio, 0.0, 1.0))
+            phys_air[:, PR_INDEX] = np.clip(phys_in[:, PR_INDEX] * pr_air_scale, 0.0, 16000.0)
+            audio_post["whisper_air"] = {
+                "ratio_b_max": float(np.clip(post_air, 0.0, 0.60)),
+                "m27_whisper_phys": phys_air,
+                "m27_whisper_norm": normalize_m27_phys(phys_air),
+                "mix_curve_50hz": w_air,
+            }
 
     norm_out = normalize_m27_phys(phys_out)
     return {
@@ -234,6 +669,8 @@ def apply_preset_phonation_morph(
         "f0_after_hz": phys_out[:, F0_INDEX].copy(),
         "applied_semitones": round(applied_semitones, 2),
         "f0_target_hz": applied_target_hz,
+        "diplophonia": diplophonia_payload,
+        "audio_post": audio_post,
     }
 
 

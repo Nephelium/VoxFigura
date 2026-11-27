@@ -1,7 +1,7 @@
 import { SAMPLE_RATE_HZ, type Syllable, type VcProject } from '@vocalcut/core';
 import type { DuetContour, DuetKey, DuetLayer, DuetPoint, DuetScene } from './legacy-duet';
 import { drawStageCaption, stageLyricTokens, type StageCaptionBounds } from './stage-caption';
-import { stageAnatomy, stageClipAnatomy, stagePhraseId } from './stage-tract-renderer';
+import { readStageTractViewConfig, stageAnatomy, stageClipAnatomy, stagePhraseId } from './stage-tract-renderer';
 import { isStageAudioTrack, stageLayer, type NleClip, type StageTargetId } from './nle-timeline';
 import { mediaUrl, sessionMedia } from './studio-media';
 import { type ActorId, type SceneOptions, type Transform } from './stage-scene';
@@ -221,13 +221,30 @@ export async function drawDuetScene(canvas: HTMLCanvasElement, project: VcProjec
   const playing = (track: StageTargetId) => clips.filter(clip=>clip.track===track && active(clip,sample));
   const track = stageLayer(project,'v1');
   const style = track?.tract_render_style ?? 'natural';
+  const tractView = readStageTractViewConfig(track);
   const voices = track?.visible ? playing('v1').reverse() : [];
-  const [pictures, anatomy] = await Promise.all([prepareDuetScene(scene), Promise.all(voices.map(async clip => {
-    const motion = anatomyAt(scene,clip,local(clip,sample));
-    if (motion) return { clip, art: await stageAnatomy(motion,style,project.id + '/' + clip.assetId + '/' + motion.t_s) };
-    if (scene.motion.has(clip.assetId ?? '')) return null;
-    return { clip, art: await stageClipAnatomy(project,clip,clips,sample,style,options.tractDraft,undefined,options.monitor) };
-  })), document.fonts.ready]);
+  const extraV2Specs = (!options.overlay && stageLayer(project, 'v2')?.visible)
+    ? playing('v2')
+      .map(clip => ({ clip, url: !clip.duetLayer && clip.assetId ? mediaUrl(project.assets[clip.assetId]) : undefined }))
+      .filter((entry): entry is { clip: NleClip; url: string } => Boolean(entry.url))
+    : [];
+  const [pictures, anatomy, extraV2Pictures] = await Promise.all([
+    prepareDuetScene(scene),
+    Promise.all(voices.map(async clip => {
+      const motion = anatomyAt(scene,clip,local(clip,sample));
+      if (motion) return {
+        clip,
+        art: await stageAnatomy(motion, style, project.id + '/' + clip.assetId + '/' + Math.round(motion.t_s * 1000), {
+          showHead: tractView.headMode !== 'none',
+          bustBase: true,
+        }),
+      };
+      if (scene.motion.has(clip.assetId ?? '')) return null;
+      return { clip, art: await stageClipAnatomy(project,clip,clips,sample,style,options.tractDraft,undefined,options.monitor) };
+    })),
+    Promise.all(extraV2Specs.map(async entry => ({ clip: entry.clip, picture: await decodePicture(entry.url) }))),
+    document.fonts.ready,
+  ]);
   if (!isCurrent()) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('浏览器无法创建双人剪辑画布');
@@ -263,16 +280,19 @@ export async function drawDuetScene(canvas: HTMLCanvasElement, project: VcProjec
       ctx.globalAlpha *= placement.v1.opacity;
       ctx.scale(1,-1);
       const { x, y, width, height } = art.bounds;
-      ctx.drawImage(art.image,x,y,width,height);
+      const fit = height > 16 ? 13.8 / height : 1;
+      ctx.drawImage(art.image, x * fit, y * fit, width * fit, height * fit);
       ctx.restore();
     }
     const extraVoices = visibleAnatomy.filter(({clip}) => clip.duetVoice === undefined);
     for (const [index, { art }] of extraVoices.entries()) {
       ctx.save();
       ctx.globalAlpha *= placement.v1.opacity;
-      const x = WIDTH * (index + .5) / extraVoices.length;
+      const offsetX = (placement.v1.x - 50) * 12.8;
+      const offsetY = (placement.v1.y - 46) * 7.2;
+      const x = WIDTH * (index + .5) / extraVoices.length + offsetX;
       const w = 380 * placement.v1.scale, h = w * art.bounds.height / art.bounds.width;
-      ctx.drawImage(art.image,x-w/2,295-h/2,w,h);
+      ctx.drawImage(art.image,x-w/2,295+offsetY-h/2,w,h);
       ctx.restore();
     }
   }
@@ -285,11 +305,7 @@ export async function drawDuetScene(canvas: HTMLCanvasElement, project: VcProjec
       if (picture) drawPicture(ctx,layer,picture,local(clip,sample),placement.v2);
       if (layer.id === 'spectrum') drawSpectrum(ctx,clips,sample,theme);
     }
-    for (const clip of layers) {
-      const url = !clip.duetLayer && clip.assetId ? mediaUrl(project.assets[clip.assetId]) : undefined;
-      if (!url) continue;
-      const picture = await decodePicture(url);
-      if (!isCurrent()) return;
+    for (const { picture } of extraV2Pictures) {
       const pose = placement.v2, w=WIDTH*.19*pose.scale, h=w*picture.height/picture.width;
       ctx.save(); ctx.globalAlpha *= pose.opacity;
       ctx.drawImage(picture,WIDTH*pose.x/100-w/2,HEIGHT*pose.y/100-h/2,w,h); ctx.restore();

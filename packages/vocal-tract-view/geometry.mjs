@@ -89,8 +89,14 @@ export function displayLips(state,{surface=true,sectionPreview=false}={}){
     // (point 0) is left out, the two lips are kept in separate half-spaces at
     // their shared seam, and inner lip columns are stopped outside the labial
     // face of both upper and lower incisors/canines.
-    const midline=Math.floor(mesh.ribs/2),upper=mesh.name==='upper_lip',edges=[];
-    let grid=Array.from({length:mesh.ribs},(_,r)=>{
+    const midline=Math.floor(mesh.ribs/2),upper=mesh.name==='upper_lip';
+    // In 2D sagittal mode only the central midline profile is drawn; a symmetric
+    // 6-7 rib window around the midline produces bit-identical Chaikin output.
+    const rStart=!surface&&mesh.ribs>8?Math.max(0,midline-3):0;
+    const rEnd=!surface&&mesh.ribs>8?Math.min(mesh.ribs-1,mesh.ribs-1-rStart):mesh.ribs-1;
+    const ribCount=rEnd-rStart+1,edges=[];
+    let grid=Array.from({length:ribCount},(_,idx)=>{
+      const r=rStart+idx;
       const a=point(nativeUpper,r*nativeUpper.points+4),b=point(nativeLower,r*nativeLower.points+4),seam=(a[1]+b[1])/2;
       const edge=[...(upper?a:b)];edge[1]=upper?Math.max(a[1],seam):Math.min(b[1],seam);edge[2]=(a[2]+b[2])/2;
       stopAgainstTeeth(edge);edges.push(edge);
@@ -101,9 +107,19 @@ export function displayLips(state,{surface=true,sectionPreview=false}={}){
         return p;
       });
     });
-    lipHandles[mesh.name]=edges[midline].slice(0,2);lipEdges[mesh.name]=edges;
+    lipHandles[mesh.name]=edges[midline-rStart].slice(0,2);lipEdges[mesh.name]=edges;
     for(let n=0;n<2;n++){grid=grid.map(cutCorners);grid=transpose(transpose(grid).map(cutCorners));}
-    const R=grid.length,N=grid[0].length,triangles=[];
+    const R=grid.length,N=grid[0].length;
+    if(!surface){
+      const midA=R/2-1,midB=R/2;
+      for(let j=0;j<N-2;j++){stopAgainstTeeth(grid[midA][j]);stopAgainstTeeth(grid[midB][j]);}
+      const profile=grid[midA].map((p,j)=>[(p[0]+grid[midB][j][0])/2,(p[1]+grid[midB][j][1])/2]);
+      contours[mesh.name]=profile;lipProfiles[mesh.name]=profile;
+      lipApertureColumn=Math.round(3/(mesh.points-2)*(N-1));
+      lipHandles[mesh.name]=profile[lipApertureColumn].slice(0,2);
+      return mesh;
+    }
+    const triangles=[];
     for(let r=0;r<R;r++)for(let j=0;j<N-2;j++)stopAgainstTeeth(grid[r][j]);
     for(let r=1;r<R;r++)for(let j=1;j<N;j++){const a=(r-1)*N+j-1,b=a+1,c=r*N+j-1,d=c+1;triangles.push(a,b,c,b,d,c);}
     // The refined grid has no rib on the midline; average its two central ribs.
@@ -117,15 +133,15 @@ export function displayLips(state,{surface=true,sectionPreview=false}={}){
     return {...mesh,vertices:grid.flat(2),triangles,ribs:R,points:N};
   });
   const oralBoundary=oralSectionBoundary({...state,contours:{...state.contours,upper_lip:[state.contours.upper_lip[0],...contours.upper_lip.slice(0,4)],lower_lip:[...contours.lower_lip.slice(0,5)]}});
-  const tongue=tongueEnvelope(state,{surface}),solids=dentalSolids(state.meshes);
-  // Native dorsal faces can also enter a tooth or lip seam during extreme tip extension.
-  const native=state.meshes.find(m=>m.name==='tongue');
-  const upperLipMesh=meshes.find(m=>m.name==='upper_lip'),lowerLipMesh=meshes.find(m=>m.name==='lower_lip');
-  const contactFaces=[];
-  if(!surface&&!sectionPreview)for(let i=0;i<native.triangles.length;i+=3){const f=native.triangles.slice(i,i+3);if(f.every(j=>j<34*native.points))contactFaces.push(...f);}
-  if(!sectionPreview){
-    const clippedByTeeth=subtractTeeth(surface?tongue.mesh:{...native,triangles:contactFaces},solids);
-    meshes[meshes.findIndex(m=>m.name==='tongue')]=constrainTongueByLips(clippedByTeeth,upperLipMesh,lowerLipMesh);
+  const tongue=tongueEnvelope(state,{surface});
+  let solids=null;
+  if(surface){
+    solids=dentalSolids(state.meshes);
+    const upperLipMesh=meshes.find(m=>m.name==='upper_lip'),lowerLipMesh=meshes.find(m=>m.name==='lower_lip');
+    if(!sectionPreview){
+      const clippedByTeeth=subtractTeeth(tongue.mesh,solids);
+      meshes[meshes.findIndex(m=>m.name==='tongue')]=constrainTongueByLips(clippedByTeeth,upperLipMesh,lowerLipMesh);
+    }
   }
   // Also clip 2D sagittal tongue contours against closed/narrow lip aperture
   const uH=lipHandles.upper_lip,lH=lipHandles.lower_lip;
@@ -281,7 +297,145 @@ export function referenceNose(nose,outlet,z=.5){
     if(Math.min(...depth)<=0&&Math.max(...depth)>0){indices.push(...tri);tri.forEach(j=>used.add(j));}
   }
   const ids=[...used],map=new Map(ids.map((j,i)=>[j,i]));
-  return {nose:{vertices:ids.flatMap(j=>point(nose,j)),triangles:indices.map(j=>map.get(j))},outlet:outlet.map(j=>map.get(j))};
+  const refMesh={vertices:ids.flatMap(j=>point(nose,j)),triangles:indices.map(j=>map.get(j))};
+  const mappedOutlet=outlet.map(j=>map.get(j));
+  // Precompute the exact static nasal section + real nostril outlet closure from the FULL nose mesh
+  // (never from the cropped refMesh strip, whose artificial cut boundaries would draw a bar across the palate).
+  const staticSegments=planeSegments(refMesh.vertices,refMesh.triangles,z);
+  const fullOutletSet=new Set(outlet);
+  for(const loop of boundaryLoops(nose)){
+    if(loop.every(i=>fullOutletSet.has(i)))continue;
+    const hits=[];
+    for(let i=0;i<loop.length;i++){
+      const a=point(nose,loop[i]),b=point(nose,loop[(i+1)%loop.length]);
+      if((a[2]<=z&&b[2]>z)||(b[2]<=z&&a[2]>z)){
+        const t=(z-a[2])/(b[2]-a[2]);
+        hits.push([a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]);
+      }
+    }
+    for(let i=0;i+1<hits.length;i+=2)staticSegments.push([hits[i],hits[i+1]]);
+  }
+  return {nose:refMesh,outlet:mappedOutlet,staticSegments};
+}
+
+// Fast 2D-only sagittal airway path extraction: matches connectedAirway + airwayReferencePaths
+// identically (same posterior N=64 ring loft + exact nativeAirwayMesh hard palate + exact velopharyngeal
+// connector + pre-sliced static nasal & nostril segments), skipping only the invisible 3D teeth CSG
+// (draw2D already masks teeth via sectionOutsideTissue).
+export function connectedAirwaySagittalPaths(state,ref,palate=velumModel(state,{surface:false})){
+  const positions=state.centerline.map(c=>c[2]);
+  const branchSpan=.7;
+  const port=Math.max(positions[1]+branchSpan,Math.min(positions.at(-2)-branchSpan,state.nasal.port_position));
+  const cutSection=positions.findIndex(p=>p>port+branchSpan);
+  const maxSec=Math.max(1,Math.min(state.airway_sections.length-1,cutSection>=0?cutSection:state.airway_sections.length-1));
+
+  const N=64;
+  const ringVerts=[];
+  for(let sIdx=0;sIdx<=maxSec;sIdx++){
+    const sec=state.airway_sections[sIdx],c=state.centerline[sec.index];
+    const valid=[];
+    for(let k=0;k<sec.upper.length;k++)if(sec.upper[k]!==null)valid.push(k);
+    if(valid.length>1){
+      const first=valid[0],last=valid[valid.length-1];
+      const sample=(values,index)=>{let a=Math.floor(index),b=Math.ceil(index);while(a>first&&values[a]===null)a--;while(b<last&&values[b]===null)b++;const t=(index-a)/(b-a||1);return values[a]*(1-t)+values[b]*t;};
+      for(let j=0;j<N;j++){
+        const index=first+(last-first)*(1-Math.cos(j/N*2*Math.PI))/2;
+        const z=index*7/96-3.5,d=sample(j<=N/2?sec.upper:sec.lower,index);
+        ringVerts.push(c[0]+c[3]*d,c[1]+c[4]*d,z);
+      }
+    }else{
+      for(let j=0;j<N;j++)ringVerts.push(c[0],c[1],0);
+    }
+  }
+
+  const subPos=positions.slice(0,maxSec+1);
+  const distances=[...subPos.filter(p=>p<port-branchSpan),port-branchSpan,port,port+branchSpan,...subPos.filter(p=>p>port+branchSpan)];
+  const r0=distances.indexOf(port-branchSpan),r1=r0+2;
+  const cutRow=cutSection>=0?distances.indexOf(positions[cutSection]):distances.length;
+  const rows=cutRow>=0?cutRow:distances.length;
+  const vertices=[];
+  let lo=0;
+  for(let r=0;r<rows;r++){
+    const s=distances[r];
+    while(lo<subPos.length-2&&subPos[lo+1]<s)lo++;
+    const t=(s-subPos[lo])/(subPos[lo+1]-subPos[lo]||1);
+    const aOff=lo*N*3,bOff=(lo+1)*N*3;
+    for(let k=0;k<N*3;k++)vertices.push(ringVerts[aOff+k]*(1-t)+ringVerts[bOff+k]*t);
+  }
+
+  const jCenter=N/4,width=8,j0=jCenter-width,j1=jCenter+width,id=(r,j)=>r*N+(j+N*2)%N;
+  const patch=[];for(let j=j0;j<=j1;j++)patch.push(id(r0,j));for(let r=r0+1;r<=r1;r++)patch.push(id(r,j1));for(let j=j1-1;j>=j0;j--)patch.push(id(r1,j));for(let r=r1-1;r>r0;r--)patch.push(id(r,j0));
+  const holeCells=new Set();for(let j=j0;j<j1;j++)holeCells.add((j+N*2)%N);
+  const wallFloorY=state.contours.upper_cover[7][1];
+  for(let r=0;r<rows;r++)for(let j=1;j<N/2;j++){
+    const i=id(r,j)*3,y=vertices[i+1],x=vertices[i],wall=palate.wallAt(y);
+    if(y<wallFloorY||x>wall+.9)continue;
+    const t=Math.max(0,Math.min(1,(.8-Math.abs(distances[r]-port))/.5)),blend=t*t*(3-2*t);
+    vertices[i]=x+(wall-x)*blend;
+  }
+
+  const triangles=[];
+  for(let r=0;r<rows-1;r++)for(let j=0;j<N;j++){
+    if(r>=r0&&r<r1&&holeCells.has(j))continue;
+    const a=id(r,j),b=id(r,j+1),c=id(r+1,j),d=id(r+1,j+1);triangles.push(a,b,c,b,d,c);
+  }
+
+  // Stitch exact native anterior airway mesh (same hard palate & oral arch as connectedAirway, zero CSG cost).
+  const front=nativeAirwayMesh(state,cutSection>=0?cutSection:maxSec),frontOffset=vertices.length/3;
+  for(const v of front.vertices)vertices.push(v);
+  for(const idx of front.triangles)triangles.push(frontOffset+idx);
+  const mesh={vertices,triangles,referenceDepth:new Array(vertices.length/3).fill(0)};
+  const cutCenter=state.centerline[cutSection>=0?cutSection:maxSec];
+  const atInlet=p=>Math.abs((p[0]-cutCenter[0])*cutCenter[4]-(p[1]-cutCenter[1])*cutCenter[3])<1e-5;
+  const inlet=boundaryLoops(front).filter(loop=>loop.every(i=>atInlet(point(front,i))));
+  if(inlet.length===1)loft(mesh,Array.from({length:N},(_,j)=>id(rows-1,j)),inlet[0].map(i=>frontOffset+i));
+  else cap(mesh,Array.from({length:N},(_,j)=>id(rows-1,j)));
+  cap(mesh,Array.from({length:N},(_,j)=>id(0,j)));
+
+  // Append only the nasal outlet boundary ring (welded to static refNose segments).
+  const noseLoop=[];
+  for(const oi of ref.outlet){
+    noseLoop.push(mesh.vertices.length/3);
+    const base=oi*3;
+    mesh.vertices.push(ref.nose.vertices[base],ref.nose.vertices[base+1],ref.nose.vertices[base+2]);
+    mesh.referenceDepth.push(.5);
+  }
+
+  const center=palate.gate,area=Math.max(0,state.nasal.port_area),K=48;
+  const ring=(a,yOffset=0)=>{
+    const ids=[],halfWidth=palate.width,halfGap=a/(K*.5*Math.sin(2*Math.PI/K)*halfWidth);
+    for(let k=0;k<K;k++){
+      const t=k/K*2*Math.PI;
+      ids.push(mesh.vertices.length/3);
+      mesh.vertices.push(center[0]+halfGap*Math.cos(t),center[1]+yOffset,center[2]+halfWidth*Math.sin(t));
+      mesh.referenceDepth.push(.5);
+    }
+    return ids;
+  };
+  const opened=area>0,lower=ring(opened?area:.002,opened?0:-.01),upper=opened?lower:ring(.002,.01);
+  const lowerAligned=smoothLoft(mesh,patch,lower),upperAligned=opened?lowerAligned:upper;
+  smoothLoft(mesh,upperAligned,noseLoop,true);
+  if(!opened){cap(mesh,lowerAligned);cap(mesh,upperAligned.toReversed());}
+
+  // Shift z by referenceDepth in-place and slice dynamic mesh + close only front lip outlet.
+  for(let v=0;v<mesh.referenceDepth.length;v++){
+    mesh.vertices[v*3+2]-=mesh.referenceDepth[v];
+  }
+  const dynSegs=planeSegments(mesh.vertices,mesh.triangles,0);
+  // Close anterior lip opening from `front` if open at z=0.
+  for(const loop of boundaryLoops(front)){
+    if(loop.every(i=>atInlet(point(front,i))))continue;
+    const hits=[];
+    for(let i=0;i<loop.length;i++){
+      const a=point(front,loop[i]),b=point(front,loop[(i+1)%loop.length]);
+      if((a[2]<=0&&b[2]>0)||(b[2]<=0&&a[2]>0)){
+        const t=-a[2]/(b[2]-a[2]);
+        hits.push([a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]);
+      }
+    }
+    for(let i=0;i+1<hits.length;i+=2)dynSegs.push([hits[i],hits[i+1]]);
+  }
+  return stitch([...dynSegs,...ref.staticSegments]);
 }
 export function connectedAirway(state,nose,outlet=nasalOutlet(nose),palate=velumModel(state)){
   const native=oralRingMesh(state),N=native.ringSize,positions=state.centerline.map(c=>c[2]);

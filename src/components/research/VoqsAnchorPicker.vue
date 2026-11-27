@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import type { PhonationAnchor } from '@vocalcut/core';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import { defaultVoqsHeight, VOQS_GROUPS, voqsAnchorLabel, voqsAudioUrl, voqsProfile, type VoqsGroup, type VoqsProfile, type VoqsTake } from '@/data/voqs-library';
 
 const props = defineProps<{
@@ -22,6 +23,21 @@ const modeledHeight = computed(() => defaultVoqsHeight(profile.value?.symbol ?? 
 const pickedHeight = computed(() => props.mediaOwned ? props.renderHeight : height.value);
 const validHeight = computed(() => modeledHeight.value === undefined || (typeof pickedHeight.value === 'number'
   && Number.isFinite(pickedHeight.value) && Math.abs(pickedHeight.value) <= 1 && pickedHeight.value * modeledHeight.value > 0));
+const symbolOptions = computed<SelectOption<string>[]>(() =>
+  availableGroups.value.flatMap((group) =>
+    group.profiles.map((item) => ({
+      value: item.symbol,
+      label: `${item.symbol} · ${item.label}`,
+      group: group.label,
+    })),
+  ),
+);
+const takeOptions = computed<SelectOption<string>[]>(() =>
+  (profile.value?.takes ?? []).map((item) => ({
+    value: item.id,
+    label: `${item.tagged ? '已标声段' : '录音工程'} · ${item.id}`,
+  })),
+);
 
 watch(availableGroups, () => {
   if (!props.symbol && !allowedSymbols.value.has(symbol.value)) {
@@ -42,15 +58,27 @@ watch(profile, current => {
 
 <template>
   <div class="voqs-picker">
-    <select v-if="!props.symbol" v-model="symbol" class="inp ipa" aria-label="实录 VoQS 类型">
-      <optgroup v-for="group in availableGroups" :key="group.id" :label="group.label">
-        <option v-for="item in group.profiles" :key="item.symbol" :value="item.symbol">{{ item.symbol }} · {{ item.label }}</option>
-      </optgroup>
-    </select>
+    <CustomSelect
+      v-if="!props.symbol"
+      class="voqs-picker-sel ipa"
+      size="xs"
+      aria-label="实录 VoQS 类型"
+      :model-value="symbol"
+      :options="symbolOptions"
+      :min-menu-width="200"
+      @update:model-value="(v) => { symbol = String(v); }"
+    />
     <template v-if="profile && take">
-      <select v-if="profile.takes.length > 1 && !referenceId" :value="take.id" class="inp" aria-label="VoQS 参考实录" @change="takeId = ($event.target as HTMLSelectElement).value">
-        <option v-for="item in profile.takes" :key="item.id" :value="item.id">{{ item.tagged ? '已标声段' : '录音工程' }} · {{ item.id }}</option>
-      </select>
+      <CustomSelect
+        v-if="profile.takes.length > 1 && !referenceId"
+        class="voqs-picker-sel"
+        size="xs"
+        aria-label="VoQS 参考实录"
+        :model-value="take.id"
+        :options="takeOptions"
+        :min-menu-width="180"
+        @update:model-value="(v) => { takeId = String(v); }"
+      />
       <label v-if="profile.group === 'height' && !mediaOwned" class="voqs-height">喉位控制量（cm）
         <input v-model.number="height" class="inp" aria-label="VoQS 喉位控制量" type="number"
           :min="(modeledHeight ?? 0) > 0 ? 0.05 : -1" :max="(modeledHeight ?? 0) > 0 ? 1 : -0.05" step="0.05" />
@@ -62,7 +90,7 @@ watch(profile, current => {
       <audio v-if="showAudio" :key="take.id" :src="voqsAudioUrl(take)" controls preload="none" aria-label="VoQS 实录音频" />
       <small class="muted">{{ take.id }} · 第 {{ take.frame + 1 }} 帧 · {{ take.glottis.pr_pa.toFixed(0) }} Pa</small>
       <small v-if="profile.group === 'height' && !mediaOwned" class="muted">声门参数取自实录。喉位控制量由此输入，单位 cm。</small>
-      <small v-if="!mediaOwned" class="muted">锚点参数保持至下一点。专用过渡模型待接入。</small>
+      <small v-if="!mediaOwned" class="muted">锚点参数保持至下一发声类型锚点。</small>
     </template>
     <small v-else class="muted">{{ mediaOwned ? '这条实录尚无可写入锚点的代表帧。' : '暂无对应 VoQS 实录声门估计。' }}</small>
     <small v-if="anchor" class="muted">当前锚点 {{ voqsAnchorLabel(anchor) }}</small>
@@ -71,7 +99,7 @@ watch(profile, current => {
 
 <style scoped>
 .voqs-picker { display:grid; gap:4px; min-width:0; }
-.voqs-picker select,.voqs-picker audio { width:100%; min-width:0; }
+.voqs-picker-sel,.voqs-picker audio { width:100%; min-width:0; }
 .voqs-picker small { line-height:1.4; }
 .voqs-actions { display:flex; flex-wrap:wrap; gap:5px; }
 .voqs-height { display:flex; align-items:center; gap:6px; font-size:0.916667rem; }

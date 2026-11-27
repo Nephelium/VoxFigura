@@ -1,6 +1,24 @@
 import {convertText,variantsFor,type MappingStandard} from './state.ts';
-import {tokens,mixedSpeechTokens,isKanaRun,startsIpa,pauseMark,longPause} from './text-tokens.ts';
-export {speechTokens,mixedSpeechTokens,splitIpaSpanTokens,looksLikeBareIpaToken} from './text-tokens.ts';
+import {
+  tokens,
+  mixedSpeechTokens,
+  isKanaRun,
+  startsIpa,
+  pauseMark,
+  longPause,
+  IPA_SPACE_PAUSE_MS,
+  IPA_LONG_PAUSE_MS,
+  IPA_SPACE_PAUSE_TOKEN,
+} from './text-tokens.ts';
+export {
+  speechTokens,
+  mixedSpeechTokens,
+  splitIpaSpanTokens,
+  looksLikeBareIpaToken,
+  IPA_SPACE_PAUSE_MS,
+  IPA_LONG_PAUSE_MS,
+  IPA_SPACE_PAUSE_TOKEN,
+} from './text-tokens.ts';
 import {reviewKana,type KanaLexicon} from './kana-readings.ts';
 import {tr} from './shims.ts';
 
@@ -350,11 +368,18 @@ export function reviewText(
     const list=phraseIndex.get(parts[0])??[];list.push({parts,choices});phraseIndex.set(parts[0],list);
   }
   for(const list of phraseIndex.values())list.sort((a,b)=>b.parts.length-a.parts.length);
-  const words=typeof text==='string'?mixedSpeechTokens(text):text;
+  const words=typeof text==='string'?mixedSpeechTokens(text, { preserveSpacePause: true }):text;
   const hasLatinContext = words.some((w) => !startsIpa(w) && /\p{Script=Latin}/u.test(w));
 
   for(let i=0;i<words.length;i++){
     const word=words[i];
+    if (word === IPA_SPACE_PAUSE_TOKEN) {
+      const previous = rows.at(-1);
+      if (previous && !previous.linkedToNext) {
+        previous.pause = Math.max(previous.pause, IPA_SPACE_PAUSE_MS);
+      }
+      continue;
+    }
     if(startsIpa(word)){
       let inner=word.slice(1,-1).trim();
       const linkedToNext = inner.endsWith('‿');
@@ -366,7 +391,7 @@ export function reviewText(
     if(isKanaRun(word)){rows.push(...reviewKana(word,kana));continue;}
     if(pauseMark.test(word)){
       const previous=rows.at(-1);
-      const duration=longPause.test(word)?350:180;
+      const duration=longPause.test(word)?IPA_LONG_PAUSE_MS:180;
       if(previous && !previous.linkedToNext){previous.pause=Math.max(previous.pause,duration);previous.phraseEnd=true;}
       else if(!previous) leadingPause=Math.max(leadingPause,duration);
       continue;

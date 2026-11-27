@@ -39,14 +39,6 @@ export interface ResolvedPtbIpaPose {
   isFallback: boolean;
 }
 
-export interface PtbReferenceVowel {
-  symbol: string;
-  name: string;
-  params19: number[];
-  params: Record<TractParamName, number>;
-  extras: TractPoseExtras;
-}
-
 interface RawPtbEntry {
   name?: string;
   preset?: string;
@@ -79,11 +71,6 @@ const PRELOAD_JD2_SCHWA_19: readonly number[] = [
   0.7, -1.913, 4.587, -1.305, 3.06, -0.386, -1.781, -2.448,
   0.234, 0.212, 0.235,
 ];
-
-export const PTB_REFERENCE_VOWEL_SYMBOLS: readonly string[] = [
-  'i', 'y', 'e', 'ø', 'ɛ', 'œ', 'a', 'ɑ', 'ɒ', 'ɔ',
-  'ɤ', 'o', 'u', 'ɯ', 'ə', 'ɨ', 'ʉ', 'æ', 'ɐ',
-] as const;
 
 export const PRIMARY_VOWELS = new Set([
   'a', 'ɑ', 'ɒ', 'æ', 'ɐ', 'ᴀ', 'e', 'ɛ', 'ə', 'ɜ', 'ɤ',
@@ -248,6 +235,25 @@ export function applyJd2DiacriticModifiers(symbol: string, baseVec19: readonly n
         vec[5] = Math.max(0.24, Math.min(vec[5] - 0.34, 0.42));
         vec[8] -= 0.18;
         touch(4, 5, 8);
+      }
+    } else if (mark === 'ᵝ') {
+      // Compressed / exolabial bilabial rounding (ᵝ, e.g. Tokyo Japanese [ɯᵝ], [ɰᵝ]):
+      // vertical lip compression without forward lip protrusion.
+      if (isVowel) {
+        vec[4] = Math.min(vec[4], 0.08);
+        vec[5] = Math.max(0.28, Math.min(vec[5] - 0.30, 0.48));
+        touch(4, 5);
+        if (base === 'ɯ') {
+          vec[8] += 0.28 * (0.85 - vec[8]);
+          touch(8);
+        }
+      } else if (isBilabialStopOrNasal) {
+        vec[4] = Math.min(vec[4], 0.05);
+        touch(4);
+      } else {
+        vec[4] = Math.min(vec[4], 0.08);
+        vec[5] = Math.max(0.24, Math.min(vec[5] - 0.32, 0.42));
+        touch(4, 5);
       }
     } else if (mark === 'ʲ') {
       // Palatalized (ʲ)

@@ -75,8 +75,19 @@ export async function synthesizeClipBySentences(
   let maxWorkers = 1;
   let firstDetails: SynthesisInfo | undefined;
 
+  const finalizeAbortedStream = (): void => {
+    if (!streamChain) return;
+    streamChain.finished = true;
+    if (streamChain.started) {
+      store.stopPlayback();
+    }
+  };
+
   for (let wi = 0; wi < windows.length; wi++) {
-    if (!isCurrent()) return null;
+    if (!isCurrent()) {
+      finalizeAbortedStream();
+      return null;
+    }
     const win = windows[wi];
     const winDurSmp = win.endSmp - win.startSmp;
 
@@ -95,9 +106,21 @@ export async function synthesizeClipBySentences(
       audioGain: 'original',
       cacheWaveform: false,
       streamPlay: streamChain ? options.streamPlay : undefined,
+      onStreamTractFrames: options.onStreamTractFrames
+        ? (winFrames) => {
+            const globalWinFrames = winFrames.map((f) => ({
+              ...f,
+              u: Math.max(0, Math.min(1, (win.startSmp + f.u * winDurSmp - fromSmp) / totalDurationSmp)),
+            }));
+            options.onStreamTractFrames?.([...mergedTractFrames, ...globalWinFrames]);
+          }
+        : undefined,
       streamChain,
     });
-    if (!audio || !isCurrent()) return null;
+    if (!audio || !isCurrent()) {
+      finalizeAbortedStream();
+      return null;
+    }
 
     if (!combined) {
       combined = new AudioBuffer({
@@ -132,7 +155,13 @@ export async function synthesizeClipBySentences(
       info.protectedIpaPoses?.forEach((p) => protectedSet.add(p));
       info.ignoredGeometryFields?.forEach((f) => ignoredSet.add(f));
       if (info.recordedArticulation?.length) {
-        mergedRecordedArt.push(...info.recordedArticulation);
+        mergedRecordedArt.push(
+          ...info.recordedArticulation.map((span) => ({
+            ...span,
+            start_smp: span.start_smp + offset,
+            end_smp: span.end_smp + offset,
+          })),
+        );
       }
       info.tractFrames?.forEach((frame) => {
         const globalSmp = win.startSmp + frame.u * audio.length;
@@ -142,19 +171,42 @@ export async function synthesizeClipBySentences(
       info.m27RowsPa?.forEach((row, rowIdx) => {
         const globalSmp = win.startSmp + (rowIdx + 0.5) * FRAME_50HZ_SMP;
         const slot = Math.floor((globalSmp - fromSmp) / FRAME_50HZ_SMP);
-        if (slot >= 0) mergedM27Rows[slot] = row;
+        if (slot >= 0 && slot < expectedM27Rows) mergedM27Rows[slot] = row;
       });
     }
   }
 
-  if (!combined || !isCurrent()) return null;
+  if (!combined || !isCurrent()) {
+    finalizeAbortedStream();
+    return null;
+  }
 
-  const validM27 =
-    mergedM27Rows.length > 0 &&
-    mergedM27Rows.length >= expectedM27Rows &&
-    mergedM27Rows.slice(0, expectedM27Rows).every(Boolean)
-      ? (mergedM27Rows.slice(0, expectedM27Rows) as number[][])
-      : undefined;
+  // Bridge isolated 1-frame boundary rounding slots caused when a sentence split does not fall on a 960-sample boundary.
+  let validM27: number[][] | undefined;
+  const filledCount = mergedM27Rows.reduce((n, row) => n + (row ? 1 : 0), 0);
+  if (expectedM27Rows > 0 && filledCount > 0 && filledCount >= expectedM27Rows - windows.length * 2) {
+    const dense: number[][] = new Array(expectedM27Rows);
+    let lastKnown: number[] | undefined;
+    for (let i = 0; i < expectedM27Rows; i++) {
+      if (mergedM27Rows[i]) {
+        lastKnown = mergedM27Rows[i]!;
+        dense[i] = lastKnown;
+      } else if (lastKnown) {
+        dense[i] = [...lastKnown];
+      }
+    }
+    let nextKnown: number[] | undefined;
+    for (let i = expectedM27Rows - 1; i >= 0; i--) {
+      if (dense[i]) {
+        nextKnown = dense[i];
+      } else if (nextKnown) {
+        dense[i] = [...nextKnown];
+      }
+    }
+    if (dense.every(Boolean)) {
+      validM27 = dense;
+    }
+  }
 
   const mergedInfo: SynthesisInfo = {
     mode: firstDetails?.mode ?? effectiveMode,
@@ -181,7 +233,7 @@ export async function synthesizeClipBySentences(
   };
 
   store.registerCombinedAudio(combined, mergedInfo, {
-    mode: options.mode ? undefined : effectiveMode,
+    mode: effectiveMode,
     audioGain: effectiveGain,
     streamPlayed: Boolean(streamChain?.started),
     applyPeakGain: effectiveGain === 'peak',

@@ -17,11 +17,17 @@ export function buildF0CurvePaths(points: readonly F0CurvePoint[]): { voicedPath
   let voiced: boolean | null = null;
   let previous: F0CurvePoint | null = null;
   const flush = () => {
-    if (!path) return;
+    if (!path || !path.includes(' L ')) return;
     (voiced ? voicedPaths : unvoicedPaths).push(path);
   };
   for (const point of points) {
-    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      flush();
+      path = '';
+      voiced = null;
+      previous = null;
+      continue;
+    }
     if (voiced === null || point.voiced !== voiced) {
       flush();
       path = previous ? `M ${fmt(previous)} L ${fmt(point)}` : `M ${fmt(point)}`;

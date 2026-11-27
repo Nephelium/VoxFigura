@@ -11,11 +11,10 @@
   - 断网或引擎未启动时，自动回落至 `/prewarm/` 真实 VTL 预渲染结果并明确标注状态。
 - **后续动作**：在具备 Emscripten 4.0.9 的环境重建 `vocal-runtime.zip` 并置于 `public/vocal-wasm/` 后，前端零改动即可自动切入纯浏览器 Wasm 运行。
 
-## 2. Stage 4/5 已就绪，但关键帧 / 浏览器极轻 / 独立发音人模型尚待训练
+## 2. 核心本地模型已全部就绪（早期 501 扩展预留空槽已清理）
 
-- **核查事实**：`F:\TensorTract3_Train\runs\m27_v1` 已包含可用的 Stage 4（`motor_natural/best.pt`, `pr_encoder/best.pt`）与 Stage 5（`neural_synth/best.pt`）检查点；而 `KF2Tract27`（`src/tt3/kf_models.py`）、`BrowserLightInverter`（`src/tt3/distill_models.py`）与自定义 `SpeakerAdapter` 微调权重尚未产出最终导出检查点。
-- **当前默认方案**：在 `packages/model-adapters/` 与 `engine/server.py` 为上述三项未训模型保留标准化插槽（`/models/kf2tract` 等返回明确 `501` 契约 JSON 说明），严格按 `docs/MODEL_INTERFACE_SPEC.md` 冻结张量形状、归一化边界与 `model.manifest.json` 规范，后续模型训完即可热插拔上线。
-  - 其中发音人模型在当前已可通过 Stage 5 `FrozenSpeakerEncoder` 接收可选 `speaker_ref` WAV 执行零样本音色转换。
+- **核查事实**：全部 7 个核心自研模型（`Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）及 `DPDFNet2`、`SwiftF0` 共 9 个 ONNX 槽位已全部训练导出并正式接入本地引擎（`engine/model_bundle/models/`）；兼容路由 `/models/kf2tract` 已正式暴露 `IPA2Tract-Lite` 推理，零样本音色转换已由 `Vox2Spk-Lite` + `Tract2Vox-Lite` 在 `/m27/reconstruct` 与 `/m27/resynthesize` 实现。
+- **已落定处置**：早期遗留的 `501` 扩展空槽（`packages/model-adapters/src/reserved-slots.ts` 与 `engine/server.py` 的 `/models/browser-light-m27`、`/models/speaker` 路由）已于 2026-11-26 经审批清理移除（详见 [DEAD_CODE_AUDIT_VERIFICATION.md §8](./review/DEAD_CODE_AUDIT_VERIFICATION.md)），本议题关闭。
 
 ## 3. `.env.local` 仅配置知乎 Secret 时的 LLM 降级与 BYOK 策略
 
@@ -28,11 +27,11 @@
 
 - **核查事实**：VocalTractLab 2.4 与 `PhoneticToolbox v3` 的 VTL 桥接层为 `GPL-3.0-or-later`。知乎黑客松 S3 规则禁止“已公开发布的项目原封不动参赛”，允许合规使用开源组件并在计划书中如实披露，核心功能与主要创新须由团队独立形成。
 - **当前默认方案**：
-  - 本仓库整体采用 `GPL-3.0-or-later`（见根目录 [LICENSE](file:///c:/Users/13680/Desktop/project/%E3%80%90%E4%B8%AA%E4%BA%BA%E9%A1%B9%E7%9B%AE%E3%80%91/%E9%BB%91%E5%AE%A2%E6%9D%BE/LICENSE)）。
-  - 在 [DISCLOSURE.md](file:///c:/Users/13680/Desktop/project/%E3%80%90%E4%B8%AA%E4%BA%BA%E9%A1%B9%E7%9B%AE%E3%80%91/%E9%BB%91%E5%AE%A2%E6%9D%BE/DISCLOSURE.md) 中逐文件区分“沿用自 PTB/VTL”与“全新独立开发（路线 B 三工作区、qTA、抢拍调度器、6 档发声态直连、CommandBus、知乎联动与双通道 AI）”。
+  - 本仓库整体采用 `GPL-3.0-or-later`（见根目录 [LICENSE](../LICENSE)）。
+  - 在 [DISCLOSURE.md](../DISCLOSURE.md) 中逐文件区分“沿用自 PTB/VTL”与“全新独立开发（路线 B 三工作区、qTA、抢拍调度器、6 档发声态直连、CommandBus、知乎联动与双通道 AI）”。
   - 待负责人向赛事官方小助手最终确认口径。
 
-## 5. 示例曲目版权替代（《茉莉花》替代《人是猫》）
+## 5. 示例曲目版权替代（《长恨歌》替代《人是猫》）
 
 - **核查事实**：原基线中使用的《人是猫》为他人原创曲目，存在未授权参赛演示版权风险。
-- **当前默认方案**：全仓库公开演示工程、探索预热片段与剪辑工作室默认工程统一替换为公有领域传统民歌《茉莉花》首句（“好一朵美丽的茉莉花”）以及 5 个知乎发音对比案例；《人是猫》不随公开包分发。
+- **当前默认方案**：剪辑工作室编曲示例、内置 MIDI、交互导览与教学演示统一替换为《长恨歌》（白居易词、王之炀传谱，首句「汉皇重色思倾国」，见 `src/components/studio/arranger-examples.ts`、`public/examples/长恨歌.mid`、`StudioArrangerView.vue`、`guide-demo-runner.ts`、`guide-modules-creative.ts`、`onboarding-tours.ts`）；探索页预热片段使用 5 个知乎发音对比案例；《人是猫》不随公开包分发。

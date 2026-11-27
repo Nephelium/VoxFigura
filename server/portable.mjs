@@ -65,12 +65,14 @@ async function main() {
   const ffmpeg = join(root, 'runtime', 'media', 'ffmpeg.exe');
   const engineEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
     /^(SystemRoot|WINDIR|SYSTEMDRIVE|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|PROCESSOR_.*|NUMBER_OF_PROCESSORS|HTTPS?_PROXY|NO_PROXY)$/i.test(name)));
+  const asrCacheBase = process.env.VOCALCUT_ASR_CACHE_DIR
+    || (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'VoxFigura', 'ASR') : join(root, '.cache', 'asr'));
   Object.assign(engineEnv, {
     Path: join(root, 'runtime', 'media'),
     ENGINE_HOST: host,
     ENGINE_PORT: '0',
     VOCALCUT_CPU_ONLY: '1',
-    VOCALCUT_DISABLE_LOCAL_ASR: '1',
+    VOCALCUT_ASR_CACHE_DIR: asrCacheBase,
     VOCALCUT_ENGINE_TOKEN: engineToken,
     VOCALCUT_ENGINE_PARENT_PIPE: '1',
     VOCALCUT_FFMPEG: ffmpeg,

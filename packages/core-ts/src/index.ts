@@ -4,6 +4,7 @@
  */
 
 export * from './types';
+export * from './score-notation';
 export * from './phonation';
 export * from './qta';
 export * from './scheduler';

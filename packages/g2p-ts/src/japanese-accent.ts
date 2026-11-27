@@ -378,15 +378,20 @@ export async function analyzeJapaneseAccent(text: string): Promise<JapaneseAccen
   const moras: JapaneseAccentMora[] = [];
   let downstepCount = 0;
 
-  for (const phrase of phrases) {
+  for (let phraseIdx = 0; phraseIdx < phrases.length; phraseIdx++) {
+    const phrase = phrases[phraseIdx];
+    const kanaOpts = {
+      accent: phrase.accent,
+      phraseEnd: phrase.phraseEnd || phraseIdx === phrases.length - 1,
+    };
     let rows;
     try {
-      rows = reviewKana(phrase.reading);
+      rows = reviewKana(phrase.reading, undefined, kanaOpts);
     } catch {
       // Fallback: strip stray leading ー/っ if a truncated reading occurred.
       const safe = phrase.reading.replace(/^[ーっ]+/u, '');
       if (!safe) continue;
-      rows = reviewKana(safe);
+      rows = reviewKana(safe, undefined, kanaOpts);
     }
     if (!rows.length) continue;
 

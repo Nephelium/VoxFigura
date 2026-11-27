@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import { drawM27GlottisCanvas, getM27GlottisVisHz, readThemePalette } from '@/vendor/m27-tract-studio/tract-renderer.js';
 import type { IpaReference } from '@/data/ipa-reference-library';
 import { glottisFrameAt, loadVoqsTrack, voqsFields, type VoqsReferenceTrack } from '@/data/voqs-reference-track';
@@ -60,6 +61,9 @@ const current = computed(() => {
 const playIndex = computed(() => Math.floor(props.time * (value.value?.step_hz ?? 50)));
 const fmt = (value: number | null | undefined) => value == null ? '缺值' : Number(value.toFixed(3)).toString();
 const canRender = computed(() => value.value?.has_native_audio === true);
+const choiceOptions = computed<SelectOption<string>[]>(() =>
+  props.choices.map((item) => ({ value: item.id, label: `${item.id} · ${item.title}` })),
+);
 
 const curves = computed(() => {
   const track = value.value;
@@ -113,11 +117,18 @@ onBeforeUnmount(() => resize?.disconnect());
   <section class="voqs-reference" aria-label="VoQS 实录与声门">
     <p v-if="!reference?.exists" class="voqs-state" role="status">暂无对应实录。仍可查阅这个符号的释义与出处。</p>
     <template v-else>
-      <label v-if="choices.length > 1" class="voqs-pick">参考录音
-        <select :value="reference.id" class="inp" aria-label="选择 VoQS 实录" @change="emit('recording', ($event.target as HTMLSelectElement).value)">
-          <option v-for="item in choices" :key="item.id" :value="item.id">{{ item.id }} · {{ item.title }}</option>
-        </select>
-      </label>
+      <div v-if="choices.length > 1" class="voqs-pick">
+        <span>参考录音</span>
+        <CustomSelect
+          class="voqs-pick-sel"
+          size="xs"
+          aria-label="选择 VoQS 实录"
+          :model-value="reference.id"
+          :options="choiceOptions"
+          :min-menu-width="200"
+          @update:model-value="(v) => emit('recording', String(v))"
+        />
+      </div>
       <div class="voqs-transport">
         <div class="seg control-seg xs" role="group" aria-label="VoQS 试听来源">
           <button type="button" :class="{ active: source === 'audio' }" :aria-pressed="source === 'audio'" @click="emit('source', 'audio')">{{ personal ? '个人录音' : '原声' }}</button>
@@ -173,7 +184,7 @@ onBeforeUnmount(() => resize?.disconnect());
 <style scoped>
 .voqs-reference { display: grid; gap: 6px; flex: 0 0 auto; min-width: 0; }
 .voqs-pick, .voqs-transport { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 1rem; }
-.voqs-pick select { flex: 1; min-width: 12em; max-width: 100%; }
+.voqs-pick-sel { flex: 1; min-width: 12em; max-width: 100%; }
 .voqs-height { width: 63px; }
 .voqs-transport output { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .voqs-scrubber { width: 100%; }
@@ -191,8 +202,8 @@ onBeforeUnmount(() => resize?.disconnect());
 .voqs-curve small { font-size: 0.75rem; }
 .voqs-curve svg { display:block; width:100%; height:28px; cursor: ew-resize; }
 .voqs-curve path { vector-effect: non-scaling-stroke; fill: none; }
-.curve-baseline { stroke: var(--chart-outline, #999); }
+.curve-baseline { stroke: var(--chart-outline); }
 .curve-line { stroke: var(--accent); stroke-width: 1.15px; }
-.curve-line.alternate { stroke: var(--teal, var(--accent)); }
+.curve-line.alternate { stroke: var(--teal); }
 .curve-cursor { stroke: var(--text); stroke-opacity: .65; stroke-width: 1px; }
 </style>

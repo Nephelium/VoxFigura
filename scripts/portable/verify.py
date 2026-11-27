@@ -19,18 +19,126 @@ from threading import Event, Thread
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
+import wave
 from zipfile import ZipFile
 
-from build import PRIVATE_PATH, sha256 as file_sha256
+from build import (
+    ALLOWED_SERVER_FILES,
+    FORBIDDEN_CONTEST_SERVER_FILES,
+    LOCAL_PATH_LEAK_RE,
+    OFFICIAL_ONNX_SLOTS,
+    PRIVATE_PATH,
+    ROOT as REPO_ROOT,
+    compute_size_breakdown,
+    sha256 as file_sha256,
+)
 
 
 PORTS = {"public": 26751, "friends": 26752}
 HTTP = build_opener(ProxyHandler({}))
+_MPEG1_L3_BITRATES = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, -1)
+_MPEG1_SAMPLE_RATES = (44100, 48000, 32000, -1)
 
 
 def require(condition, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def parse_mp3_frame_header(data: bytes) -> dict[str, int]:
+    """Parse the first MPEG-1 Layer III frame header (skipping optional ID3v2 tag)."""
+    offset = 0
+    if len(data) >= 10 and data[:3] == b"ID3":
+        tag_size = (
+            ((data[6] & 0x7F) << 21)
+            | ((data[7] & 0x7F) << 14)
+            | ((data[8] & 0x7F) << 7)
+            | (data[9] & 0x7F)
+        )
+        offset = 10 + tag_size
+        if data[5] & 0x10:
+            offset += 10  # optional ID3v2.4 footer
+    require(offset + 4 <= len(data), "MP3 data too short to contain MPEG frame header")
+    b0, b1, b2, b3 = data[offset : offset + 4]
+    require(b0 == 0xFF and (b1 & 0xE0) == 0xE0, "Missing MPEG frame sync bits")
+    version_bits = (b1 >> 3) & 0x03
+    layer_bits = (b1 >> 1) & 0x03
+    require(version_bits == 3 and layer_bits == 1, "Expected MPEG-1 Layer III MP3 stream")
+    br_idx = (b2 >> 4) & 0x0F
+    sr_idx = (b2 >> 2) & 0x03
+    ch_mode = (b3 >> 6) & 0x03
+    bitrate_kbps = _MPEG1_L3_BITRATES[br_idx]
+    sample_rate_hz = _MPEG1_SAMPLE_RATES[sr_idx]
+    require(bitrate_kbps > 0 and sample_rate_hz > 0, "Invalid MPEG-1 Layer III bitrate or sample rate")
+    channels = 1 if ch_mode == 3 else 2
+    return {
+        "header_offset": offset,
+        "bitrate_kbps": bitrate_kbps,
+        "sample_rate_hz": sample_rate_hz,
+        "channels": channels,
+        "channel_mode": ch_mode,
+    }
+
+
+def _read_audio_timeline(path: Path) -> tuple[int, int, int] | None:
+    """Return (sample_rate_hz, channels, frames) using soundfile if available, else wave for WAV."""
+    try:
+        import soundfile as sf  # type: ignore[import-not-found]
+        info = sf.info(path)
+        return int(info.samplerate), int(info.channels), int(info.frames)
+    except Exception:
+        if path.suffix.lower() == ".wav":
+            with wave.open(str(path), "rb") as reader:
+                return reader.getframerate(), reader.getnchannels(), reader.getnframes()
+        return None
+
+
+def verify_packaged_mp3s(stage: Path, repo_root: Path | None = REPO_ROOT) -> dict[str, int]:
+    """Verify MPEG-1 Layer III headers of every MP3 in the bundle and compare examples against source WAVs."""
+    checked_total = 0
+    checked_192 = 0
+    checked_source_wavs = 0
+    strict_192_prefixes = ("public/onboarding/", "public/prewarm/", "engine/reference_library/")
+
+    for mp3_path in sorted(stage.rglob("*.mp3")):
+        if not mp3_path.is_file():
+            continue
+        rel = mp3_path.relative_to(stage).as_posix()
+        hdr = parse_mp3_frame_header(mp3_path.read_bytes())
+        checked_total += 1
+        if rel.startswith(strict_192_prefixes):
+            require(
+                hdr["bitrate_kbps"] == 192,
+                f"Built-in example/reference MP3 must be 192 kbps (got {hdr['bitrate_kbps']} kbps): {rel}",
+            )
+            checked_192 += 1
+
+        if repo_root is not None and rel.startswith(("public/onboarding/", "public/prewarm/")):
+            sub = rel.removeprefix("public/")
+            src_wav = repo_root / "assets" / "source-audio" / Path(sub).with_suffix(".wav")
+            if src_wav.is_file():
+                wav_info = _read_audio_timeline(src_wav)
+                mp3_info = _read_audio_timeline(mp3_path)
+                if wav_info is not None:
+                    w_sr, w_ch, w_frames = wav_info
+                    require(
+                        hdr["sample_rate_hz"] == w_sr and hdr["channels"] == w_ch,
+                        f"MP3 header sr/ch mismatch vs source WAV for {rel}: mp3={hdr} wav={(w_sr, w_ch)}",
+                    )
+                    if mp3_info is not None:
+                        m_sr, m_ch, m_frames = mp3_info
+                        dur_diff = abs((m_frames / m_sr) - (w_frames / w_sr))
+                        require(
+                            m_sr == w_sr and m_ch == w_ch and dur_diff <= 0.05,
+                            f"MP3 decoded timeline mismatch vs source WAV for {rel}: "
+                            f"mp3={(m_sr, m_ch, m_frames)} wav={(w_sr, w_ch, w_frames)}",
+                        )
+                    checked_source_wavs += 1
+    return {
+        "mp3_checked": checked_total,
+        "mp3_192kbps_checked": checked_192,
+        "example_source_wav_compared": checked_source_wavs,
+    }
 
 
 @contextmanager
@@ -71,6 +179,8 @@ def get_http(address, path, body=None, *, status=200, method=None, headers=None)
     if isinstance(body, dict):
         request_headers["Content-Type"] = "application/json"
         body = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    elif isinstance(body, (bytes, bytearray)) and not any(k.lower() == "content-type" for k in request_headers):
+        request_headers["Content-Type"] = "application/octet-stream"
     try:
         response = HTTP.open(Request(address + path, data=body, headers=request_headers, method=method), timeout=120)
     except HTTPError as error:
@@ -81,8 +191,10 @@ def get_http(address, path, body=None, *, status=200, method=None, headers=None)
         return output
 
 
-def verify_files(stage: Path) -> dict:
-    manifest = json.loads((stage / "bundle-manifest.json").read_text(encoding="utf-8"))
+def verify_files(stage: Path, repo_root: Path | None = REPO_ROOT) -> dict:
+    manifest_text = (stage / "bundle-manifest.json").read_text(encoding="utf-8")
+    require(not LOCAL_PATH_LEAK_RE.search(manifest_text), "Local absolute path leaked in bundle-manifest.json")
+    manifest = json.loads(manifest_text)
     require(manifest["compute"] == "cpu" and manifest["platform"] == "win-x64", "Wrong target")
     require(manifest["audience"] == "local-validation-only", "Missing local package audience")
     require(manifest["transcription"] == "api-or-manual", "Wrong transcription capability")
@@ -90,16 +202,49 @@ def verify_files(stage: Path) -> dict:
     expected = manifest["files"]
     files = {item.relative_to(stage).as_posix(): item for item in stage.rglob("*") if item.is_file()}
     require(files.keys() == expected.keys() | {"bundle-manifest.json"}, "Unexpected or missing bundled file")
+
+    found_onnx: set[str] = set()
+    found_server: set[str] = set()
+    unpacked_bytes = 0
+
     for name, info in expected.items():
         path = files[name]
         require(not PRIVATE_PATH.search(name) or name == "runtime/python/python311._pth",
                 f"Forbidden runtime file: {name}")
-        require(name not in {"engine/asr_install.py", "engine/asr_models.py", "engine/speech_to_text.py"},
-                f"Local transcription code included: {name}")
+        require(Path(name).name != "direct_url.json", f"Leaked direct_url.json metadata: {name}")
+        require(name not in FORBIDDEN_CONTEST_SERVER_FILES, f"Contest server module leaked into portable bundle: {name}")
         require(path.suffix.lower() != ".wav" or not name.startswith(("public/", "engine/reference_library/")),
                 f"Unexpected uncompressed example WAV: {name}")
-        require(path.stat().st_size == info["bytes"] and file_sha256(path) == info["sha256"],
+        size = path.stat().st_size
+        require(size == info["bytes"] and file_sha256(path) == info["sha256"],
                 f"Bundle manifest mismatch: {name}")
+        unpacked_bytes += size
+        if path.suffix.lower() == ".onnx":
+            found_onnx.add(name)
+        if name.startswith("server/"):
+            found_server.add(name)
+        if ".dist-info/" in name and path.suffix.lower() in {"", ".txt", ".json"}:
+            meta_text = path.read_text(encoding="utf-8", errors="ignore")
+            require(not LOCAL_PATH_LEAK_RE.search(meta_text), f"Local absolute path leaked in {name}")
+
+    # P-01 positive allowlist assertions for 8 Batch-2 ONNX slots and D-07 server isolation.
+    require(found_onnx == OFFICIAL_ONNX_SLOTS,
+            f"Bundle ONNX files must match the exact 8 Batch-2 slots: got {sorted(found_onnx)}")
+    require((stage / "engine/model_bundle/models/IPA2Tract-Lite/canonical_ipa_poses_narrow.json").is_file(),
+            "Missing paired canonical_ipa_poses_narrow.json for 121-ch IPA2Tract-Lite v4")
+    require(found_server == ALLOWED_SERVER_FILES,
+            f"Bundle server files must match allowlist: got {sorted(found_server)}")
+
+    # P-03 verify size_breakdown matches actual unpacked cache bytes.
+    recomputed = compute_size_breakdown(expected)
+    if "size_breakdown" in manifest:
+        require(
+            manifest["size_breakdown"]["total_unpacked_bytes"] == unpacked_bytes,
+            "Manifest size_breakdown total does not match unpacked bundle bytes",
+        )
+    manifest["_verified_unpacked_bytes"] = unpacked_bytes
+    manifest["_verified_size_breakdown"] = recomputed
+
     library = stage / "engine/reference_library"
     metadata = json.loads((library / "media-encoding.json").read_text(encoding="utf-8"))
     entries = json.loads((library / "index.json").read_text(encoding="utf-8"))
@@ -114,6 +259,8 @@ def verify_files(stage: Path) -> dict:
         found = {path.relative_to(library).as_posix() for path in (library / folder).iterdir() if path.is_file()}
         require(found == {name for name in originals.values() if name.startswith(folder + "/")},
                 f"Unexpected or missing recording in {folder}")
+
+    manifest["_verified_mp3"] = verify_packaged_mp3s(stage, repo_root=repo_root)
     return manifest
 
 
@@ -158,7 +305,8 @@ def check_features(address: str, stage: Path, speech: dict[str, tuple[Path, str]
     demo_urls.extend(f"/onboarding/{name}.mp3" for name in ("demo_zh_spkA", "demo_zh_spkB", "demo_en"))
     for url in demo_urls:
         mp3 = get_http(address, url)
-        require(url.endswith(".mp3") and mp3[:2] == b"\xff\xfb" and mp3[2] >> 4 == 11,
+        hdr = parse_mp3_frame_header(mp3)
+        require(url.endswith(".mp3") and hdr["bitrate_kbps"] == 192,
                 f"Example is missing a 192 kbps MP3 stream: {url}")
     get_http(address, "/api/explore/repo-search", status=404)
     get_http(address, "/api/zhihu/search", status=404)
@@ -167,14 +315,17 @@ def check_features(address: str, stage: Path, speech: dict[str, tuple[Path, str]
 
     models = call("/api/models/local")
     providers = set(models["runtime_providers"])
-    require(models["available_count"] == 9 and "CPUExecutionProvider" in providers and
+    require(models["available_count"] == 8 and "CPUExecutionProvider" in providers and
             providers <= {"CPUExecutionProvider", "AzureExecutionProvider"} and not models["cuda_available"],
             f"Unexpected model count/providers: {models['available_count']} {models['runtime_providers']}")
+    aligner_slot = next((m for m in models["models"] if m["name"] == "Vox2Align-Lite v2"), None)
+    require(aligner_slot is not None and not aligner_slot["available"] and not aligner_slot["loaded"],
+            f"Optional Vox2Align-Lite v2 should be absent and disabled by default: {aligner_slot}")
     loaded = call("/api/models/local/load", {"all": True, "device": "cpu"})
     active = call("/api/models/local")
-    require(loaded["ok"] and active["in_memory_count"] == 9 and
-            all(slot["provider"] == "CPUExecutionProvider" for slot in active["models"]),
-            "Loading all nine models on CPU failed")
+    require(loaded["ok"] and active["in_memory_count"] == 8 and
+            all(slot["provider"] == "CPUExecutionProvider" for slot in active["models"] if slot["loaded"]),
+            "Loading all eight core models on CPU failed")
     metadata = call("/api/vtl/meta?speaker=JD2")
     params = [item["neutral"] for item in metadata["parameters"]]
     require(len(params) == 19 and call("/api/vtl/meta?speaker=W02")["parameters"], "VTL speakers unavailable")
@@ -219,9 +370,9 @@ def check_features(address: str, stage: Path, speech: dict[str, tuple[Path, str]
     for demo in [*trills, *fallback_trills]:
         audio_url = f"/api/models/ipa-references/{demo['id']}/audio?audio_gain=original"
         require(get_http(address, audio_url).startswith(b"RIFF"), f"Trill MP3 playback failed: {demo['id']}")
-    get_http(address, "/api/m27/asr-install", status=404)
-    get_http(address, "/api/m27/asr-install", {"model": "tiny"}, status=404)
-    get_http(address, "/api/m27/transcribe", {}, status=404)
+    asr_state = json.loads(get_http(address, "/api/m27/asr-install"))
+    require(asr_state.get("model") == "sensevoice-small" and asr_state.get("state") in {"missing", "ready"},
+            f"Unexpected local ASR status: {asr_state}")
     cloud = json.loads(get_http(address, "/api/ai/deepseek-asr", audio, status=400,
                                 headers={"Content-Type": "audio/wav"}))
     require("DeepSeek API Key" in cloud["hint"], "Cloud transcription route unavailable")
@@ -318,7 +469,14 @@ def run(stage: Path, speech: dict[str, tuple[Path, str]], exe: Path | None, loca
                             break
                         require(monotonic() < deadline, f"Portable port {launched_port} survived launcher exit")
                         sleep(0.25)
-    return {"edition": manifest["edition"], "file_count": len(manifest["files"]), **result}
+    return {
+        "edition": manifest["edition"],
+        "file_count": len(manifest["files"]),
+        "cache_unpacked_bytes": manifest["_verified_unpacked_bytes"],
+        "size_breakdown": manifest["_verified_size_breakdown"],
+        "mp3_verification": manifest["_verified_mp3"],
+        **result,
+    }
 
 
 if __name__ == "__main__":

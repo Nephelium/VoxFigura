@@ -6,7 +6,7 @@ linguolabial [r̼/r̼̊] and voiceless ring-above [r̊] mappings plus 200 Hz / 5
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import unicodedata
 
 import numpy as np
@@ -89,20 +89,6 @@ def smoothstep_envelope(local_s: float, remaining_s: float, ramp_s: float = 0.01
         return 1.0
     u = max(0.0, min(1.0, local_s / ramp_s, remaining_s / ramp_s))
     return u * u * (3.0 - 2.0 * u)
-
-
-def trill_intervals(frames: Iterable[Dict[str, Any]]) -> List[Tuple[float, float, str]]:
-    """Extract (start_s, end_s, place) spans from a frame sequence."""
-    elapsed = 0.0
-    spans: List[Tuple[float, float, str]] = []
-    for frame in frames:
-        dur = float(frame["duration"])
-        end = elapsed + dur
-        place = resolve_trill_place(frame.get("trill") or frame.get("ipa"))
-        if place:
-            spans.append((elapsed, end, place))
-        elapsed = end
-    return spans
 
 
 def apply_trill(

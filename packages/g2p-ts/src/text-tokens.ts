@@ -1,7 +1,11 @@
 import {tr} from './shims.ts';
 
-export const pauseMark=/^[,，、：:;；.!?。！？…\r\n]+$/u;
-export const longPause=/[.!?。！？…\n]/u;
+export const pauseMark=/^[,，、：:;；.·!?。！？…\r\n]+$/u;
+export const longPause=/[.·!?。！？…\n]/u;
+export const IPA_SPACE_PAUSE_MS = 175;
+export const IPA_LONG_PAUSE_MS = 350;
+/** Internal token emitted inside `[...]` only when `preserveSpacePause` is enabled. */
+export const IPA_SPACE_PAUSE_TOKEN = '\u2420';
 export const startsIpa=(word:string)=>word.startsWith('[')||word.startsWith('［');
 
 /**
@@ -22,48 +26,75 @@ export function looksLikeBareIpaToken(token: string): boolean {
 
 /**
  * Split the interior of `[...]` (or a bare IPA run) into per-syllable `[...]` tokens and pause marks:
- *  - Whitespace separates syllables (`[jɜu¹¹ jɜt⁴⁵]` -> `['[jɜu¹¹]', '[jɜt⁴⁵]']`).
- *  - Punctuation (`,`, `;`, `?`, `!`, sentence-final `.`) becomes a pause token.
- *  - Word-internal `.` (e.g. `ˈfəʊ.nɪ.tɪks`) splits adjacent syllables with zero pause.
+ *  - Whitespace separates syllables (`[jɜu¹¹ jɜt⁴⁵]` -> `['[jɜu¹¹]', '[jɜt⁴⁵]']`). When
+ *    `preserveSpacePause` is true (used by `reviewText`), real inter-syllable whitespace emits
+ *    `IPA_SPACE_PAUSE_TOKEN` (175 ms short pause, half of `.` long pause, without `phraseEnd`).
+ *  - Punctuation (`,`, `;`, `?`, `!`, middle dot `·`, sentence-final/standalone `.`) becomes a pause token.
+ *  - Word-internal tight `.` (e.g. `ˈfəʊ.nɪ.tɪks`) splits adjacent syllables with zero pause.
  *  - Linking arc `‿` attaches to the preceding syllable so zero-gap linking is preserved.
  */
-export function splitIpaSpanTokens(rawInner: string): string[] {
+export function splitIpaSpanTokens(
+  rawInner: string,
+  options?: { preserveSpacePause?: boolean },
+): string[] {
+  const preserveSpacePause = Boolean(options?.preserveSpacePause);
   const out: string[] = [];
   // Strip dotted-circle placeholder `◌` (U+25CC) copied from IPA charts when attached after a base
   const trimmed = rawInner
     .trim()
-    .replace(/(?<=[^\s,，、：:;；!?。！？….\u25cc])\u25cc(?=[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒])/gu, '');
+    .replace(/(?<=[^\s,，、：:;；·!?。！？….\u25cc])\u25cc(?=[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒])/gu, '');
   if (!trimmed) return out;
 
-  // Match parenthesized sandhi contours like `(˦˥˦꜓꜓)` attached to a syllable, pause punctuation, or non-space run
+  // Match parenthesized sandhi contours like `(˦˥˦꜓꜓)` attached to a syllable, pause punctuation,
+  // whitespace runs, or non-space phonetic runs
   const pieces =
     trimmed.match(
-      /(?:[^\s,，、：:;；!?。！？…]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?)|[,，、：:;；!?。！？…]+/gu,
+      /(?:[^\s,，、：:;；·!?。！？…]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?)|[,，、：:;；·!?。！？…]+|\s+/gu,
     ) ?? [];
 
+  let pendingSpace = false;
+
   for (let piece of pieces) {
+    if (/^\s+$/u.test(piece)) {
+      if (preserveSpacePause) pendingSpace = true;
+      continue;
+    }
     if (pauseMark.test(piece)) {
+      pendingSpace = false;
       out.push(piece);
       continue;
     }
     const orphanDiacritic = /^(?:\u25cc)?([\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒]+)$/u.exec(piece);
     if (orphanDiacritic) {
+      pendingSpace = false;
       const prev = out.at(-1);
       if (prev && prev.startsWith('[') && prev.endsWith(']')) {
         out[out.length - 1] = `[${prev.slice(1, -1)}${orphanDiacritic[1]}]`;
       }
       continue;
     }
-    if (piece === '\u25cc') continue;
-    // Trailing sentence period(s), e.g. `lei³¹.`
+    if (piece === '\u25cc') {
+      pendingSpace = false;
+      continue;
+    }
+    // Trailing sentence period(s), e.g. `lei³¹.` or standalone `.`
     let trailingSentenceDot = '';
     const trailMatch = /^(.*?)(\.+)$/u.exec(piece);
     if (trailMatch && trailMatch[1]) {
       piece = trailMatch[1];
       trailingSentenceDot = trailMatch[2];
     } else if (/^\.+$/u.test(piece)) {
+      pendingSpace = false;
       out.push('.');
       continue;
+    }
+
+    if (pendingSpace) {
+      const prev = out.at(-1);
+      if (prev && startsIpa(prev) && !prev.endsWith('‿]') && !prev.endsWith('‿］')) {
+        out.push(IPA_SPACE_PAUSE_TOKEN);
+      }
+      pendingSpace = false;
     }
 
     // Split on linking arc `‿` while keeping `‿` on the left syllable to signal zero-gap liaison
@@ -78,7 +109,7 @@ export function splitIpaSpanTokens(rawInner: string): string[] {
     }
 
     for (const wordChunk of mergedLiaison) {
-      // Split on explicit syllable dot `.` inside IPA word (e.g. `nɔ˞.məl`)
+      // Split on explicit syllable dot `.` inside IPA word (e.g. `nɔ˞.məl`, zero pause)
       const dotSyllables = wordChunk.split('.').map((s) => s.trim()).filter(Boolean);
       for (const syl of dotSyllables) {
         // Plain ASCII digits standing alone remain plain digit tokens (read as numbers, not IPA)
@@ -140,13 +171,16 @@ export function tokens(text: string): string[] {
   return out;
 }
 
-export function speechTokens(source: string): string[] {
+export function speechTokens(
+  source: string,
+  options?: { preserveSpacePause?: boolean },
+): string[] {
   const result: string[] = [];
   const chunks = source.match(/\[[^\[\]［］]*\]|［[^\[\]［］]*］|[^\[\]［］]+|[\[\]［］]/gu) ?? [];
   for (const chunk of chunks) {
     if (startsIpa(chunk) && chunk.length > 1) {
       const inner = chunk.slice(1, -1).trim();
-      if (inner) result.push(...splitIpaSpanTokens(inner));
+      if (inner) result.push(...splitIpaSpanTokens(inner, options));
     } else if (/[\[\]［］]/u.test(chunk)) {
       throw Error(tr('modules.vocal-tract.text_brackets'));
     } else {
@@ -160,11 +194,14 @@ export function speechTokens(source: string): string[] {
 const kanaRun = /([ぁ-ゖァ-ヶーゟヿ・\u3099\u309a\uff65-\uff9f]+)/gu;
 export const isKanaRun = (value: string) => /^[ぁ-ゖァ-ヶーゟヿ・\u3099\u309a\uff65-\uff9f]+$/u.test(value);
 
-export function mixedSpeechTokens(source: string): string[] {
+export function mixedSpeechTokens(
+  source: string,
+  options?: { preserveSpacePause?: boolean },
+): string[] {
   const chunks = source.split(/(\[[^\[\]［］]*\]|［[^\[\]［］]*］)/gu);
   return chunks.flatMap((chunk) =>
     startsIpa(chunk) && chunk.length > 1
-      ? speechTokens(chunk)
-      : chunk.split(kanaRun).flatMap((part) => (isKanaRun(part) ? [part] : speechTokens(part))),
+      ? speechTokens(chunk, options)
+      : chunk.split(kanaRun).flatMap((part) => (isKanaRun(part) ? [part] : speechTokens(part, options))),
   );
 }

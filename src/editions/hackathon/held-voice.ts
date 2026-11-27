@@ -1,3 +1,4 @@
+import { defaultM27Adapter, defaultVtlTransport } from '@vocalcut/model-adapters';
 import {
   tractRecordToArray19,
   type GlottisM27Params,
@@ -57,15 +58,12 @@ export async function renderHeldVoice(
     memory.set(key, cached);
     return { ...cached, cache: true };
   }
-  const resp = await fetch('/api/m27/hold-preview', {
-    method: 'POST',
-    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ controls, frames, audio_gain }),
-  });
-  if (!resp.ok) throw new Error('Tract2Vox-Lite 未返回试听音频');
-  const data = (await resp.json()) as { wav_base64?: string; device?: string; model_ms?: number };
-  if (!data.wav_base64) throw new Error('Tract2Vox-Lite 未返回试听音频');
+  const previewRes = await defaultM27Adapter.holdPreview(
+    { controls, frames, audio_gain },
+    { signal, timeoutMs },
+  );
+  if (!previewRes.ok) throw new Error(previewRes.error.hint || 'Tract2Vox-Lite 未返回试听音频');
+  const data = previewRes.value;
   const bytes = Uint8Array.from(atob(data.wav_base64), (c) => c.charCodeAt(0));
   const voice = {
     buffer: await context.decodeAudioData(bytes.buffer),
@@ -151,7 +149,7 @@ function selectSteadyVoicedSpan(pcm: Float32Array, sr: number): { from: number; 
  * Eliminates 180-degree harmonic cancellation ("一顿一顿" amplitude dips) on every loop seam.
  */
 function findPhaseLockedEnd(pcm: Float32Array, from: number, rawTo: number, blend: number, sr: number, f0Hz: number): number {
-  const clampedF0 = Number.isFinite(f0Hz) ? Math.min(600, Math.max(60, f0Hz)) : 160;
+  const clampedF0 = Number.isFinite(f0Hz) && f0Hz > 0 ? Math.min(2400, Math.max(10, f0Hz)) : 160;
   const period = Math.max(24, Math.round(sr / clampedF0));
   const maxLag = Math.min(period, Math.floor((rawTo - from - blend * 2) / 2));
   if (maxLag <= 2) return rawTo;
@@ -194,7 +192,7 @@ export function stabilizedLoop(source: AudioBuffer, f0Hz = 160): AudioBuffer {
   const sr = source.sampleRate;
   const ch0 = source.getChannelData(0);
   const { from, to: rawTo } = selectSteadyVoicedSpan(ch0, sr);
-  const clampedF0 = Number.isFinite(f0Hz) ? Math.min(600, Math.max(60, f0Hz)) : 160;
+  const clampedF0 = Number.isFinite(f0Hz) && f0Hz > 0 ? Math.min(2400, Math.max(10, f0Hz)) : 160;
   const period = Math.max(24, Math.round(sr / clampedF0));
   const blend = Math.min(Math.max(period * 2, Math.round(0.024 * sr)), Math.floor((rawTo - from) / 4));
   if (blend < 16 || rawTo - from - blend < 64) return source;
@@ -416,19 +414,10 @@ export class VtlLiveStreamPlayer {
     };
 
     try {
-      const resp = await fetch('/api/vtl/live-pull', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.any([signal, AbortSignal.timeout(2500)]),
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) return false;
-      const data = (await resp.json()) as {
-        ok?: boolean;
-        sample_rate_hz?: number;
-        pcm_f32_b64?: string;
-      };
-      if (!data.ok || !data.pcm_f32_b64 || !this.running || !this.masterGain) return false;
+      const pullRes = await defaultVtlTransport.requestLivePull(payload, { signal, timeoutMs: 2500 });
+      if (!pullRes.ok) return false;
+      const data = pullRes.value;
+      if (!data.pcm_f32_b64 || !this.running || !this.masterGain) return false;
       this.needsReset = false;
 
       const pcm = decodeBase64Float32(data.pcm_f32_b64);

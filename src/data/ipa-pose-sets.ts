@@ -32,7 +32,7 @@ let loading: Promise<void> | undefined;
 
 export function loadDefaultIpaPoses(): Promise<void> {
   loading ??= (async () => {
-    const response = await fetch('/api/models/ipa-references/poses', { signal: AbortSignal.timeout(4000) });
+    const response = await fetch('/api/models/ipa-references/poses', { signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('录音反演构型库不可用');
     const data = await response.json() as { poses: { symbol: string; params: number[] }[] };
     const poses: Record<string, number[]> = {};
@@ -92,6 +92,26 @@ export function saveIpaPoseToSet(symbol: string, params: number[], id = selected
   return true;
 }
 
+export function resetIpaPoseInSet(symbol: string, id = selectedIpaPoseSetId.value): boolean {
+  const key = ipaPoseKey(symbol);
+  if (!key || id === RECORDED_IPA_SET_ID) return false;
+  const target = ipaPoseSets.value.find(set => set.id === id);
+  if (!target) return false;
+  const defaultPose = ipaPoseSets.value[0]?.poses[key];
+  const nextPoses = { ...target.poses };
+  if (validPose(defaultPose)) {
+    nextPoses[key] = [...defaultPose];
+  } else {
+    delete nextPoses[key];
+  }
+  const nextProtected = target.protectedPhones?.filter(item => item !== key);
+  ipaPoseSets.value = ipaPoseSets.value.map(set =>
+    set.id === id ? { ...set, poses: nextPoses, protectedPhones: nextProtected } : set,
+  );
+  persist();
+  return true;
+}
+
 export function getProtectedIpaPose(symbol: string, id = selectedIpaPoseSetId.value): number[] | undefined {
   const key = ipaPoseKey(symbol);
   const set = ipaPoseSets.value.find(item => item.id === id && item.id !== RECORDED_IPA_SET_ID);
@@ -128,7 +148,7 @@ function candidatePoseKeys(symbol: string): string[] {
   const exact = ipaPoseKey(symbol);
   if (!exact) return [];
   const noLen = exact.replace(/[ːˑ̚ⁿˡ̩̯]/gu, '');
-  const noSecondary = noLen.replace(/[\p{M}ʷʲˠˤ˞ʼ]/gu, '');
+  const noSecondary = noLen.replace(/[\p{M}ʷᵝʲˠˤ˞ʼ]/gu, '');
   const bare = noSecondary.replace(/[ʰʱ]/gu, '');
   const rawList = [exact, noLen, noSecondary, bare];
   const expanded: string[] = [];

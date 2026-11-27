@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
-import { editionCorpusBoundary, editionDisplayLabel, editionIsolationNote } from '@vocalcut/edition';
-import { themedBrandIconUrl, APP_BRAND_NAME, APP_BRAND_TAGLINE, APP_VERSION } from '@/data/app-branding';
+import { editionCorpusBoundary, editionDisplayLabel, editionIsolationNote, exploreLabel } from '@vocalcut/edition';
+import { APP_BRAND_NAME, APP_BRAND_TAGLINE, APP_VERSION } from '@/data/app-branding';
+import { workspaceIconUrl } from '@/data/workspace-images';
 import { hasUpdate, latestRelease, openUpdateModal } from '@/data/app-update';
 import { METHOD_REFERENCES } from '@/data/references';
 import { useWorkbenchStore } from '@/stores/workbench';
@@ -27,16 +28,16 @@ const CAPABILITY_CLUSTERS = [
     code: 'CLUSTER 01',
     title: '发音与重建',
     modules: [
-      { name: '国际音标表 Plus', desc: '655 项 IPA / extIPA / VoQS 符号，含 266 份正式 TextGrid 参考录音、个人实录评估与可派生构型方案。' },
-      { name: '语音合成', desc: '中英日文本与 [ipa] / TextGrid 编译，联调 3 阶 qTA 基频、VoQS 发声锚点、65 截面面积与传递函数图谱。' },
-      { name: '声道动态重建', desc: '端侧 50 Hz 27 维反演，同步矢状面、喉镜与声带冠状面三视图，支持摄像头 MediaPipe 三维透视人头-声道联合重建及 faster-whisper 离线转写对齐。' },
+      { name: '国际音标表 Plus', desc: '655 项 IPA / extIPA / VoQS 符号，含 308 项参考录音库索引（276 份实录音频与 267 份人工精修 TextGrid）、个人实录评估与可派生构型方案。' },
+      { name: '语音合成', desc: '中英日文本与 [ipa] / TextGrid 编译，支持 32 维窄标 IPA 协同构音、任意无标调 [IPA] 韵律预测与参考音色中位基频自动匹配，联调 3 阶 qTA 基频、VoQS 发声锚点、65 截面面积与传递函数图谱。' },
+      { name: '声道动态重建', desc: '端侧 50 Hz 27 维联合反演与双语强制对齐，同步矢状面、喉镜与声带冠状面三视图，支持摄像头 MediaPipe 三维透视人头-声道联合重建与 SenseVoice-Small (ONNX) 离线转写。' },
     ],
   },
   {
     code: 'CLUSTER 02',
     title: '调控与实验',
     modules: [
-      { name: '发声调音台', desc: '基于声门—声道—声纹解耦表征，支持单人时变发声类型曲线调制与双人多器官属性迁移。' },
+      { name: '发声调音台', desc: '基于 20–1200 Hz 宽域声门—声道—声纹解耦表征，支持单人时变发声类型曲线调制与双人多器官属性迁移。' },
       { name: '声道连续统', desc: '支持单轴/双轴（默认 20 格）阻音保护生理连续统矩阵制作，并内置 550–800 Hz 持续元音高音移调试听。' },
       { name: '发音字典管理', desc: '维护高于内置词典优先级的个人词条、10 套汉语注音标准、手绘五度方言调型及三类非递归连读变调规则。' },
     ],
@@ -46,7 +47,7 @@ const CAPABILITY_CLUSTERS = [
     title: '编曲与出版',
     modules: [
       { name: '声乐编曲台', desc: '通用键盘简谱、强弱力度肺压映射、钢琴卷帘微调、辅音抢拍（韵核精准踩拍）、数字波导伴奏与改音高保留咬字演唱。' },
-      { name: '非线性剪辑', desc: 'V0–V3 画面图层与 A1–A4 混音轨同轴编辑，支持逐字高亮双行字幕（汉字 + IPA）与成片视频导出。' },
+      { name: '非线性剪辑', desc: 'V0–V3 多子轨画面图层与 A1–A12 人声 / A3 伴奏混音轨同轴编辑，支持逐字高亮双行字幕（汉字 + IPA）与成片视频导出。' },
       { name: '发音卡工坊', desc: '响应式自由分栏拖拽排版声学图表，浏览器本地生成高清 PNG 或调用代理导出 MP4/GIF 动卡。' },
     ],
   },
@@ -75,7 +76,7 @@ const ARCHITECTURE_PACKAGES = [
     pkg: 'packages/model-adapters/ + engine/',
     role: '物理求解与本地 ONNX 推理服务',
     detail:
-      '统一桥接 VocalTractLab 2.4 原生声管引擎与纯 ONNX Runtime 本地推理服务，执行严格物理量纲边界校验、端侧推理与热插拔外置换模。',
+      '统一桥接 VocalTractLab 2.4 原生声管引擎与 8 项核心纯 ONNX Runtime 本地推理模型（零 PyTorch 运行时依赖），执行严格物理量纲边界校验、端侧推理与热插拔外置换模。',
   },
 ] as const;
 
@@ -118,8 +119,14 @@ const SCIENTIFIC_REDLINES = [
 
 const LICENSE_LAYERS = [
   { scope: '主工程与独立核心包', license: 'GPL-3.0-or-later', detail: '含前端工作台、Node 代理、core-ts / g2p-ts / vocal-tract-view 与 VTL 2.4 桥接代码' },
-  { scope: '专用音标与等宽字体', license: 'SIL OFL 1.1', detail: 'PTBIPAPlus、Doulos SIL、JetBrains Mono 随 public/fonts/ 同原许可文本分发' },
-  { scope: '前端渲染与数学排版', license: 'MIT / Apache-2.0 / BSD-2-Clause', detail: 'Three.js / KaTeX / SwiftF0 (MIT)，DPDFNet / MediaPipe (Apache-2.0)，CMUdict (BSD-2-Clause)' },
+  { scope: '专用音标与界面字体', license: 'SIL OFL 1.1', detail: 'PTBIPAPlus、Doulos SIL、Noto Sans/Serif SC、Inter、Lora 与 JetBrains Mono 随 public/fonts/ 同原许可文本分发' },
+  {
+    scope: exploreLabel ? '前端渲染与数学排版' : '前端渲染与推理组件',
+    license: 'MIT / Apache-2.0 / BSD-2-Clause',
+    detail: exploreLabel
+      ? 'Three.js / KaTeX / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict (BSD-2-Clause)'
+      : 'Three.js / SwiftF0 (MIT)，DPDFNet / MediaPipe / SenseVoice (Apache-2.0)，CMUdict (BSD-2-Clause)',
+  },
   { scope: '语料与版本素材边界', license: '原语料协议 / 版本授权', detail: editionCorpusBoundary },
 ] as const;
 
@@ -142,6 +149,10 @@ function onAboutScroll(): void {
     scrollRaf = 0;
     const scroller = aboutScrollRef.value;
     if (!scroller) return;
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4) {
+      activeSec.value = NAV_ITEMS[NAV_ITEMS.length - 1].id;
+      return;
+    }
     const topEdge = scroller.getBoundingClientRect().top;
     let current = NAV_ITEMS[0].id as string;
     for (const item of NAV_ITEMS) {
@@ -214,7 +225,7 @@ onBeforeUnmount(() => {
             <div class="editorial-card about-hero-card selectable">
               <div class="about-hero-top">
                 <strong class="about-brand">
-                  <img :src="themedBrandIconUrl" width="28" height="28" alt="" />
+                  <img :src="workspaceIconUrl" width="28" height="28" alt="" />
                   {{ APP_BRAND_NAME }}
                 </strong>
                 <div class="about-meta-chips">
@@ -232,7 +243,7 @@ onBeforeUnmount(() => {
                 </button>
                 <button type="button" class="btn sm" @click="store.openOverlay('model-report')">
                   <IconSvg name="cpu" :size="13" />
-                  <span>训练数据、曲线与 ONNX 契约 → 技术报告</span>
+                  <span>模型架构、32 维特征与评测 → 技术报告</span>
                 </button>
                 <button type="button" class="btn sm" @click="store.openOverlay('settings', 'engine')">
                   <IconSvg name="sliders" :size="13" />
@@ -312,10 +323,10 @@ onBeforeUnmount(() => {
             <div class="editorial-card ptb-feature-card selectable">
               <div class="about-cluster-head">
                 <strong style="font-size: 1.04rem">同源生态与功能互补</strong>
-                <span class="mono muted" style="font-size: 0.85rem">作者：韶子 · 正式版 3.1.3</span>
+                <span class="mono muted" style="font-size: 0.85rem">作者：井立文 · 正式版 3.1.3</span>
               </div>
               <p class="muted about-p">
-                <strong>PhoneticToolbox（语音学工具箱）</strong>是由同一作者（韶子）开发的桌面实验语音学平台（Vue 3 + PyQt6 / Qt WebEngine），集成录音采集、声学参数分析、语音合成、标注实验、论文精读与中国方言地图等 19 个高频工具，支持 Windows x64 与 macOS Apple Silicon。
+                <strong>PhoneticToolbox（语音学工具箱）</strong>是由作者开发的桌面实验语音学平台（Vue 3 + PyQt6 / Qt WebEngine），集成录音采集、声学参数分析、语音合成、标注实验、论文精读与中国方言地图等 19 个高频工具，支持 Windows x64 与 macOS Apple Silicon。
               </p>
               <p class="muted about-p">
                 {{ APP_BRAND_NAME }} 沿用了 PhoneticToolbox 的国际音标表 Plus（655 项体系）、汉语注音与 UntPhesoca 宽式映射、2D/3D 声道几何组件及 PTBIPAPlus 字体，并在此基础上拓展出端侧 27 维声道动态反演、协同动腔规划、双人器官迁移与视听声乐编曲工作流。若你的研究需要 EGG 喉电图分析、Klatt 合成、批量参数提取或田野音系归纳，推荐搭配 PhoneticToolbox 使用。
@@ -366,10 +377,10 @@ onBeforeUnmount(() => {
               <div class="editorial-card about-pillar-card">
                 <strong>量纲守卫、离线计算与凭据边界</strong>
                 <p class="muted about-p">
-                  所有物理控制边界（基频 60–600 Hz、声门下压 0–1600 Pa、17/19 维声道、8 维声门与塞音闭塞刚性下限）一律遵循越界即拒绝原则，返回合法范围提示而不做静默截断。
+                  所有物理控制边界（正基频 F0 > 0 Hz，其中 VTL 2.4 物理声门保留 40–600 Hz 硬件边界，神经声码器通道支持 20–1200 Hz 宽域基频；声门下压 0–1600 Pa；17/19 维声道；8 维声门与塞音闭塞刚性下限）一律遵循越界即拒绝原则，返回合法范围提示而不做静默截断。
                 </p>
                 <p class="muted about-p">
-                  物理求解、声道反演、转写对齐与降噪均在用户本机执行，不向外部上传用户录音；在设置中可选填的第三方大模型或语音识别 API Key 仅驻留于当前会话内存，不写入代码、工程文件或磁盘日志。
+                  物理求解、声道反演、转写对齐与降噪均在用户本机执行，不向外部上传用户录音；在右上角 AI 助手抽屉的模型连接设置中可选填第三方大模型或语音识别 API Key，仅驻留于当前会话内存，不写入代码、工程文件或磁盘日志。
                 </p>
               </div>
             </div>

@@ -16,8 +16,10 @@ if (appearanceRoot) {
 <script setup lang="ts">
 import { computed } from 'vue';
 import { BUILTIN_SKINS } from '@/styles/skin-registry';
+import IconSvg from './IconSvg.vue';
+import { resolveToolbarArtwork } from './toolbar-artwork';
 
-const props = defineProps<{ item: string; skin?: string }>();
+const props = defineProps<{ item: string; skin?: string; toolbar?: boolean; themeTint?: boolean }>();
 // Row-major positions in the four-column navigation sprite sheets.
 const items = [
   'research', 'studio', 'main', 'ipa',
@@ -63,6 +65,9 @@ const artworkSkin = computed(() => {
   const requested = props.skin ?? appliedSkin.value ?? 'minimal';
   return BUILTIN_SKINS.some(({ id }) => id === requested) ? requested : 'minimal';
 });
+const toolbarIcon = computed(() => props.toolbar
+  ? resolveToolbarArtwork(props.item, artworkSkin.value)
+  : undefined);
 const isLineArtwork = computed(() => lineArtwork[artworkSkin.value]?.includes(props.item));
 const hasTopBleed = computed(() =>
   (artworkSkin.value === 'minimal' || artworkSkin.value === 'swiss') && cellsWithTopBleed.includes(props.item),
@@ -95,14 +100,18 @@ const art = computed(() => {
   <span
     class="nav-art"
     :class="{
-      'nav-art--action': actionIndex >= 0 || isUpdateAction,
+      'nav-art--action': actionIndex >= 0 || isUpdateAction || item === 'sun' || item === 'moon',
       'nav-art--sample': skin !== undefined,
-      'nav-art--line': isLineArtwork,
-      'nav-art--clip-top': hasTopBleed,
+      'nav-art--line': !toolbarIcon && isLineArtwork,
+      'nav-art--clip-top': !toolbarIcon && hasTopBleed,
+      'nav-art--toolbar': toolbarIcon,
+      'nav-art--theme': toolbarIcon && themeTint,
     }"
     aria-hidden="true"
-    :style="art"
-  />
+    :style="toolbarIcon ? undefined : art"
+  >
+    <IconSvg v-if="toolbarIcon" :name="item" :artwork="toolbarIcon" />
+  </span>
 </template>
 
 <style scoped>
@@ -132,5 +141,14 @@ const art = computed(() => {
 }
 .nav-art--clip-top {
   clip-path: inset(12.5% 0 0);
+}
+.nav-art--toolbar {
+  display: inline-flex;
+  filter: none;
+}
+.nav-art--theme {
+  --toolbar-art-outline: color-mix(in oklab, var(--accent) 68%, var(--text));
+  --toolbar-art-detail: var(--accent);
+  --toolbar-art-wash: var(--selected);
 }
 </style>

@@ -14,6 +14,7 @@ import {
   getGuideDemoCacheStats,
   guideDemoCacheTick,
 } from '@/data/guide-demo-cache';
+import { parseShortcutTokens } from '@/data/shortcut-format';
 import { useWorkbenchStore } from '@/stores/workbench';
 import IconSvg from '@/components/common/IconSvg.vue';
 import TechChart, { type ChartThemeTokens } from '@/components/charts/TechChart.vue';
@@ -123,14 +124,14 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
       axisPointer: { type: 'shadow' },
       backgroundColor: t.tooltipBg,
       borderColor: t.border,
-      textStyle: { color: t.text, fontSize: 12 },
+      textStyle: { color: t.text, fontSize: 13 },
     },
-    legend: { top: 6, left: 'center', icon: 'roundRect', itemWidth: 14, itemHeight: 8, itemGap: 16, textStyle: { color: t.muted, fontSize: 11 } },
-    grid: { left: 56, right: 62, top: 72, bottom: 36 },
+    legend: { top: 6, left: 'center', icon: 'roundRect', itemWidth: 16, itemHeight: 9, itemGap: 18, textStyle: { color: t.text, fontSize: 12.5 } },
+    grid: { left: 64, right: 68, top: 76, bottom: 42 },
     xAxis: {
       type: 'category',
       data: degrees,
-      axisLabel: { color: t.muted, fontSize: 11, interval: 0 },
+      axisLabel: { color: t.text, fontSize: 12.5, interval: 0 },
       axisLine: { lineStyle: { color: t.border } },
     },
     yAxis: [
@@ -139,8 +140,8 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         name: '声门混合度 (%)',
         nameGap: 14,
         max: 120,
-        nameTextStyle: { color: t.muted, fontSize: 11, align: 'left', padding: [0, 0, 0, -24] },
-        axisLabel: { color: t.muted, fontSize: 11, formatter: '{value}%' },
+        nameTextStyle: { color: t.muted, fontSize: 12.5, align: 'left', padding: [0, 0, 0, -24] },
+        axisLabel: { color: t.muted, fontSize: 12, formatter: '{value}%' },
         splitLine: { lineStyle: { color: t.gridLine } },
       },
       {
@@ -148,8 +149,8 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         name: '喉高偏移 |ΔHY| (cm)',
         nameGap: 14,
         max: 1.05,
-        nameTextStyle: { color: t.muted, fontSize: 11, align: 'right', padding: [0, -24, 0, 0] },
-        axisLabel: { color: t.muted, fontSize: 11, formatter: '±{value}' },
+        nameTextStyle: { color: t.muted, fontSize: 12.5, align: 'right', padding: [0, -24, 0, 0] },
+        axisLabel: { color: t.muted, fontSize: 12, formatter: '±{value}' },
         splitLine: { show: false },
       },
     ],
@@ -157,9 +158,9 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
       {
         name: '声门发声态混合度（V̤/V͈/V̰/F 等）',
         type: 'bar',
-        barMaxWidth: 34,
+        barMaxWidth: 36,
         itemStyle: { color: t.series[0], borderRadius: [5, 5, 0, 0] },
-        label: { show: true, position: 'top', color: t.text, fontSize: 11, formatter: '{c}%' },
+        label: { show: true, position: 'top', color: t.text, fontSize: 12.5, formatter: '{c}%' },
         data: [0, 35, 70, 100],
       },
       {
@@ -167,10 +168,10 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
-        symbolSize: 9,
-        lineStyle: { width: 2.6, color: t.series[2] },
+        symbolSize: 10,
+        lineStyle: { width: 2.8, color: t.series[2] },
         itemStyle: { color: t.series[2] },
-        label: { show: true, position: 'top', color: t.series[2], fontSize: 11, formatter: '±{c} cm' },
+        label: { show: true, position: 'top', color: t.series[2], fontSize: 12.5, formatter: '±{c} cm' },
         data: [0, 0.2, 0.5, 0.8],
       },
     ],
@@ -179,16 +180,15 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 </script>
 
 <template>
-  <div class="settings-view">
+  <div class="settings-view guide-shell guide-reading-scope">
     <!-- Left Grouped Directory Navigation -->
     <aside class="set-nav">
       <button
         type="button"
-        class="btn primary"
-        style="margin-bottom: 8px; justify-content: flex-start"
+        class="btn primary guide-back"
         @click="store.closeOverlay()"
       >
-        <IconSvg name="arrow-left" :size="13" />
+        <IconSvg name="arrow-left" :size="14" />
         <span>返回工作台 (Esc)</span>
       </button>
 
@@ -199,7 +199,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         :class="{ active: activeSec === GUIDE_SYSTEM_OVERVIEW.id }"
         @click="scrollToSec(GUIDE_SYSTEM_OVERVIEW.id)"
       >
-        <IconSvg :name="GUIDE_SYSTEM_OVERVIEW.icon" :size="13" />
+        <IconSvg :name="GUIDE_SYSTEM_OVERVIEW.icon" :size="14" />
         <span>{{ GUIDE_SYSTEM_OVERVIEW.nav }}</span>
       </button>
 
@@ -212,7 +212,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         :class="{ active: activeSec === mod.sectionAnchor }"
         @click="scrollToSec(mod.sectionAnchor)"
       >
-        <IconSvg :name="mod.icon" :size="13" />
+        <IconSvg :name="mod.icon" :size="14" />
         <span>{{ idx + 1 }}. {{ mod.navTitle }}</span>
       </button>
 
@@ -225,17 +225,17 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         :class="{ active: activeSec === sec.id }"
         @click="scrollToSec(sec.id)"
       >
-        <IconSvg :name="sec.icon" :size="13" />
+        <IconSvg :name="sec.icon" :size="14" />
         <span>{{ sec.nav }}</span>
       </button>
 
       <div class="guide-nav-footer">
         <button type="button" class="btn sm" style="width: 100%" @click="store.openOverlay('model-report')">
-          <IconSvg name="cpu" :size="13" />
+          <IconSvg name="cpu" :size="14" />
           <span>模型训练与技术报告</span>
         </button>
         <button type="button" class="btn sm" style="width: 100%" @click="store.openOverlay('settings', 'engine')">
-          <IconSvg name="sliders" :size="13" />
+          <IconSvg name="sliders" :size="14" />
           <span>本地 ONNX 模型矩阵</span>
         </button>
       </div>
@@ -248,22 +248,22 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
         <div class="panel guide-hero">
           <div class="p-head">
             <span>{{ APP_BRAND_NAME }} · 系统整合使用说明与交互案例手册</span>
-            <span class="mono muted" style="font-size: 0.875rem">零外置视频截图 · 本机实时合成 · IndexedDB 持久化缓存</span>
+            <span class="mono muted guide-hero-meta">零截图纯矢量图示 · 真实生产管线演算 · IndexedDB 持久化缓存</span>
           </div>
-          <div class="p-body" style="padding: 14px; display: flex; flex-direction: column; gap: 10px">
+          <div class="p-body" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 12px">
             <div class="guide-callout note">
-              <IconSvg name="info" :size="16" />
+              <IconSvg name="info" :size="18" />
               <div>
                 <strong>全工作台说明书导读</strong>
                 <p>
-                  本手册整合了{{ APP_BRAND_NAME }}全部功能模块的使用说明（也可在各工作区顶栏点击「使用说明」单独呼出对应章节）。语音合成、音标表、声道重建、调音台、连续统、发音字典与发音卡以实验语音学视角为主；编曲与剪辑以音乐制作及音视频创作为视角编写。所有演示案例均由本机内核与声道引擎现场演算，并自动存入浏览器缓存供随时复看。
+                  本手册整合了{{ APP_BRAND_NAME }}全部功能模块的使用说明（也可在各工作区顶栏点击「使用说明」单独呼出对应章节，并随时重播该页首次进入操作指引）。语音合成、国际音标表 Plus、声道动态重建、发声调音台、声道连续统、发音字典与发音卡工坊以实验语音学及学术制图视角为主；声乐编曲与多轨剪辑以音乐制作及音视频创作为视角编写。手册内全部原理曲线与交互演示均由真实生产管线与内置实录语料、参考录音库及示例乐谱现场演算，不使用合成假数据敷衍演示，计算结果自动存入浏览器缓存供随时复看。
                 </p>
               </div>
             </div>
 
             <div class="cache-strip">
               <div class="cache-info mono">
-                <IconSvg name="cpu" :size="14" />
+                <IconSvg name="cpu" :size="15" />
                 <span>
                   本机演示缓存：已保留 <strong>{{ cacheStats.count }}</strong> 个模块结果（约 {{ formatBytes(cacheStats.totalBytes) }}）
                 </span>
@@ -274,7 +274,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
                 :disabled="clearingCache || cacheStats.count === 0"
                 @click="onClearAllCache"
               >
-                <IconSvg name="trash" :size="12" />
+                <IconSvg name="trash" :size="13" />
                 <span>清空全部演示缓存</span>
               </button>
             </div>
@@ -307,41 +307,47 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
                 </defs>
                 <rect x="14" y="16" width="176" height="60" rx="8" class="g-node accent" />
                 <text x="102" y="40" class="g-title">文本 / IPA / TextGrid</text>
-                <text x="102" y="59" class="g-sub">语音合成 · G2P · 韵律模型</text>
+                <text x="102" y="59" class="g-sub">语音合成 · 三栏联调 · 通栏轴</text>
 
                 <rect x="14" y="102" width="176" height="60" rx="8" class="g-node accent" />
                 <text x="102" y="126" class="g-title">实录录音 / 音频导入</text>
-                <text x="102" y="145" class="g-sub">声道动态重建 · ASR 对齐</text>
+                <text x="102" y="145" class="g-sub">声道重建 · 27 维 · 实时 3D</text>
 
                 <rect x="242" y="16" width="190" height="60" rx="8" class="g-node" />
                 <text x="337" y="40" class="g-title">国际音标表 Plus &amp; 字典</text>
-                <text x="337" y="59" class="g-sub">655 入口 · 构型方案 · 目标帧</text>
+                <text x="337" y="59" class="g-sub">655 条目 · 构型方案 · 目标帧</text>
 
                 <rect x="242" y="102" width="190" height="60" rx="8" class="g-node" />
                 <text x="337" y="126" class="g-title">发声调音台（发声与迁移）</text>
-                <text x="337" y="145" class="g-sub">时变 VoQS · 双人器官移植</text>
+                <text x="337" y="145" class="g-sub">时变 VoQS · 双人 9 轨 · 声学对比</text>
 
                 <rect x="484" y="16" width="196" height="60" rx="8" class="g-node" />
                 <text x="582" y="40" class="g-title">声道连续统与发音字典</text>
-                <text x="582" y="59" class="g-sub">20 格刺激 · 高音试听 · 变调</text>
+                <text x="582" y="59" class="g-sub">单双轴刺激包 · 叠影/F1-F2 · 变调</text>
 
                 <rect x="484" y="102" width="196" height="60" rx="8" class="g-node" />
                 <text x="582" y="126" class="g-title">声乐编曲台</text>
-                <text x="582" y="145" class="g-sub">键盘简谱 · 卷帘 · 抢拍改音高</text>
+                <text x="582" y="145" class="g-sub">JE/开源DSL · MIDI/VSQX/SVP · 抢拍</text>
 
-                <rect x="734" y="34" width="232" height="114" rx="10" class="g-node primary" />
-                <text x="850" y="64" class="g-title">双通道求解与剪辑成片</text>
-                <text x="850" y="86" class="g-sub">VTL 2.4 (48 kHz) / Tract2Vox-Lite</text>
-                <text x="850" y="106" class="g-sub">剪辑 V0–V3 图层 / A1–A4 音轨</text>
-                <text x="850" y="126" class="g-sub">WAV · TextGrid · PitchTier · CSV · MP4</text>
+                <rect x="734" y="16" width="232" height="68" rx="9" class="g-node primary" />
+                <text x="850" y="39" class="g-title">双通道求解与剪辑成片</text>
+                <text x="850" y="57" class="g-sub">VTL 2.4 / Tract2Vox-Lite · V0–V3 / A1–A12</text>
+                <text x="850" y="73" class="g-sub">运镜转场 · 节拍卡点 · MP4 / WAV / SRT</text>
+
+                <rect x="734" y="98" width="232" height="68" rx="9" class="g-node primary" />
+                <text x="850" y="121" class="g-title">发音卡排版与导出工坊</text>
+                <text x="850" y="139" class="g-sub">跨全站 16 模块 · 嵌套分栏与留白保留</text>
+                <text x="850" y="155" class="g-sub">PNG / 剪贴板 · MP4(AAC) / GIF (450 帧)</text>
 
                 <path d="M 190 46 L 238 46" class="g-arrow" marker-end="url(#gArr)" />
                 <path d="M 190 132 L 238 132" class="g-arrow" marker-end="url(#gArr)" />
                 <path d="M 190 118 L 238 60" class="g-arrow dashed" marker-end="url(#gArr)" />
                 <path d="M 432 46 L 480 46" class="g-arrow" marker-end="url(#gArr)" />
                 <path d="M 432 132 L 480 132" class="g-arrow" marker-end="url(#gArr)" />
-                <path d="M 680 46 L 730 74" class="g-arrow" marker-end="url(#gArr)" />
-                <path d="M 680 132 L 730 108" class="g-arrow" marker-end="url(#gArr)" />
+                <path d="M 680 46 L 730 48" class="g-arrow" marker-end="url(#gArr)" />
+                <path d="M 680 58 L 730 120" class="g-arrow dashed" marker-end="url(#gArr)" />
+                <path d="M 680 124 L 730 66" class="g-arrow dashed" marker-end="url(#gArr)" />
+                <path d="M 680 136 L 730 136" class="g-arrow" marker-end="url(#gArr)" />
               </svg>
             </div>
 
@@ -392,7 +398,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
               title="VoQS 标量度 1 / 2 / 3 参数映射速查图"
               subtitle="发声类型混合权重（%）与喉位垂直偏移量（±cm）逐级对应关系"
               badge="Ball et al. 2018"
-              :height="285"
+              :height="310"
               :option-builder="buildVoqsScaleChart"
               caption="省略标量数字（如 {V̤ ... V̤}）时默认采用 2 度（70% 声门混合 / ±0.50 cm 喉高偏移），离开闭合花括号后自动平滑恢复常态浊声。"
             />
@@ -408,7 +414,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
                   <div class="voqs-meta">
                     <strong>{{ v.name }}</strong>
                     <span class="muted">{{ v.group }}</span>
-                    <span class="muted voqs-phys">{{ v.physics }}</span>
+                    <span class="voqs-phys">{{ v.physics }}</span>
                   </div>
                 </div>
               </div>
@@ -427,9 +433,11 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
                 </thead>
                 <tbody>
                   <tr v-for="(row, rIdx) in tbl.rows" :key="rIdx">
-                    <td><strong>{{ row[0] }}</strong></td>
-                    <td><code class="mono guide-code">{{ row[1] }}</code></td>
-                    <td class="muted">{{ row[2] }}</td>
+                    <td v-for="(cell, cIdx) in row" :key="cIdx" :class="{ 'guide-cell-body': cIdx >= 2 }">
+                      <strong v-if="cIdx === 0">{{ cell }}</strong>
+                      <code v-else-if="cIdx === 1 && row.length <= 3" class="mono guide-code">{{ cell }}</code>
+                      <template v-else>{{ cell }}</template>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -439,8 +447,13 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
               <div v-for="grp in SHORTCUT_GROUPS" :key="grp.title" class="editorial-card guide-sc-card">
                 <strong>{{ grp.title }}</strong>
                 <div v-for="row in grp.rows" :key="row[0]" class="guide-sc-row">
-                  <span class="muted">{{ row[0] }}</span>
-                  <kbd class="mono guide-kbd">{{ row[1] }}</kbd>
+                  <span class="guide-sc-desc">{{ row[0] }}</span>
+                  <span class="guide-sc-keys">
+                    <template v-for="(tok, tIdx) in parseShortcutTokens(row[1])" :key="tIdx">
+                      <kbd v-if="tok.kind === 'key'" class="mono guide-kbd">{{ tok.text }}</kbd>
+                      <span v-else class="guide-sc-sep" aria-hidden="true">{{ tok.text }}</span>
+                    </template>
+                  </span>
                 </div>
               </div>
             </div>
@@ -467,20 +480,42 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 </template>
 
 <style scoped>
+.guide-shell {
+  --guide-fs-title: 1.16rem;
+  --guide-fs-lead: 1.08rem;
+  --guide-fs-subhead: 1.04rem;
+  --guide-fs-body: 1rem;
+  --guide-fs-text: 0.95rem;
+  --guide-fs-code: 0.9rem;
+  --guide-fs-meta: 0.86rem;
+  --guide-fs-nav: 0.94rem;
+  --guide-ink-body: color-mix(in srgb, var(--text) 88%, var(--muted));
+  grid-template-columns: 244px minmax(0, 1fr);
+}
+
+.guide-back {
+  margin-bottom: 8px;
+  justify-content: flex-start;
+  min-height: 30px;
+  font-size: var(--guide-fs-nav);
+}
+
 .guide-nav-caption {
-  font-size: 0.84rem;
+  font-size: var(--guide-fs-meta);
   font-weight: 700;
   color: var(--muted);
-  padding: 6px 8px 2px;
+  padding: 8px 8px 3px;
   letter-spacing: 0.02em;
 }
 
 .guide-nav-btn {
   justify-content: flex-start;
-  gap: 7px;
-  min-height: 29px;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 9px;
   text-align: left;
-  font-size: 0.88rem;
+  font-size: var(--guide-fs-nav);
+  line-height: 1.35;
 }
 
 .set-nav .guide-nav-btn:not(.active) {
@@ -491,17 +526,21 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .guide-nav-footer {
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 10px;
   border-top: 1px solid var(--panel-border);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 
 .guide-pane {
-  max-width: 1360px;
+  max-width: 1380px;
   margin: 0 auto;
-  padding-bottom: 28px;
+  padding-bottom: 34px;
+}
+
+.guide-hero-meta {
+  font-size: var(--guide-fs-meta);
 }
 
 .cache-strip {
@@ -510,7 +549,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
-  padding: 8px 11px;
+  padding: 10px 13px;
   border-radius: var(--r-ctrl);
   border: 1px solid var(--panel-border);
   background: var(--ctrl-bg);
@@ -519,9 +558,9 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 .cache-info {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 0.86rem;
-  color: var(--muted);
+  gap: 8px;
+  font-size: var(--guide-fs-text);
+  color: var(--guide-ink-body);
 }
 
 .cache-info strong {
@@ -529,41 +568,42 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 }
 
 .guide-chapter-body {
-  padding: 14px 16px;
+  padding: 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 15px;
 }
 
 .guide-lead {
   margin: 0;
-  font-size: 1rem;
-  line-height: 1.66;
+  font-size: var(--guide-fs-lead);
+  line-height: 1.78;
   color: var(--text);
 }
 
 .guide-points {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
 }
 
 .guide-point-card {
   box-shadow: none;
-  gap: 5px;
-  padding: 11px 13px;
+  gap: 7px;
+  padding: 13px 15px;
 }
 
 .guide-point-head {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 0.98rem;
+  gap: 8px;
+  font-size: var(--guide-fs-subhead);
+  line-height: 1.42;
 }
 
 .guide-idx {
-  font-size: 0.82rem;
-  padding: 1px 5px;
+  font-size: var(--guide-fs-meta);
+  padding: 2px 6px;
   border-radius: 4px;
   background: var(--selected);
   color: var(--accent);
@@ -572,13 +612,13 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .guide-point-card p {
   margin: 0;
-  font-size: 0.93rem;
-  line-height: 1.64;
-  color: var(--muted);
+  font-size: var(--guide-fs-body);
+  line-height: 1.74;
+  color: var(--guide-ink-body);
 }
 
 .guide-svg-box {
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: var(--r-panel);
   border: 1px solid var(--panel-border);
   background: color-mix(in srgb, var(--app) 48%, transparent);
@@ -588,7 +628,7 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
   width: 100%;
   height: auto;
   display: block;
-  margin-top: 6px;
+  margin-top: 8px;
   color: var(--muted);
 }
 
@@ -611,14 +651,14 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .g-title {
   fill: var(--text);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 700;
   text-anchor: middle;
 }
 
 .g-sub {
   fill: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   text-anchor: middle;
 }
 
@@ -637,13 +677,13 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 .guide-callout {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px 13px;
+  gap: 12px;
+  padding: 13px 16px;
   border-radius: var(--r-panel);
   border: 1px solid var(--panel-border);
   border-left-width: 3px;
-  font-size: 0.94rem;
-  line-height: 1.62;
+  font-size: var(--guide-fs-body);
+  line-height: 1.75;
 }
 
 .guide-callout.note {
@@ -654,17 +694,17 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .guide-callout strong {
   display: block;
-  margin-bottom: 2px;
-  font-size: 0.98rem;
+  margin-bottom: 4px;
+  font-size: var(--guide-fs-subhead);
 }
 
 .guide-callout p {
   margin: 0;
-  color: var(--muted);
+  color: var(--guide-ink-body);
 }
 
 .voqs-grid-box {
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: var(--r-panel);
   border: 1px solid var(--panel-border);
   background: color-mix(in srgb, var(--app) 54%, transparent);
@@ -672,24 +712,24 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .voqs-badge-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(235px, 1fr));
-  gap: 7px;
-  margin-top: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 9px;
+  margin-top: 10px;
 }
 
 .voqs-chip-card {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
-  padding: 7px 9px;
+  gap: 10px;
+  padding: 9px 11px;
   border-radius: var(--r-ctrl);
   background: var(--ctrl-bg);
   border: 1px solid var(--panel-border);
 }
 
 .voqs-sym {
-  font-size: 1.35rem;
-  min-width: 30px;
+  font-size: 1.4rem;
+  min-width: 32px;
   text-align: center;
   color: var(--accent);
   font-weight: 600;
@@ -699,22 +739,22 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 .voqs-meta {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
   min-width: 0;
-  font-size: 0.88rem;
+  font-size: var(--guide-fs-text);
 }
 
 .voqs-meta span {
-  font-size: 0.8rem;
-  line-height: 1.4;
+  font-size: var(--guide-fs-meta);
+  line-height: 1.5;
 }
 
 .voqs-phys {
-  opacity: 0.88;
+  color: var(--guide-ink-body);
 }
 
 .guide-table-wrap {
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: var(--r-panel);
   border: 1px solid var(--panel-border);
   background: color-mix(in srgb, var(--app) 48%, transparent);
@@ -723,49 +763,149 @@ function buildVoqsScaleChart(t: ChartThemeTokens): EChartsCoreOption {
 
 .guide-tbl th,
 .guide-tbl td {
-  padding: 7px 9px;
-  font-size: 0.91rem;
-  line-height: 1.5;
+  padding: 9px 11px;
+  font-size: var(--guide-fs-text);
+  line-height: 1.62;
+  vertical-align: top;
+}
+
+.guide-tbl th {
+  font-size: var(--guide-fs-text);
+  color: var(--text);
+}
+
+.guide-cell-body {
+  color: var(--guide-ink-body);
 }
 
 .guide-code {
-  padding: 2px 6px;
+  padding: 2px 7px;
   border-radius: 4px;
   background: var(--selected);
   color: var(--accent);
-  font-size: 0.88rem;
-  white-space: nowrap;
+  font-size: var(--guide-fs-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: inline-block;
 }
 
 .guide-shortcuts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: 12px;
+  align-items: start;
 }
 
 .guide-sc-card {
   box-shadow: none;
-  padding: 10px 12px;
-  gap: 6px;
+  padding: 12px 14px;
+  gap: 7px;
+  min-width: 0;
+}
+
+.guide-sc-card strong {
+  font-size: var(--guide-fs-subhead);
 }
 
 .guide-sc-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 0.88rem;
-  padding-top: 4px;
+  gap: 6px 12px;
+  font-size: var(--guide-fs-text);
+  line-height: 1.5;
+  padding-top: 7px;
   border-top: 1px dashed var(--panel-border);
 }
 
+.guide-sc-desc {
+  flex: 1 1 160px;
+  min-width: 0;
+  color: var(--guide-ink-body);
+  overflow-wrap: break-word;
+}
+
+.guide-sc-keys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 3px;
+  flex: 0 1 auto;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.guide-sc-sep {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--guide-fs-meta);
+  padding: 0 2px;
+  user-select: none;
+}
+
 .guide-kbd {
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 4px;
   border: 1px solid var(--panel-border);
   background: var(--ctrl-bg);
   color: var(--text);
-  font-size: 0.82rem;
-  white-space: nowrap;
+  font-size: var(--guide-fs-meta);
+  line-height: 1.35;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.guide-reading-scope :deep(.p-head) {
+  font-size: var(--guide-fs-title);
+  min-height: 36px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.guide-reading-scope :deep(.param-sec-title) {
+  font-size: var(--guide-fs-subhead);
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.guide-reading-scope :deep(.param-sec-title .muted) {
+  font-size: var(--guide-fs-meta);
+}
+
+.guide-reading-scope :deep(.tree-tag) {
+  font-size: var(--guide-fs-meta);
+  padding: 2px 7px;
+}
+
+.guide-reading-scope :deep(.btn.sm) {
+  min-height: 28px;
+  padding: 3px 10px;
+  font-size: var(--guide-fs-meta);
+}
+
+.guide-reading-scope :deep(.btn.xs) {
+  min-height: 24px;
+  padding: 2px 8px;
+  font-size: var(--guide-fs-meta);
+}
+
+.guide-reading-scope :deep(.tech-chart-title-row) {
+  font-size: var(--guide-fs-subhead);
+  line-height: 1.45;
+}
+
+.guide-reading-scope :deep(.tech-chart-sub) {
+  font-size: var(--guide-fs-text);
+  line-height: 1.58;
+  color: var(--guide-ink-body);
+}
+
+.guide-reading-scope :deep(.tech-chart-cap) {
+  font-size: var(--guide-fs-text);
+  line-height: 1.66;
+  color: var(--guide-ink-body);
+  padding: 10px 14px;
 }
 </style>

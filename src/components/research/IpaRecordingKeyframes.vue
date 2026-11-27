@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import type { RecordingKeyframe, RecordingLimits, RecordingParameter } from '@/data/ipa-recording-edits';
 import { IPA_RECORDING_HZ } from '@/data/ipa-recording-edits';
 import { VTL_PARAM_META } from '@/stores/workbench';
@@ -7,6 +8,7 @@ import { voiceRenderLabels, type VoiceRenderMode } from '@/data/voice-renderer';
 
 const props = defineProps<{
   kit: string;
+  readonlyKit?: boolean;
   frame: number;
   targetFrame?: number;
   defaultRadius?: number;
@@ -111,6 +113,13 @@ function displayValue(index: number) {
 }
 
 const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDING_HZ).toFixed(2)} s`;
+const keyframeOptions = computed<SelectOption<number>[]>(() =>
+  props.keyframes.map((item) => ({ value: item.frame, label: label(item.frame) })),
+);
+const synthesisOptions: ReadonlyArray<SelectOption<VoiceRenderMode>> = [
+  { value: 'neural', label: voiceRenderLabels.neural },
+  { value: 'physical', label: voiceRenderLabels.physical },
+];
 </script>
 
 <template>
@@ -151,19 +160,18 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
     </header>
 
     <div class="keyframe-actions">
-      <label v-if="keyframes.length">
+      <div v-if="keyframes.length" class="keyframe-select-field">
         <span>已设目标帧</span>
-        <select
-          class="inp"
-          :value="current ? frame : ''"
-          @change="emit('select', Number(($event.target as HTMLSelectElement).value))"
-        >
-          <option disabled value="">选择目标帧</option>
-          <option v-for="item in keyframes" :key="item.frame" :value="item.frame">
-            {{ label(item.frame) }}
-          </option>
-        </select>
-      </label>
+        <CustomSelect
+          size="xs"
+          aria-label="已设目标帧"
+          placeholder="选择目标帧"
+          :model-value="current ? frame : ''"
+          :options="keyframeOptions"
+          :min-menu-width="156"
+          @update:model-value="(v) => emit('select', Number(v))"
+        />
+      </div>
       <label title="余弦升窗 0.5·(1+cos(π·(u−u0)/w)) 半宽：目标时刻精准达到设定值，两侧平滑衰减保留协同发音动程">
         <span>余弦升窗半宽</span>
         <input
@@ -198,7 +206,7 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
           <input
             type="range"
             :min="field.min"
-            :max="field.max"
+            :max="field.max ?? undefined"
             :step="stepForKey(field.key)"
             :value="displayValue(field.index)"
             :disabled="!limits || playing"
@@ -209,7 +217,7 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
             type="number"
             :value="displayValue(field.index)"
             :min="field.min"
-            :max="field.max"
+            :max="field.max ?? undefined"
             step="any"
             :disabled="!limits || playing"
             :class="{ 'keyframe-modified': current?.values[field.key] !== undefined }"
@@ -222,15 +230,15 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
         <label
           v-for="field in category.fields"
           :key="field.key"
-          :title="`${names[field.key]} · ${field.min}–${field.max}`"
+          :title="field.max != null ? `${names[field.key]} · ${field.min}–${field.max}` : `${names[field.key]} · > ${field.min}`"
         >
           <span>{{ names[field.key] }}</span>
           <input
             class="inp mono"
             type="number"
             :value="displayValue(field.index)"
-            :min="field.min"
-            :max="field.max"
+            :min="field.exclusiveMin ? 0.1 : field.min"
+            :max="field.max ?? undefined"
             step="any"
             :disabled="!limits || playing"
             :class="{ 'keyframe-modified': current?.values[field.key] !== undefined }"
@@ -246,21 +254,22 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
         {{ busy ? '正在重合成…' : '动态合成试听' }}
       </button>
       <button type="button" class="btn xs primary" :disabled="!dirty" @click="emit('save')">
-        保存目标帧修订
+        {{ readonlyKit ? '另存为新方案并保存修订' : '保存目标帧修订' }}
       </button>
       <button type="button" class="btn xs" @click="emit('cancel')">收起编辑</button>
-      <select
-        class="inp"
+      <CustomSelect
+        size="xs"
         aria-label="修订合成方式"
-        :value="synthesis"
+        :model-value="synthesis"
+        :options="synthesisOptions"
         :disabled="busy"
-        @change="emit('synthesis', ($event.target as HTMLSelectElement).value as VoiceRenderMode)"
-      >
-        <option value="neural">{{ voiceRenderLabels.neural }}</option>
-        <option value="physical">{{ voiceRenderLabels.physical }}</option>
-      </select>
+        :min-menu-width="148"
+        @update:model-value="(v) => emit('synthesis', v as VoiceRenderMode)"
+      />
     </div>
-    <p class="muted">修订关联至当前构型方案「{{ kit }}」下的此条实录。</p>
+    <p class="muted">
+      {{ readonlyKit ? `当前方案「${kit}」为只读，保存修订时将自动派生新的个人构型方案。` : `修订关联至当前构型方案「${kit}」下的此条实录。` }}
+    </p>
     <p v-if="status" role="status">{{ status }}</p>
   </section>
 </template>
@@ -291,7 +300,8 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
   margin-block: 5px;
 }
 
-.keyframe-actions label {
+.keyframe-actions label,
+.keyframe-select-field {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -299,11 +309,6 @@ const label = (frame: number) => `第 ${frame + 1} 帧 · ${(frame / IPA_RECORDI
 
 .keyframe-actions input {
   width: 54px;
-}
-
-.keyframe-actions select {
-  width: auto;
-  max-width: 175px;
 }
 
 .keyframe-slider-list {

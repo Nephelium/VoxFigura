@@ -261,7 +261,7 @@ async function handleZhihuHot(req, res) {
 
 async function handleZhihuRecommendations(req, res, urlObj) {
   const q = (urlObj.searchParams.get('q') || '').trim();
-  const count = Math.min(20, Math.max(1, Number(urlObj.searchParams.get('count') || 10)));
+  const count = Math.min(20, Math.max(1, Math.trunc(Number(urlObj.searchParams.get('count'))) || 10));
   if (!q) {
     return sendJson(res, 400, { ok: false, error: { code: 'validation_error', hint: '主题推荐 Query 不可为空' } });
   }

@@ -83,4 +83,4 @@ class HighPitchPreviewTest(unittest.TestCase):
             pose = engine.preset('a').tolist()
         result = self.manager.synthesize_dense({'f0_hz': [700], 'pressure_pa': [800], 'tract_frames': [pose]})
         self.assertEqual(result['error']['code'], 'out_of_range')
-        self.assertEqual(result['error']['allowed'], {'min': 60, 'max': 600, 'unit': 'Hz'})
+        self.assertEqual(result['error']['allowed'], {'min': 40, 'max': 600, 'unit': 'Hz'})

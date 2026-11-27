@@ -77,11 +77,12 @@ function inspectPngConcat(buffer, format, maxFrames, expectedDims = null) {
   return frameCount >= 1 ? { count: frameCount, width, height } : null;
 }
 
-function runFfmpegToFile(args) {
+function runFfmpegToFile(args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.env.VOCALCUT_FFMPEG || 'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], {
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'ignore'],
+      signal,
     });
     child.once('error', reject);
     child.once('close', (code) => (code === 0 ? resolve() : reject(new Error('ffmpeg exited with ' + code))));
@@ -217,6 +218,11 @@ async function disposeCardJob(id, job) {
   cardJobs.delete(id);
   clearTimeout(job.timer);
   try {
+    job.abortController?.abort();
+  } catch {
+    // ignore
+  }
+  try {
     job.framesStream?.destroy();
   } catch {
     // ignore
@@ -226,7 +232,10 @@ async function disposeCardJob(id, job) {
 
 function renewCardJob(id, job) {
   clearTimeout(job.timer);
-  job.timer = setTimeout(() => void disposeCardJob(id, job).catch(() => {}), 120000);
+  job.timer = setTimeout(() => {
+    if (job.busy) return;
+    void disposeCardJob(id, job).catch(() => {});
+  }, 120000);
   job.timer.unref?.();
 }
 
@@ -290,6 +299,7 @@ export async function handleCardJobRequest(req, res, url) {
       height: 0,
       busy: false,
       timer: undefined,
+      abortController: null,
     };
     cardJobs.set(id, job);
     renewCardJob(id, job);
@@ -322,7 +332,7 @@ export async function handleCardJobRequest(req, res, url) {
   }
 
   job.busy = true;
-  renewCardJob(id, job);
+  clearTimeout(job.timer);
   try {
     if (action === 'frames') {
       const chunks = [];
@@ -353,6 +363,7 @@ export async function handleCardJobRequest(req, res, url) {
     // action === 'finish'
     if (job.frameCount < 2) {
       req.resume();
+      await disposeCardJob(id, job);
       return sendJson(res, 400, { hint: '动态卡片至少需要 2 帧画面。' });
     }
     await new Promise((resolve) => job.framesStream.end(resolve));
@@ -362,63 +373,83 @@ export async function handleCardJobRequest(req, res, url) {
     if (withSound) {
       await pipeline(req, byteLimitTransform(MAX_REQUEST_BYTES), createWriteStream(wavPath));
       if (!(await verifyWaveHeader(wavPath))) {
+        await disposeCardJob(id, job);
         return sendJson(res, 400, { hint: '附带的发声音频 WAV 格式无效。' });
       }
     } else {
       req.resume();
     }
 
+    const cancellation = new AbortController();
+    job.abortController = cancellation;
+    const encodeTimeout = setTimeout(() => cancellation.abort(), 300000);
+    encodeTimeout.unref?.();
+    const onClose = () => {
+      if (!res.writableEnded) cancellation.abort();
+    };
+    res.once('close', onClose);
+
     const outExt = job.format === 'mp4' ? 'mp4' : 'gif';
     const outPath = join(job.dir, `card.${outExt}`);
-    if (job.format === 'mp4') {
-      const ffArgs = [
-        '-f',
-        'image2pipe',
-        '-c:v',
-        'png',
-        '-framerate',
-        String(job.fps),
-        '-i',
-        job.rawFramesPath,
-        ...(withSound ? ['-i', wavPath] : ['-an']),
-        '-c:v',
-        'libx264',
-        '-threads',
-        '4',
-        '-crf',
-        '18',
-        '-preset',
-        'fast',
-        '-pix_fmt',
-        'yuv420p',
-        ...(withSound ? ['-c:a', 'aac', '-b:a', '192k', '-shortest'] : []),
-        '-movflags',
-        '+faststart',
-        outPath,
-      ];
-      await runFfmpegToFile(ffArgs);
-    } else {
-      const ffArgs = [
-        '-f',
-        'image2pipe',
-        '-c:v',
-        'png',
-        '-framerate',
-        String(job.fps),
-        '-i',
-        job.rawFramesPath,
-        '-filter_complex_threads',
-        '1',
-        '-filter_complex',
-        'split[x][y];[x]palettegen=stats_mode=diff[p];[y][p]paletteuse=dither=bayer',
-        '-loop',
-        '0',
-        outPath,
-      ];
-      await runFfmpegToFile(ffArgs);
+    try {
+      if (job.format === 'mp4') {
+        const ffArgs = [
+          '-f',
+          'image2pipe',
+          '-c:v',
+          'png',
+          '-framerate',
+          String(job.fps),
+          '-i',
+          job.rawFramesPath,
+          ...(withSound ? ['-i', wavPath] : ['-an']),
+          '-c:v',
+          'libx264',
+          '-threads',
+          '4',
+          '-crf',
+          '18',
+          '-preset',
+          'fast',
+          '-pix_fmt',
+          'yuv420p',
+          ...(withSound ? ['-c:a', 'aac', '-b:a', '192k', '-shortest'] : []),
+          '-movflags',
+          '+faststart',
+          outPath,
+        ];
+        await runFfmpegToFile(ffArgs, cancellation.signal);
+      } else {
+        const ffArgs = [
+          '-f',
+          'image2pipe',
+          '-c:v',
+          'png',
+          '-framerate',
+          String(job.fps),
+          '-i',
+          job.rawFramesPath,
+          '-filter_complex_threads',
+          '1',
+          '-filter_complex',
+          'split[x][y];[x]palettegen=stats_mode=diff[p];[y][p]paletteuse=dither=bayer',
+          '-loop',
+          '0',
+          outPath,
+        ];
+        await runFfmpegToFile(ffArgs, cancellation.signal);
+      }
+    } finally {
+      clearTimeout(encodeTimeout);
+      res.off('close', onClose);
+      job.abortController = null;
     }
 
     const { size } = await stat(outPath);
+    if (!size || size > MAX_OUTPUT_BYTES) {
+      await disposeCardJob(id, job);
+      return sendJson(res, 413, { hint: '生成的动态发音卡体积超过 120 MB 上限，请适当降低分辨率或缩短时长。' });
+    }
     res.writeHead(200, {
       'Content-Type': job.format === 'mp4' ? 'video/mp4' : 'image/gif',
       'Content-Length': size,
@@ -433,10 +464,13 @@ export async function handleCardJobRequest(req, res, url) {
         hint:
           error?.code === 'ENOENT'
             ? '本地编码器需要 FFmpeg。可将 FFmpeg 加入 PATH 或设置 VOCALCUT_FFMPEG。'
-            : '动态发音卡编码未完成，请检查 FFmpeg 或减小尺寸后重试。',
+            : error?.name === 'AbortError'
+              ? '动态发音卡编码已取消或超时。'
+              : '动态发音卡编码未完成，请检查 FFmpeg 或减小尺寸后重试。',
       });
     }
   } finally {
     job.busy = false;
+    if (cardJobs.get(id) === job) renewCardJob(id, job);
   }
 }

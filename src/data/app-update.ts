@@ -30,8 +30,13 @@ const DISMISSED_STORAGE_KEY = 'vc.update.dismissed.v1';
 const AUTO_REMIND_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const DIRECT_MANIFEST_URLS = [
   'https://www.phonetictoolbox.com/voxfigura/updates/latest.json',
-  'http://8.134.196.183/voxfigura/updates/latest.json',
 ];
+const ALLOWED_EXTERNAL_HOSTS = new Set([
+  'phonetictoolbox.com',
+  'www.phonetictoolbox.com',
+  'github.com',
+  'gitee.com',
+]);
 
 function loadDismissedState(): { version: string; lastPromptAt: number } {
   if (typeof window === 'undefined') return { version: '', lastPromptAt: 0 };
@@ -88,7 +93,9 @@ export function sanitizeExternalHttpUrl(raw: string | undefined): string {
   if (typeof raw !== 'string' || !raw.trim()) return '';
   try {
     const u = new URL(raw.trim());
-    if (u.protocol === 'https:' || u.protocol === 'http:') return u.toString();
+    if (u.protocol === 'https:' && ALLOWED_EXTERNAL_HOSTS.has(u.hostname.toLowerCase())) {
+      return u.toString();
+    }
     return '';
   } catch {
     return '';

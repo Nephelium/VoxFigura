@@ -39,6 +39,26 @@ export interface MeterChange { beat:number; numerator:number; denominator:number
 type ChannelControl = Extract<MidiEvent,{type:'controller'|'pitchBend'|'channelAftertouch'|'noteAftertouch'}>;
 export interface MidiControl { sample:number; event:ChannelControl }
 export const instrumentPrograms: Record<Instrument,number> = {piano:0,guitar:24,violin:40,xiao:77,dizi:73,erhu:110,guzheng:107,pipa:105};
+// General MIDI Level 1 programs, in wire order (display numbers start at 1).
+export const gmProgramNames = [
+  '三角钢琴 明亮钢琴 电声三角钢琴 酒吧钢琴 电钢琴1 电钢琴2 羽管键琴 击弦键琴',
+  '钢片琴 钟琴 八音盒 颤音琴 马林巴 木琴 管钟 扬琴',
+  '拉杆风琴 打击风琴 摇滚风琴 教堂管风琴 簧风琴 手风琴 口琴 探戈手风琴',
+  '尼龙弦吉他 钢弦吉他 爵士电吉他 清音电吉他 闷音电吉他 过载吉他 失真吉他 吉他泛音',
+  '原声贝司 指弹贝司 拨片贝司 无品贝司 击弦贝司1 击弦贝司2 合成贝司1 合成贝司2',
+  '小提琴 中提琴 大提琴 低音提琴 弦乐震音 弦乐拨奏 竖琴 定音鼓',
+  '弦乐合奏1 弦乐合奏2 合成弦乐1 合成弦乐2 合唱啊声 人声嘟声 合成人声 乐团齐奏',
+  '小号 长号 大号 弱音小号 圆号 铜管组 合成铜管1 合成铜管2',
+  '高音萨克斯 中音萨克斯 次中音萨克斯 上低音萨克斯 双簧管 英国管 巴松 单簧管',
+  '短笛 长笛 竖笛 排箫 吹瓶 尺八 口哨 陶笛',
+  '方波主奏 锯齿主奏 汽笛主奏 气声主奏 查朗主奏 人声主奏 五度主奏 贝司主奏',
+  '新时代音垫 温暖音垫 复音合成音垫 合唱音垫 弓弦音垫 金属音垫 光环音垫 扫频音垫',
+  '雨声 电影音效 水晶 大气 明亮 小妖 回声 星际',
+  '西塔琴 班卓琴 三味线 日本筝 卡林巴 风笛 乡村提琴 唢呐',
+  '叮当铃 阿戈戈鼓 钢鼓 木鱼 太鼓 中音鼓 合成鼓 反向镲',
+  '吉他滑弦声 呼吸声 海浪 鸟鸣 电话铃 直升机 掌声 枪声',
+].flatMap(family => family.split(' '));
+
 export interface ImportedPart {
   controls?: MidiControl[];
   name: string;
@@ -49,9 +69,15 @@ export interface ImportedPart {
   lyrics?: {sample:number;text:string}[];
 }
 function midiText(raw: string) {
-  const bytes=Uint8Array.from(raw, char=>char.charCodeAt(0));
-  try { return new TextDecoder('utf-8',{fatal:true}).decode(bytes); }
-  catch { return raw; }
+  const bytes = Uint8Array.from(raw, (char) => char.charCodeAt(0) & 0xff);
+  for (const encoding of ['utf-8', 'gb18030', 'shift-jis'] as const) {
+    try {
+      return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+    } catch {
+      // Try next common MIDI text encoding
+    }
+  }
+  return raw;
 }
 
 export function readMidiParts(bytes: Uint8Array) {
@@ -88,6 +114,7 @@ export function readMidiParts(bytes: Uint8Array) {
   }
   const parts: ImportedPart[] = [];
   const playbackLimits=new Set<string>();
+  const warnings: string[] = [];
   const lyricTracks:{track:number;lyrics:{sample:number;text:string}[]}[]=[];
   for (const [index, track] of tracks.entries()) {
     const name = midiText(track.find(e => e.type === 'trackName')?.text ?? '') || 'MIDI ' + (index+1);
@@ -96,6 +123,7 @@ export function readMidiParts(bytes: Uint8Array) {
     const controls = new Map<number,MidiControl[]>();
     const groups = new Map<string,ImportedPart>();
     const open = new Map<number, {start: number; velocity: number; part: ImportedPart}[]>();
+    let unpairedNoteOffCount = 0;
     let tick = 0;
     for (const e of track) {
       tick += e.deltaTime;
@@ -125,13 +153,38 @@ export function readMidiParts(bytes: Uint8Array) {
         open.set(key,queue);
       } else {
         const held = queue.shift();
-        if (!held) throw new Error(name+' 有未配对的音符结束事件');
+        if (!held) {
+          unpairedNoteOffCount++;
+          continue;
+        }
         const end = sample(tick);
         if (end > held.start) held.part.notes.push({id:crypto.randomUUID(), midi:e.noteNumber,
           startSmp:held.start, endSmp:end, velocity:held.velocity});
       }
     }
-    if ([...open.values()].some(q=>q.length)) throw new Error(name+' 有未结束的音符');
+    if (unpairedNoteOffCount > 0) {
+      warnings.push(`${name} 忽略了 ${unpairedNoteOffCount} 条未配对的音符结束事件`);
+    }
+    let unclosedNoteOnCount = 0;
+    const trackEndSmp = sample(tick + Math.max(1, Math.round(ppq / 4)));
+    for (const [key, queue] of open.entries()) {
+      const noteNumber = key % 128;
+      while (queue.length) {
+        const held = queue.shift()!;
+        unclosedNoteOnCount++;
+        const end = Math.max(held.start + Math.round(SAMPLE_RATE_HZ * 0.12), trackEndSmp);
+        held.part.notes.push({
+          id: crypto.randomUUID(),
+          midi: noteNumber,
+          startSmp: held.start,
+          endSmp: end,
+          velocity: held.velocity,
+        });
+      }
+    }
+    if (unclosedNoteOnCount > 0) {
+      warnings.push(`${name} 自动补齐了 ${unclosedNoteOnCount} 个未闭合音符的结束时刻`);
+    }
     if (lyrics.length) lyricTracks.push({track:index,lyrics});
     for (const part of groups.values()) {
       part.controls=controls.get(part.channel-1);
@@ -143,7 +196,7 @@ export function readMidiParts(bytes: Uint8Array) {
   }
   if (!parts.length) throw new Error('MIDI 文件没有可导入的音符');
   const beatMap = tempos.map(t => ({beat:t.tick/ppq, sample:t.sample, samplesPerBeat:t.us*SAMPLE_RATE_HZ/1e6}));
-  return {parts,beatMap,lyricTracks,sharedChannels:new Set(parts.map(p=>p.channel)).size<parts.length,playbackLimits:[...playbackLimits],meters:[...meters.values()].sort((a,b)=>a.beat-b.beat),bpm:60e6/tempos[0].us};
+  return {parts,beatMap,lyricTracks,sharedChannels:new Set(parts.map(p=>p.channel)).size<parts.length,playbackLimits:[...playbackLimits],warnings,meters:[...meters.values()].sort((a,b)=>a.beat-b.beat),bpm:60e6/tempos[0].us};
 }
 
 export interface NoteSpan { midi: number; startSmp: number; endSmp: number }
@@ -193,7 +246,7 @@ export function exportMidiScore(parts: readonly ScoreMidiTrack[], beatMap: reado
   const melodicChannels=Array.from({length:16},(_,i)=>i+1).filter(i=>i!==10);
   for (const part of parts) {
     const channel=part.channel===10 ? 10 : [part.channel,...melodicChannels].find(c=>c && c!==10 && !used.has(c));
-    if (!channel || used.has(channel)) throw new Error('当前单端口 MIDI 最多支持 15 个独立旋律声部和 1 个鼓声部，请分批启用声部导出');
+    if (!channel || used.has(channel)) throw new Error('当前单端口 MIDI 最多支持 15 条独立旋律轨和 1 条鼓轨，请分批启用轨道导出');
     used.add(channel);
     const ch=channel-1;
     const timeline:TimedEvent[]=[
@@ -202,13 +255,31 @@ export function exportMidiScore(parts: readonly ScoreMidiTrack[], beatMap: reado
     ];
     for(const control of part.controls ?? []) timeline.push({tick:tickAt(control.sample),event:{...control.event,channel:ch,deltaTime:0}});
     for(const lyric of part.lyrics ?? []) timeline.push({tick:tickAt(lyric.sample),event:{deltaTime:0,type:'lyrics',text:midiString(lyric.text)}});
-    const previousEnd=new Map<number,number>();
-    for (const n of [...part.notes].sort((a,b)=>a.startSmp-b.startSmp)) {
-      const start=tickAt(n.startSmp), end=Math.max(start+1,tickAt(n.endSmp));
-      if(previousEnd.has(n.midi) && previousEnd.get(n.midi)!>start) throw new Error(part.name+' 的同音音符重叠，请错开后导出');
-      previousEnd.set(n.midi,end);
-      timeline.push({tick:start,event:{deltaTime:0,type:'noteOn',channel:ch,noteNumber:n.midi,velocity:n.velocity}},
-        {tick:end,event:{deltaTime:0,type:'noteOff',channel:ch,noteNumber:n.midi,velocity:0}});
+    const previous = new Map<number, { endTick: number; endSmp: number; offEntry: TimedEvent }>();
+    for (const n of [...part.notes].sort((a, b) => a.startSmp - b.startSmp)) {
+      let start = tickAt(n.startSmp);
+      const prev = previous.get(n.midi);
+      if (prev) {
+        if (prev.endSmp > n.startSmp) {
+          throw new Error(part.name + ' 的同音音符重叠，请错开后导出');
+        }
+        if (prev.endTick > start) {
+          // Adjacent in 48 kHz samples but collided by 1 tick after quantization: clamp previous noteOff cleanly
+          if (prev.offEntry.tick > start && start > 0) {
+            prev.offEntry.tick = start;
+            prev.endTick = start;
+          } else {
+            start = prev.endTick;
+          }
+        }
+      }
+      const end = Math.max(start + 1, tickAt(n.endSmp));
+      const offEntry: TimedEvent = { tick: end, event: { deltaTime: 0, type: 'noteOff', channel: ch, noteNumber: n.midi, velocity: 0 } };
+      previous.set(n.midi, { endTick: end, endSmp: n.endSmp, offEntry });
+      timeline.push(
+        { tick: start, event: { deltaTime: 0, type: 'noteOn', channel: ch, noteNumber: n.midi, velocity: n.velocity } },
+        offEntry,
+      );
     }
     tracks.push(deltaEvents(timeline));
   }

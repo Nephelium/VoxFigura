@@ -10,7 +10,6 @@ import {
   updateError,
   updateModalOpen,
 } from '../src/data/app-update';
-import { MIXER_DEMOS } from '../src/components/research/voice-mixer';
 import { ONBOARDING_AUDIO_SLOTS } from '../src/data/onboarding-samples';
 
 function makeStorageMock() {
@@ -69,11 +68,11 @@ describe('app update check flow', () => {
           schema: 'voxfigura/update-manifest',
           channels: {
             public: {
-              version: '0.2.0',
+              version: '0.3.0',
               released_at: '2026-12-01',
-              title: 'VoxFigura 0.2.0',
+              title: 'VoxFigura 0.3.0',
               notes: ['新增功能测试'],
-              download_url: 'https://www.phonetictoolbox.com/voxfigura/downloads/VoxFigura-0.2.0.zip',
+              download_url: 'https://www.phonetictoolbox.com/voxfigura/downloads/VoxFigura-0.3.0.zip',
             },
           },
         },
@@ -84,12 +83,12 @@ describe('app update check flow', () => {
     const found = await checkForAppUpdate({ silent: true });
     expect(found).toBe(true);
     expect(hasUpdate.value).toBe(true);
-    expect(latestRelease.value?.version).toBe('0.2.0');
+    expect(latestRelease.value?.version).toBe('0.3.0');
     expect(updateModalOpen.value).toBe(true);
     expect(updateError.value).toBe('');
 
     dismissCurrentUpdate();
-    expect(dismissedVersion.value).toBe('0.2.0');
+    expect(dismissedVersion.value).toBe('0.3.0');
     expect(updateModalOpen.value).toBe(false);
 
     // Silent check should not re-open dismissed version
@@ -110,7 +109,7 @@ describe('app update check flow', () => {
             schema: 'voxfigura/update-manifest',
             channels: {
               public: {
-                version: '0.1.0',
+                version: '0.2.0',
               },
             },
           },
@@ -125,15 +124,7 @@ describe('app update check flow', () => {
   });
 });
 
-describe('mixer demo cleanup & onboarding sample transcripts', () => {
-  it('retains only Mandarin suan and English swan in MIXER_DEMOS', () => {
-    expect(MIXER_DEMOS).toHaveLength(2);
-    expect(MIXER_DEMOS.map((d) => d.url)).toEqual([
-      'prewarm/suan_mandarin.mp3',
-      'prewarm/swan_english.mp3',
-    ]);
-  });
-
+describe('onboarding sample transcripts', () => {
   it('provides non-empty transcripts for all 3 onboarding MP3 slots', () => {
     expect(ONBOARDING_AUDIO_SLOTS.zh_spk_a.transcript.length).toBeGreaterThan(0);
     expect(ONBOARDING_AUDIO_SLOTS.zh_spk_b.transcript.length).toBeGreaterThan(0);

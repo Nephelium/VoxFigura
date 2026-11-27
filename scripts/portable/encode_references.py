@@ -24,14 +24,26 @@ def _tag_crc(data: bytes) -> int:
 
 def repair_mp3_tail(target: Path, extra_samples: int) -> None:
     """Correct the pinned FFmpeg muxer's gapless tail tag without rewriting audio frames."""
-    # FFmpeg mp3enc.c writes a mono MPEG-1 Info frame at offset 21. The
-    # 24-bit field at Info + 141 stores two 12-bit values: delay and padding.
-    padding_bytes = slice(162, 165)
-    checksum_bytes = slice(175, 177)
+    # MPEG-1 Layer III side-info length is 17 B for mono (channel_mode == 3)
+    # and 32 B for stereo / joint-stereo / dual-channel (channel_mode in {0, 1, 2}).
+    # The Info/Xing tag starts right after the 4-byte frame header + side-info,
+    # and stores the 24-bit (delay, padding) field at Info + 141 and CRC at Info + 154.
+    if not 0 < extra_samples < 1152:
+        raise RuntimeError(f"Unexpected gapless adjustment ({extra_samples}) in {target.name}")
     with target.open("r+b") as stream:
-        header = bytearray(stream.read(190))
-        if (len(header) != 190 or header[:2] != b"\xff\xfb" or header[3] >> 6 != 3 or
-                header[21:29] != b"Info\x00\x00\x00\x0f" or not 0 < extra_samples < 1152):
+        frame_hdr = stream.read(4)
+        if len(frame_hdr) != 4 or frame_hdr[:2] != b"\xff\xfb":
+            raise RuntimeError(f"Unexpected MPEG-1 Layer III header in {target.name}")
+        channel_mode = frame_hdr[3] >> 6
+        side_info_len = 17 if channel_mode == 3 else 32
+        info_offset = 4 + side_info_len
+        tag_len = info_offset + 169  # 190 for mono, 205 for stereo
+        padding_bytes = slice(info_offset + 141, info_offset + 144)
+        checksum_bytes = slice(info_offset + 154, info_offset + 156)
+        stream.seek(0)
+        header = bytearray(stream.read(tag_len))
+        tag_sig = header[info_offset : info_offset + 8]
+        if len(header) != tag_len or tag_sig not in (b"Info\x00\x00\x00\x0f", b"Xing\x00\x00\x00\x0f"):
             raise RuntimeError(f"Unexpected gapless frame in {target.name}")
         checksum = int.from_bytes(header[checksum_bytes], "big")
         header[checksum_bytes] = b"\x00\x00"

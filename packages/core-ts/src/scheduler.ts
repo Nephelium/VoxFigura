@@ -10,11 +10,11 @@
  */
 
 import {
-  F0_LIMIT_HZ,
   MAX_SEQUENCE_SECONDS,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
   assertInRange,
+  assertValidF0Hz,
   fail,
   hzToSt,
   msToSamples,
@@ -34,6 +34,19 @@ import {
   type VibratoConfig,
 } from './types';
 import { evalF0, toneLevelsToQtaTargets } from './qta';
+import {
+  DEFAULT_SCORE_NOTATION,
+  TONIC_MIDI,
+  parseScoreNotation,
+  type ParseNotationOptions,
+  type ScoreIssue,
+  type ScoreNotationId,
+  type SongNote,
+  type SongScore,
+  type SongTonic,
+} from './score-notation';
+
+export { TONIC_MIDI, type SongTonic, type SongNote, type SongScore, type ScoreIssue };
 
 export const STOP_RIGID_FLOOR = {
   closure_ms: 10,
@@ -43,40 +56,9 @@ export const STOP_RIGID_FLOOR = {
 export const DEFAULT_BASE_PRESSURE_PA = 800;
 export const DYNAMIC_STEP_PA = 120;
 
-export const TONIC_MIDI = {
-  C2: 36, D2: 38, E2: 40, F2: 41, G2: 43, A2: 45, B2: 47,
-  C3: 48, D3: 50, E3: 52, F3: 53, G3: 55,
-} as const;
-
-export type SongTonic = keyof typeof TONIC_MIDI;
-
-export interface SongNote {
-  midi: number | null;
-  beats: number;
-  carry: boolean;
-  dynamic?: number; // -3 (ppp) .. +3 (fff)
-}
-
-export interface SongScore {
-  bpm: number;
-  notes: SongNote[];
-  vibrato: boolean;
-}
-
-export interface ScoreIssue {
-  key: 'song_tempo_error' | 'song_token' | 'song_range' | 'song_empty' | 'song_count' | 'song_short' | 'song_limit' | 'song_nucleus';
-  row?: number;
-  values?: Record<string, string | number>;
-  message: string;
-  options?: Array<'delay_vowel' | 'trim_coda' | 'extend_prev_note'>;
-}
-
-const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
-
 /**
- * Parse numbered score notation (jianpu) supporting `p/pp/ppp/f/ff/fff`,
- * melisma groups `(1p23)ff`, octaves `+`/`-`, durations `/`/`*`/`.`/`:x`, and rests `0`/` `.
- * Preserves per-note dynamics over group-level dynamics (e.g. `(1p23)ff` -> 1:-120 Pa, 2:+240 Pa, 3:+240 Pa).
+ * Parse numbered score notation using the unified JE / open-source Jianpu DSL engine.
+ * Legacy custom shorthand has been completely removed.
  */
 export function parseNumberedScore(
   source: string,
@@ -84,175 +66,15 @@ export function parseNumberedScore(
   bpm: number,
   vibrato: boolean,
   expectedRows?: number,
-  options?: { maxSeconds?: number; midiRange?: readonly [number, number] },
-): { ok: true; score: SongScore; labels: string[]; seconds: number } | { ok: false; issue: ScoreIssue } {
-  if (!Number.isFinite(bpm) || bpm < 40 || bpm > 240) {
-    return { ok: false, issue: { key: 'song_tempo_error', message: `BPM (${bpm}) 必须在 40..240 之间` } };
-  }
-  const notes: SongNote[] = [];
-  const labels: string[] = [];
-  const invalid = (token: string): { ok: false; issue: ScoreIssue } => ({
-    ok: false,
-    issue: { key: 'song_token', values: { token }, message: `无法识别的简谱记号: ${token}` },
+  options?: ParseNotationOptions,
+) {
+  return parseScoreNotation(source, tonic, bpm, vibrato, expectedRows, {
+    notation: DEFAULT_SCORE_NOTATION,
+    ...options,
   });
-
-  const text = source
-    .replaceAll('（', '(')
-    .replaceAll('）', ')')
-    .replaceAll('♯', '#')
-    .replaceAll('♭', 'b')
-    .replaceAll('\u0307', "'")
-    .replaceAll('\u0323', ',');
-  const dynLevel = (mark: string): number => mark.length * (mark.startsWith('f') ? 1 : -1);
-  const noteRe = /([#b]?)([0-7])((?::\d+(?:\.\d+)?|[+\-',_pf/.·*])*)/uy;
-
-  let groupStart = -1;
-  let firstPitch = -1;
-  let lastPitch = -1;
-  let totalBeats = 0;
-
-  for (let i = 0; i < text.length;) {
-    const ch = text[i];
-    if (ch === '(') {
-      if (groupStart >= 0) return invalid(ch);
-      groupStart = i++;
-      firstPitch = -1;
-      lastPitch = -1;
-      continue;
-    }
-    if (ch === ')') {
-      if (groupStart < 0 || firstPitch < 0) return invalid(ch);
-      for (let j = firstPitch + 1; j <= lastPitch; j++) {
-        notes[j].carry = true;
-      }
-      i++;
-      const mark = /^(p+|f+)/u.exec(text.slice(i))?.[0];
-      if (mark) {
-        const grpDyn = dynLevel(mark);
-        for (let j = firstPitch; j <= lastPitch; j++) {
-          if (notes[j].midi !== null && notes[j].dynamic === undefined) {
-            notes[j].dynamic = grpDyn;
-          }
-        }
-        i += mark.length;
-      }
-      labels.push(text.slice(groupStart, i));
-      groupStart = -1;
-      continue;
-    }
-    if (/[|｜\r\n]/u.test(ch)) {
-      i++;
-      continue;
-    }
-    if (ch === '-' || ch === '—' || ch === '–') {
-      if (notes.length === 0) return invalid(ch);
-      notes[notes.length - 1].beats += 1;
-      totalBeats += 1;
-      if (groupStart < 0 && notes[notes.length - 1].midi !== null && labels.length > 0) {
-        labels[labels.length - 1] += ' -';
-      }
-      i++;
-      continue;
-    }
-    if (ch === ' ' || ch === '　') {
-      if (groupStart >= 0 || /^[ \u3000]*[-—–]/u.test(text.slice(i))) {
-        i++;
-        continue;
-      }
-      notes.push({ midi: null, beats: 1, carry: false });
-      totalBeats += 1;
-      i++;
-      continue;
-    }
-
-    noteRe.lastIndex = i;
-    const m = noteRe.exec(text);
-    if (!m) return invalid(ch);
-    const [token, accidental, digit, suffix] = m;
-    const degree = Number(digit);
-    let duration = 1;
-    let shift = 0;
-    let mark = '';
-    let explicitLen = false;
-
-    for (const sym of suffix.match(/:\d+(?:\.\d+)?|./gu) ?? []) {
-      if (sym.startsWith(':')) {
-        if (explicitLen) return invalid(token);
-        duration *= Number(sym.slice(1));
-        explicitLen = true;
-      } else if (sym === '+' || sym === "'" || sym === '-' || sym === ',') {
-        const oct = (sym === '+' || sym === "'") ? 12 : -12;
-        if (shift * oct < 0) return invalid(token);
-        shift += oct;
-      } else if (sym === 'p' || sym === 'f') {
-        if (mark && mark[0] !== sym) return invalid(token);
-        mark += sym;
-      } else {
-        duration *= (sym === '/' || sym === '_') ? 0.5 : sym === '*' ? 2 : 1.5;
-      }
-    }
-
-    if (!Number.isFinite(duration) || duration <= 0 || (!degree && (shift || accidental || mark))) {
-      return invalid(token);
-    }
-
-    const midi = degree
-      ? TONIC_MIDI[tonic] + MAJOR_SCALE[degree - 1] + shift + (accidental === '#' ? 1 : accidental === 'b' ? -1 : 0)
-      : null;
-
-    if (midi !== null) {
-      const hz = 440 * Math.pow(2, (midi - 69) / 12);
-      const range = options?.midiRange;
-      if (range ? midi < range[0] || midi > range[1] : hz < F0_LIMIT_HZ.min || hz > F0_LIMIT_HZ.max) {
-        return {
-          ok: false,
-          issue: {
-            key: 'song_range',
-            values: { token, hz: Math.round(hz * 10) / 10 },
-            message: range ? `音符 ${token} 超出乐器音域 (MIDI ${range.join('–')})`
-              : `音符 ${token} (${hz.toFixed(1)} Hz) 超出声源范围 [60, 600] Hz`,
-          },
-        };
-      }
-      if (groupStart < 0) {
-        labels.push(token);
-      } else {
-        lastPitch = notes.length;
-        if (firstPitch < 0) firstPitch = lastPitch;
-      }
-    }
-
-    notes.push({
-      midi,
-      beats: duration,
-      carry: false,
-      ...(mark ? { dynamic: dynLevel(mark) } : {}),
-    });
-    i = noteRe.lastIndex;
-    totalBeats += duration;
-  }
-
-  if (groupStart >= 0) return invalid('(');
-  if (notes.length === 0) return { ok: false, issue: { key: 'song_empty', message: '乐谱为空' } };
-  if (typeof expectedRows === 'number' && labels.length !== expectedRows) {
-    return {
-      ok: false,
-      issue: {
-        key: 'song_count',
-        values: { notes: labels.length, rows: expectedRows },
-        message: `乐谱音节数 (${labels.length}) 与歌词音节数 (${expectedRows}) 不一致`,
-      },
-    };
-  }
-
-  const seconds = (totalBeats * 60) / bpm;
-  const maxSeconds = options?.maxSeconds ?? MAX_SEQUENCE_SECONDS;
-  if (seconds > maxSeconds) {
-    return { ok: false, issue: { key: 'song_limit', message: `总时长 ${seconds.toFixed(1)}s 超出 ${maxSeconds}s 上限` } };
-  }
-
-  return { ok: true, score: { bpm, notes, vibrato }, labels, seconds };
 }
+
+export type { ScoreNotationId };
 
 export interface ScheduleSegmentInput {
   id: string;
@@ -274,6 +96,7 @@ export interface ScheduleSyllableInput {
   checked?: boolean;
   note_hz?: number;      // direct pitch in Hz (singing)
   note_beats?: number;   // duration in beats (when bpm provided)
+  rest_before_beats?: number; // accumulated rest duration in beats before this syllable
   dynamic_level?: number; // -3..+3 (p..fff)
   pressure_pa?: number;   // base pressure in Pa (default 800)
   pressure_envelope?: PressurePoint[]; // optional hand-drawn non-piano PS curve
@@ -379,22 +202,85 @@ function segmentMinAndPreferredMs(seg: ScheduleSegmentInput): { minMs: number; p
   return { minMs, prefMs };
 }
 
-function scaleStopTimingMs(st: StopTiming, targetMs: number): StopTiming {
+function validateStopTiming(st: StopTiming, fieldPrefix: string): Result<StopTiming> {
+  if (typeof st.closure_ms !== 'number' || !Number.isFinite(st.closure_ms) || st.closure_ms > 2999) {
+    const chk = assertInRange(`${fieldPrefix}.closure_ms`, st.closure_ms, STOP_RIGID_FLOOR.closure_ms, 2999, 'ms');
+    if (!chk.ok) return chk;
+  }
+  if (st.closure_ms < STOP_RIGID_FLOOR.closure_ms) {
+    return fail({
+      code: 'rigid_floor',
+      field: `${fieldPrefix}.closure_ms`,
+      value: st.closure_ms,
+      allowed: { min: STOP_RIGID_FLOOR.closure_ms, max: 2999, unit: 'ms' },
+      hint: `塞音闭塞时长 ${st.closure_ms} ms 低于刚性下限 ${STOP_RIGID_FLOOR.closure_ms} ms`,
+    });
+  }
+  if (typeof st.release_ms !== 'number' || !Number.isFinite(st.release_ms) || st.release_ms > 50) {
+    const chk = assertInRange(`${fieldPrefix}.release_ms`, st.release_ms, STOP_RIGID_FLOOR.release_ms, 50, 'ms');
+    if (!chk.ok) return chk;
+  }
+  if (st.release_ms < STOP_RIGID_FLOOR.release_ms) {
+    return fail({
+      code: 'rigid_floor',
+      field: `${fieldPrefix}.release_ms`,
+      value: st.release_ms,
+      allowed: { min: STOP_RIGID_FLOOR.release_ms, max: 50, unit: 'ms' },
+      hint: `塞音释放时长 ${st.release_ms} ms 低于刚性下限 ${STOP_RIGID_FLOOR.release_ms} ms`,
+    });
+  }
+  const aspChk = assertInRange(`${fieldPrefix}.aspiration_ms`, st.aspiration_ms, 0, 1000, 'ms');
+  if (!aspChk.ok) return aspChk;
+  const votChk = assertInRange(`${fieldPrefix}.vot_ms`, st.vot_ms, -st.closure_ms, st.release_ms + st.aspiration_ms, 'ms');
+  if (!votChk.ok) return votChk;
+  return ok(st);
+}
+
+export function scaleStopTimingMs(
+  st: StopTiming,
+  targetMs: number,
+  fieldPrefix: string = 'stop_timing',
+): Result<StopTiming> {
+  const valid = validateStopTiming(st, fieldPrefix);
+  if (!valid.ok) return valid;
+  const rigidFloorMs = STOP_RIGID_FLOOR.closure_ms + STOP_RIGID_FLOOR.release_ms;
+  if (typeof targetMs !== 'number' || !Number.isFinite(targetMs) || targetMs < rigidFloorMs - 1e-6) {
+    return fail({
+      code: 'rigid_floor',
+      field: fieldPrefix,
+      value: targetMs,
+      allowed: { min: rigidFloorMs, max: 4049, unit: 'ms' },
+      hint: `塞音目标时长 ${targetMs} ms 低于闭塞(${STOP_RIGID_FLOOR.closure_ms} ms) + 释放(${STOP_RIGID_FLOOR.release_ms} ms) 刚性下限 ${rigidFloorMs} ms`,
+    });
+  }
   const orig = st.closure_ms + st.release_ms + st.aspiration_ms;
-  if (orig <= 0 || Math.abs(targetMs - orig) < 1e-6) return { ...st };
-  const ratio = targetMs / orig;
-  const closure_ms = Math.max(STOP_RIGID_FLOOR.closure_ms, st.closure_ms * ratio);
-  const release_ms = Math.max(STOP_RIGID_FLOOR.release_ms, st.release_ms * ratio);
-  const aspiration_ms = Math.max(0, targetMs - closure_ms - release_ms);
+  if (orig <= 0 || Math.abs(targetMs - orig) < 1e-6) return ok({ ...st });
+  const effTarget = Math.max(rigidFloorMs, targetMs);
+  const ratio = effTarget / orig;
+  const rawC = st.closure_ms * ratio;
+  const rawR = st.release_ms * ratio;
+  let closure_ms: number;
+  let release_ms: number;
+  if (rawC < STOP_RIGID_FLOOR.closure_ms) {
+    closure_ms = STOP_RIGID_FLOOR.closure_ms;
+    release_ms = Math.max(STOP_RIGID_FLOOR.release_ms, Math.min(effTarget - closure_ms, rawR));
+  } else if (rawR < STOP_RIGID_FLOOR.release_ms) {
+    release_ms = STOP_RIGID_FLOOR.release_ms;
+    closure_ms = Math.max(STOP_RIGID_FLOOR.closure_ms, Math.min(effTarget - release_ms, rawC));
+  } else {
+    closure_ms = rawC;
+    release_ms = rawR;
+  }
+  const aspiration_ms = Math.max(0, effTarget - closure_ms - release_ms);
   const vot_ms = Math.max(-closure_ms, Math.min(release_ms + aspiration_ms, st.vot_ms * ratio));
-  return { ...st, closure_ms, release_ms, aspiration_ms, vot_ms };
+  return ok({ ...st, closure_ms, release_ms, aspiration_ms, vot_ms });
 }
 
 /**
  * Unified speech & singing schedule compiler.
  */
 export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
-  const fRefCheck = assertInRange('f_ref_hz', input.f_ref_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+  const fRefCheck = assertValidF0Hz('f_ref_hz', input.f_ref_hz);
   if (!fRefCheck.ok) return fRefCheck;
 
   const basePressure = input.base_pressure_pa ?? DEFAULT_BASE_PRESSURE_PA;
@@ -409,10 +295,14 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
     });
   }
 
-  // Validate any explicit note_hz or pressure points up front (no silent clamping!)
+  // Validate explicit note_hz, pressure points, rest beats, and stop rigid floors up front (no silent clamping!)
   for (const syl of input.syllables) {
     if (syl.note_hz !== undefined) {
-      const r = assertInRange(`syllables.${syl.id}.note_hz`, syl.note_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+      const r = assertValidF0Hz(`syllables.${syl.id}.note_hz`, syl.note_hz);
+      if (!r.ok) return r;
+    }
+    if (syl.rest_before_beats !== undefined) {
+      const r = assertInRange(`syllables.${syl.id}.rest_before_beats`, syl.rest_before_beats, 0, 1024, 'beats');
       if (!r.ok) return r;
     }
     if (syl.pressure_pa !== undefined) {
@@ -423,6 +313,12 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
       for (const pt of syl.pressure_envelope) {
         const r = assertInRange(`syllables.${syl.id}.pressure_envelope.pressure_pa`, pt.pressure_pa, PRESSURE_LIMIT_PA.min, PRESSURE_LIMIT_PA.max, 'Pa');
         if (!r.ok) return r;
+      }
+    }
+    for (const seg of syl.segments) {
+      if (seg.stop_timing) {
+        const stopChk = validateStopTiming(seg.stop_timing, `syllables.${syl.id}.segments.${seg.id}.stop_timing`);
+        if (!stopChk.ok) return stopChk;
       }
     }
   }
@@ -440,19 +336,43 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
   const leadingReserveSmp = msToSamples(leadingReserveMs);
   const issues: ScoreIssue[] = [];
 
-  // Map score notes to syllables if score is provided
-  const scorePitchByIdx: Array<{ hz: number; beats: number; dyn: number } | null> = [];
+  // Map score notes to syllables if score is provided, preserving rest durations
+  const scorePitchByIdx: Array<{
+    hz: number;
+    beats: number;
+    dyn: number;
+    rest_before_beats: number;
+    has_rest_after: boolean;
+  } | null> = [];
   if (input.score) {
+    let pendingRestBeats = 0;
     for (const n of input.score.notes) {
-      if (n.midi === null) continue;
+      if (n.midi === null) {
+        pendingRestBeats += n.beats;
+        if (scorePitchByIdx.length > 0) {
+          scorePitchByIdx[scorePitchByIdx.length - 1]!.has_rest_after = true;
+        }
+        continue;
+      }
       const hz = 440 * Math.pow(2, (n.midi - 69) / 12);
-      const hzCheck = assertInRange('score.note_hz', hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+      const hzCheck = assertValidF0Hz('score.note_hz', hz);
       if (!hzCheck.ok) return hzCheck;
       if (!n.carry) {
-        scorePitchByIdx.push({ hz, beats: n.beats, dyn: n.dynamic ?? 0 });
+        scorePitchByIdx.push({
+          hz,
+          beats: n.beats,
+          dyn: n.dynamic ?? 0,
+          rest_before_beats: pendingRestBeats,
+          has_rest_after: false,
+        });
+        pendingRestBeats = 0;
       } else if (scorePitchByIdx.length > 0) {
         const last = scorePitchByIdx[scorePitchByIdx.length - 1]!;
         last.beats += n.beats;
+        if (pendingRestBeats > 0) {
+          last.beats += pendingRestBeats;
+          pendingRestBeats = 0;
+        }
       }
     }
   }
@@ -462,10 +382,17 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
     const sc = scorePitchByIdx[idx];
     const noteHz = syl.note_hz ?? sc?.hz;
     const beats = syl.note_beats ?? sc?.beats ?? 1;
+    const restBeforeBeats = syl.rest_before_beats ?? sc?.rest_before_beats ?? 0;
+    const hasRestAfter = Boolean(sc?.has_rest_after);
     const dynLevel = syl.dynamic_level ?? sc?.dyn ?? 0;
     const targetPressure = (syl.pressure_pa ?? basePressure) + dynLevel * DYNAMIC_STEP_PA;
-    return { syl, noteHz, beats, dynLevel, targetPressure };
+    return { syl, noteHz, beats, restBeforeBeats, hasRestAfter, dynLevel, targetPressure };
   });
+  for (let i = 0; i < sylMeta.length - 1; i++) {
+    if (sylMeta[i + 1].restBeforeBeats > 0) {
+      sylMeta[i].hasRestAfter = true;
+    }
+  }
 
   // Strict check on dynamic-adjusted target pressures
   for (const m of sylMeta) {
@@ -492,6 +419,7 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
     const noteDurSamples: number[] = [];
     let accBeats = 0;
     for (let i = 0; i < sylMeta.length; i++) {
+      accBeats += sylMeta[i].restBeforeBeats;
       const bSmp = leadingReserveSmp + Math.round(accBeats * secPerBeat * SAMPLE_RATE_HZ);
       beatSamples.push(bSmp);
       const nextAccBeats = accBeats + sylMeta[i].beats;
@@ -640,7 +568,11 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
       const nextOnsetMs = nextOnset.reduce((a, s) => a + (segTimingMs.get(s.id) ?? 0), 0);
       const nextOnsetSmp = msToSamples(nextOnsetMs);
       sylStartSmp[i + 1] = Math.max(tNucI + msToSamples(holdMinMs), tNucNext - nextOnsetSmp);
-      sylEndSmp[i] = sylStartSmp[i + 1];
+      const hasRestGap = sylMeta[i + 1].restBeforeBeats > 0;
+      const noteEndI = beatSamples[i] + noteDurSamples[i];
+      sylEndSmp[i] = hasRestGap
+        ? Math.min(sylStartSmp[i + 1], Math.max(tNucI + msToSamples(holdMinMs), noteEndI))
+        : sylStartSmp[i + 1];
     }
 
     // Final syllable trailing coda + end
@@ -656,19 +588,33 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
         lastBeatEnd + (input.finalCodaWithinBeat ? 0 : msToSamples(codaMs)));
     }
 
-    // Build exact sample intervals for every segment & syllable
+    // Build exact sample intervals for every segment & syllable (strictly non-overlapping half-open intervals)
+    const minNucSmp = msToSamples(20);
+    const minCodaFloorSmp = msToSamples(10);
+    const stopFloorSmp = msToSamples(STOP_RIGID_FLOOR.closure_ms + STOP_RIGID_FLOOR.release_ms);
+    let prevActualEndSmp = 0;
+
     for (let i = 0; i < sylMeta.length; i++) {
       const m = sylMeta[i];
       const part = parts[i];
       const biasSmp = msToSamples(m.syl.bias_ms ?? 0);
       const policy = m.syl.lead_policy ?? 'nucleus_on_beat';
 
+      if (i > 0 && sylStartSmp[i] < prevActualEndSmp) {
+        sylStartSmp[i] = prevActualEndSmp;
+      }
+
       let cur = sylStartSmp[i];
       const onsetSegs: ScheduledSegment[] = [];
       for (const seg of part.onset) {
         const durMs = segTimingMs.get(seg.id) ?? segmentMinAndPreferredMs(seg).prefMs;
         const durSmp = msToSamples(durMs);
-        const st = seg.stop_timing ? scaleStopTimingMs(seg.stop_timing, durMs) : undefined;
+        let st: StopTiming | undefined;
+        if (seg.stop_timing) {
+          const scaled = scaleStopTimingMs(seg.stop_timing, durMs, `syllables.${m.syl.id}.segments.${seg.id}.stop_timing`);
+          if (!scaled.ok) return scaled;
+          st = scaled.value;
+        }
         onsetSegs.push({
           id: seg.id,
           syllable_id: m.syl.id,
@@ -689,13 +635,48 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
         // Align final onset end right up to nucleus start so segments are contiguous
         const delta = nucStart - cur;
         onsetSegs[onsetSegs.length - 1].end_smp += delta;
+        const lastOnset = onsetSegs[onsetSegs.length - 1];
+        const rawLastOnset = part.onset[part.onset.length - 1];
+        if (rawLastOnset?.stop_timing) {
+          const scaled = scaleStopTimingMs(
+            rawLastOnset.stop_timing,
+            samplesToMs(lastOnset.end_smp - lastOnset.start_smp),
+            `syllables.${m.syl.id}.segments.${rawLastOnset.id}.stop_timing`,
+          );
+          if (!scaled.ok) return scaled;
+          lastOnset.stop_timing = scaled.value;
+        }
         cur = nucStart;
       }
 
-      const codaMsTotal = part.coda.reduce((a, s) => a + (segTimingMs.get(s.id) ?? 0), 0);
-      const codaSmpTotal = msToSamples(codaMsTotal);
-      const nucEnd = Math.max(nucStart + msToSamples(20), sylEndSmp[i] - codaSmpTotal);
+      // Compute coda durations and derive nucleus end backwards from sylEndSmp[i].
+      // If budget is insufficient, extend sylEndSmp[i] and push sylStartSmp[i + 1] forward with an issue.
+      const codaDursSmp = part.coda.map((seg) => {
+        const durMs = segTimingMs.get(seg.id) ?? segmentMinAndPreferredMs(seg).prefMs;
+        const floor = seg.stop_timing ? stopFloorSmp : minCodaFloorSmp;
+        return Math.max(floor, msToSamples(durMs));
+      });
+      const codaSmpTotal = codaDursSmp.reduce((a, b) => a + b, 0);
+      const minRequiredSylEnd = nucStart + minNucSmp + codaSmpTotal;
 
+      if (sylEndSmp[i] < minRequiredSylEnd) {
+        const shortfallMs = samplesToMs(minRequiredSylEnd - sylEndSmp[i]);
+        sylEndSmp[i] = minRequiredSylEnd;
+        if (i + 1 < sylMeta.length && sylStartSmp[i + 1] < minRequiredSylEnd) {
+          sylStartSmp[i + 1] = minRequiredSylEnd;
+          if (!issues.some((it) => it.key === 'song_short' && it.row === i + 2)) {
+            issues.push({
+              key: 'song_short',
+              row: i + 2,
+              values: { required_ms: Math.round(samplesToMs(minNucSmp + codaSmpTotal)), available_ms: Math.max(0, Math.round(samplesToMs(minNucSmp + codaSmpTotal) - shortfallMs)) },
+              message: `第 ${i + 1} 音节核心与韵尾超出预算 ${shortfallMs.toFixed(1)} ms，已顺延下一音节起点以避免重叠`,
+              options: ['delay_vowel', 'trim_coda', 'extend_prev_note'],
+            });
+          }
+        }
+      }
+
+      const nucEnd = sylEndSmp[i] - codaSmpTotal;
       const nucSeg: ScheduledSegment = {
         id: part.nucleus.id,
         syllable_id: m.syl.id,
@@ -707,30 +688,48 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
         elastic: true,
         params: part.nucleus.params,
       };
-      cur = nucEnd;
+
+      // Place codas working backwards from sylEndSmp[i] so boundaries match [start_smp, end_smp) exactly
+      const codaStarts: number[] = new Array(part.coda.length);
+      const codaEnds: number[] = new Array(part.coda.length);
+      let backCursor = sylEndSmp[i];
+      for (let k = part.coda.length - 1; k >= 0; k--) {
+        codaEnds[k] = backCursor;
+        backCursor -= codaDursSmp[k];
+        codaStarts[k] = backCursor;
+      }
 
       const codaSegs: ScheduledSegment[] = [];
       for (let k = 0; k < part.coda.length; k++) {
         const seg = part.coda[k];
-        const durMs = segTimingMs.get(seg.id) ?? segmentMinAndPreferredMs(seg).prefMs;
-        const end = k === part.coda.length - 1 ? Math.max(cur + msToSamples(10), sylEndSmp[i]) : cur + msToSamples(durMs);
-        const st = seg.stop_timing ? scaleStopTimingMs(seg.stop_timing, samplesToMs(end - cur)) : undefined;
+        const segStart = codaStarts[k];
+        const segEnd = codaEnds[k];
+        let st: StopTiming | undefined;
+        if (seg.stop_timing) {
+          const scaled = scaleStopTimingMs(
+            seg.stop_timing,
+            samplesToMs(segEnd - segStart),
+            `syllables.${m.syl.id}.segments.${seg.id}.stop_timing`,
+          );
+          if (!scaled.ok) return scaled;
+          st = scaled.value;
+        }
         codaSegs.push({
           id: seg.id,
           syllable_id: m.syl.id,
           ipa: seg.ipa,
           role: seg.role,
-          start_smp: cur,
-          end_smp: end,
+          start_smp: segStart,
+          end_smp: segEnd,
           voiced: seg.voiced,
           elastic: !seg.stop_timing,
           stop_timing: st,
           params: seg.params,
         });
-        cur = end;
       }
 
       const segs = [...onsetSegs, nucSeg, ...codaSegs];
+      prevActualEndSmp = segs[segs.length - 1].end_smp;
       allSegments.push(...segs);
       const leadMs = samplesToMs(nucStart - sylStartSmp[i]);
       scheduledSyllables.push({
@@ -754,6 +753,7 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
         start_smp: segs[0].start_smp,
         end_smp: segs[segs.length - 1].end_smp,
         voiced: true,
+        is_rest_after: m.hasRestAfter || undefined,
         pre_glide_ms: leadMs,
         candidates: {
           ...m.syl.target_overrides,
@@ -771,7 +771,10 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
       const segs: ScheduledSegment[] = [];
       const sylStart = cur;
       for (const seg of m.syl.segments) {
-        const durSmp = msToSamples(Math.max(10, seg.preferred_ms));
+        const stopMinMs = seg.stop_timing
+          ? seg.stop_timing.closure_ms + seg.stop_timing.release_ms + seg.stop_timing.aspiration_ms
+          : 0;
+        const durSmp = msToSamples(Math.max(10, seg.preferred_ms, stopMinMs));
         segs.push({
           id: seg.id,
           syllable_id: m.syl.id,
@@ -871,8 +874,8 @@ export function schedule(input: ScheduleInput): Result<ScheduleOutput> {
         } else {
           pVal = owner.pressure_pa;
         }
-      } else if (tSmp < (scheduledSyllables[0]?.start_smp ?? 0)) {
-        pVal = 0; // silence/reserve before first utterance
+      } else {
+        pVal = 0; // silence/reserve before first utterance or inside musical rest gaps
       }
     }
     const check = assertInRange('pressure_pa', pVal, PRESSURE_LIMIT_PA.min, PRESSURE_LIMIT_PA.max, 'Pa');

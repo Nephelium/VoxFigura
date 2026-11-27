@@ -1,7 +1,8 @@
 import {
-  F0_LIMIT_HZ, MAX_SEQUENCE_SECONDS, PRESSURE_LIMIT_PA, SAMPLE_RATE_HZ, assertInRange, msToSamples, samplesToMs, schedule,
+  DEFAULT_SCORE_NOTATION,
+  MAX_SEQUENCE_SECONDS, PRESSURE_LIMIT_PA, SAMPLE_RATE_HZ, assertInRange, isValidF0Hz, msToSamples, samplesToMs, schedule,
   type Clip, type ClipSourceMeta, type F0PinSegment, type PerturbationConfig, type QtaTargetSpan,
-  type ScheduledSyllable, type SegmentAnchor, type SongTonic, type Syllable,
+  type ScheduledSyllable, type ScoreNotationId, type SegmentAnchor, type SongTonic, type Syllable,
 } from '@vocalcut/core';
 import { PORTAMENTO_RATE, arrangementPitchTargets, restrictArrangerPitchPins, withArrangerPitchPins } from './arranger-pitch';
 import { buildSegmentsForSyllable, splitIpaToPhonemes } from '@/components/research/research-utils';
@@ -44,6 +45,7 @@ interface ArrangementOptions {
   speaker?: string;
   bpm: number;
   tonic: SongTonic;
+  notation?: ScoreNotationId;
   language?: ClipSourceMeta['lang'];
   readingStandard?: string;
   referenceHz: number;
@@ -78,7 +80,7 @@ function matchingUserLexicon(row: ArrangementRoll['voice']['rows'][number], phon
 export function compileArrangement(roll: ArrangementRoll, options: ArrangementOptions): { clip: Clip; issue?: never } | { clip?: never; issue: string } {
   const first = roll.notes[0];
   if (!roll.ok || !first) return { issue: roll.issueMsg || '请输入与歌词对应的简谱' };
-  if (roll.notes.some(note => note.hz < F0_LIMIT_HZ.min || note.hz > F0_LIMIT_HZ.max)) return { issue: '简谱音高超出 60–600 Hz' };
+  if (roll.notes.some(note => !isValidF0Hz(note.hz))) return { issue: '简谱音高须为有限正数 (> 0 Hz)' };
   if (roll.notes.some(note => note.pressurePa < PRESSURE_LIMIT_PA.min || note.pressurePa > PRESSURE_LIMIT_PA.max)) return { issue: '简谱力度超出 0–1600 Pa' };
   const damping = assertInRange('damping_per_s', options.dampingRate, PORTAMENTO_RATE.min, PORTAMENTO_RATE.max, '1/s');
   if (!damping.ok) return { issue: damping.error.hint };
@@ -276,7 +278,8 @@ export function compileArrangement(roll: ArrangementRoll, options: ArrangementOp
     end_smp: totalSmp, variants: ['synth'], active_variant: 'synth',
     source: {
       lyrics: roll.voice.lyricsText, score: roll.voice.fullScoreStr, score_tonic: tonic,
-      score_bpm: bpm, reading_standard: options.readingStandard, lang: language, transcription: 'jianpu-arranger',
+      score_bpm: bpm, score_notation: options.notation ?? DEFAULT_SCORE_NOTATION,
+      reading_standard: options.readingStandard, lang: language, transcription: 'jianpu-arranger',
     },
     syllable_order: syllableOrder, syllables,
     annotation_controls: withArrangerPitchPins({

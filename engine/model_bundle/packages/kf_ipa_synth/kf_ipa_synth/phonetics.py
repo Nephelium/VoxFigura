@@ -268,8 +268,23 @@ _IPA_SPECS: Dict[str, Dict[str, float]] = {
 # Standard IPA 2020 diacritics stripped when locating base symbol, then applied compositionally
 _IPA_DIACRITIC_RE = re.compile(
     r"[\u0303\u0306\u0308\u030a\u030d\u0318\u0319\u031a\u031c\u031d\u031e\u031f\u0320\u0324\u0325\u0329\u032a\u032c\u032f\u0330\u0334\u0339\u033a\u033b\u033c\u033d"
-    r"ʰʷʲˠˤʼ˞ːˑˈˌⁿˡ]"
+    r"ʰʷᵝʲˠˤʼ˞ːˑˈˌⁿˡ]"
 )
+
+_PRECOMPOSED_IPA_MAP: Dict[str, str] = {
+    "ä": "a\u0308", "ë": "e\u0308", "ï": "i\u0308", "ö": "o\u0308", "ü": "u\u0308",
+    "ã": "a\u0303", "ẽ": "e\u0303", "ĩ": "i\u0303", "õ": "o\u0303", "ũ": "u\u0303",
+}
+
+
+def _decompose_precomposed_ipa(sym: str) -> str:
+    if not sym:
+        return ""
+    out = sym
+    for k, v in _PRECOMPOSED_IPA_MAP.items():
+        if k in out:
+            out = out.replace(k, v)
+    return out
 
 # Canonical place/manner lookup sets for fine-grained Place x Manner diacritic rules
 _NON_PULMONIC_BASES = {"ɓ", "ɗ", "ᶑ", "ʄ", "ɠ", "ʛ", "ʘ", "ǀ", "ǃ", "ǂ", "ǁ"}
@@ -285,7 +300,7 @@ _VELAR_BASES = {"k", "ɡ", "g", "ŋ", "x", "ɣ", "ɰ", "ʟ", "ɠ", "w", "ʍ", "k
 
 def strip_ipa_diacritics(sym: str) -> str:
     """Strip IPA 2020 combining diacritics & modifier letters to obtain the base IPA symbol."""
-    s = (sym or "").strip().replace("͡", "").replace("͜", "")
+    s = _decompose_precomposed_ipa((sym or "").strip()).replace("͡", "").replace("͜", "")
     return _IPA_DIACRITIC_RE.sub("", s)
 
 
@@ -398,7 +413,7 @@ def validate_ipa_diacritics(ipa_sym: str) -> Dict[str, object]:
       - warnings: list of Chinese advisory/redundancy/engine-boundary messages
       - ignored_diacritics: set of diacritics suppressed because illegal for this base symbol
     """
-    s = (ipa_sym or "").strip()
+    s = _decompose_precomposed_ipa((ipa_sym or "").strip())
     base = strip_ipa_diacritics(s)
     diacs = _IPA_DIACRITIC_RE.findall(s)
     errors: List[str] = []
@@ -614,7 +629,7 @@ def apply_diacritics_to_phys27(phys27: np.ndarray, ipa_sym: str) -> np.ndarray:
     from .m27_contract import M27_MAX, M27_MIN
 
     out = np.asarray(phys27, dtype=np.float32).copy()
-    s = (ipa_sym or "").strip()
+    s = _decompose_precomposed_ipa((ipa_sym or "").strip())
     if not s:
         return out
 
@@ -928,6 +943,18 @@ def apply_diacritics_to_phys27(phys27: np.ndarray, ipa_sym: str) -> np.ndarray:
                 elif place == "velar" and not is_lateral and not is_fric_like:
                     out[8] -= 0.18
 
+    if _active("ᵝ"):  # exolabial / compressed bilabial rounding (Japanese [ɯᵝ], [ɰᵝ])
+        if kind == "vowel":
+            out[4] = min(float(out[4]), 0.08)
+            out[5] = max(0.28, min(float(out[5]) - 0.30, 0.48))
+            if base == "ɯ":
+                out[8] = float(out[8]) + 0.28 * (0.85 - float(out[8]))
+        elif place in ("bilabial", "labiodental") and is_stop_like:
+            out[4] = min(float(out[4]), 0.05)
+        else:
+            out[4] = min(float(out[4]), 0.08)
+            out[5] = max(0.24, min(float(out[5]) - 0.32, 0.42))
+
     if _active("\u031c"):  # less rounded (̜)
         if kind == "vowel":
             lp0, ld0 = float(out[4]), float(out[5])
@@ -1226,6 +1253,10 @@ def _apply_ipa_diacritics(base_spec: Dict[str, float], full_sym: str) -> Dict[st
     # place_labial=0.5 on non-labial consonants (which would misclassify tʷ/kʷ/sʷ as bilabial!).
     if ("ʷ" in full_sym or "\u0339" in full_sym) and not ("\u0339" in full_sym and "\u031c" in full_sym):
         spec["rounded"] = 1.0
+    elif "ᵝ" in full_sym and "\u031c" not in full_sym:
+        spec["rounded"] = max(spec.get("rounded", 0.0), 0.45)
+        if spec.get("is_vowel", 0.0) >= 0.5 and base_sym == "ɯ":
+            spec["vowel_backness"] = max(0.55, spec.get("vowel_backness", 1.0) - 0.15)
     if "\u031c" in full_sym and "\u0339" not in full_sym:
         spec["rounded"] = max(0.0, spec.get("rounded", 0.0) - 0.5)
     if "ʲ" in full_sym:
@@ -1255,6 +1286,9 @@ def _apply_ipa_diacritics(base_spec: Dict[str, float], full_sym: str) -> Dict[st
             spec["manner_fric"] = max(spec.get("manner_fric", 0.0), 0.75)
         elif spec.get("is_vowel", 0.0) >= 0.5:
             spec["vowel_height"] = min(1.0, spec.get("vowel_height", 0.5) + 0.10)
+    if "\u0308" in full_sym and spec.get("is_vowel", 0.0) >= 0.5:
+        vb = float(spec.get("vowel_backness", 0.5))
+        spec["vowel_backness"] = vb + 0.75 * (0.50 - vb)
     if "\u031f" in full_sym and "\u0320" not in full_sym and spec.get("is_vowel", 0.0) >= 0.5:
         spec["vowel_backness"] = max(0.0, spec.get("vowel_backness", 0.5) - 0.10)
     if "\u0320" in full_sym and "\u031f" not in full_sym and not is_glottal_base:
@@ -1271,6 +1305,10 @@ def _resolve_ipa_spec(sym: str) -> Optional[Dict[str, float]]:
     if not s:
         return {"is_sil": 1.0}
     # 1. Exact hit first (preserves bit-exact legacy entries!)
+    exact = _IPA_SPECS.get(s)
+    if exact is not None:
+        return exact
+    s = _decompose_precomposed_ipa(s)
     exact = _IPA_SPECS.get(s)
     if exact is not None:
         return exact
@@ -1350,6 +1388,285 @@ def ipa_to_phon_features(ipa: str) -> np.ndarray:
     if matched:
         return vec
     # Legacy caller compatibility: neutral fallback if caller does not inspect matched flag
+    vec[1] = 0.5
+    vec[17] = 1.0
+    vec[20] = 0.5
+    vec[21] = 0.5
+    return vec
+
+
+# ---------------------------------------------------------------------------
+# Narrow-IPA 32-dim PanPhon-enhanced feature vector (Stage 2 v4 / Batch-2)
+# Keeps legacy 22-dim functions & T-24 organ masks 100% untouched for compatibility.
+# ---------------------------------------------------------------------------
+PHON_FEAT_NAMES_32: Tuple[str, ...] = PHON_FEAT_NAMES + (
+    "place_dental",        # 22
+    "manner_sibilant",     # 23
+    "place_uvular",        # 24
+    "place_pharyngeal",    # 25
+    "is_syllabic",         # 26
+    "is_unreleased",       # 27
+    "phonation_breathy",   # 28
+    "phonation_creaky",    # 29
+    "airstream_glottalic", # 30
+    "airstream_velaric",   # 31
+)
+PHON_FEAT_DIM_32 = len(PHON_FEAT_NAMES_32)  # 32
+_PHON_FEAT_INDEX_32: Dict[str, int] = {name: i for i, name in enumerate(PHON_FEAT_NAMES_32)}
+
+_PRECOMPOSED_IPA_MAP_32: Dict[str, str] = {
+    "ä": "a\u0308", "ë": "e\u0308", "ï": "i\u0308", "ö": "o\u0308", "ü": "u\u0308",
+    "ã": "a\u0303", "ẽ": "e\u0303", "ĩ": "i\u0303", "õ": "o\u0303", "ũ": "u\u0303",
+}
+_IPA_DIACRITIC_RE_32 = re.compile(
+    r"[\u0303\u0306\u0308\u030a\u030d\u0318\u0319\u031a\u031c\u031d\u031e\u031f\u0320\u0324\u0325\u0329\u032a\u032c\u032f\u0330\u0334\u0339\u033a\u033b\u033c\u033d\u0346\u0347"
+    r"ʰʷᵝʲˠˤʼ˞ːˑˈˌⁿˡ]"
+)
+_EXTRA_32_SPECS: Dict[str, Dict[str, float]] = {}
+for _s32 in ("s", "z", "ʃ", "ʒ", "ʂ", "ʐ", "ɕ", "ʑ", "ts", "tsʰ", "dz", "tʃ", "tʃʰ", "dʒ", "tʂ", "tʂʰ", "ʈʂ", "ʈʂʰ", "dʐ", "ɖʐ", "tɕ", "tɕʰ", "dʑ", "ȶɕ", "ȡʑ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["manner_sibilant"] = 1.0
+for _s32 in ("θ", "ð", "tθ", "dð"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["place_dental"] = 1.0
+for _s32 in ("q", "ɢ", "ɴ", "ʀ", "χ", "ʁ", "ʛ", "qχ", "ɢʁ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["place_uvular"] = 1.0
+for _s32 in ("ħ", "ʕ", "ʜ", "ʢ", "ʡ", "ʡħ", "ʡʕ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["place_pharyngeal"] = 1.0
+for _s32 in ("ɹ̩", "ɻ̩", "ɿ", "ʅ", "ʮ", "ʯ", "l̩", "ɫ̩", "m̩", "n̩", "ŋ̩"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["is_syllabic"] = 1.0
+for _s32, _bv32 in (("ɦ", 1.0), ("h", 0.6)):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["phonation_breathy"] = _bv32
+for _s32 in ("ʔ", "ʡ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["phonation_creaky"] = 1.0
+for _s32 in ("ɓ", "ɗ", "ᶑ", "ʄ", "ɠ", "ʛ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["airstream_glottalic"] = -1.0
+for _s32 in ("ʘ", "ǀ", "ǃ", "ǂ", "ǁ"):
+    _EXTRA_32_SPECS.setdefault(_s32, {})["airstream_velaric"] = 1.0
+
+
+def _normalize_precomposed_ipa_32(sym: str) -> str:
+    if not sym:
+        return ""
+    out = sym
+    for k, v in _PRECOMPOSED_IPA_MAP_32.items():
+        if k in out:
+            out = out.replace(k, v)
+    return out
+
+
+_OVERRIDE_32_SPECS: Dict[str, Dict[str, float]] = {
+    "ʈʂʰ": {"is_consonant": 1.0, "place_coronal": 1.0, "place_retroflex": 1.0, "manner_affric": 1.0, "manner_stop": 0.5, "manner_fric": 0.5, "aspirated": 1.0, "manner_sibilant": 1.0},
+    "ȶ": {"is_consonant": 1.0, "place_palatal": 1.0, "place_coronal": 0.5, "manner_stop": 1.0},
+    "ȡ": {"is_consonant": 1.0, "place_palatal": 1.0, "place_coronal": 0.5, "manner_stop": 1.0, "voiced": 1.0},
+    "ȵ": {"is_consonant": 1.0, "place_palatal": 1.0, "place_coronal": 0.5, "manner_nasal": 1.0, "voiced": 1.0},
+    "ȶɕ": {"is_consonant": 1.0, "place_palatal": 1.0, "place_coronal": 0.5, "manner_affric": 1.0, "manner_stop": 0.5, "manner_fric": 0.5, "manner_sibilant": 1.0},
+    "ȡʑ": {"is_consonant": 1.0, "place_palatal": 1.0, "place_coronal": 0.5, "manner_affric": 1.0, "manner_stop": 0.5, "manner_fric": 0.5, "voiced": 1.0, "manner_sibilant": 1.0},
+    "ʐ": {"is_consonant": 1.0, "place_coronal": 1.0, "place_retroflex": 1.0, "manner_fric": 1.0, "voiced": 1.0, "manner_sibilant": 1.0},
+    "ɹ": {"is_consonant": 1.0, "place_coronal": 1.0, "manner_approx": 1.0, "voiced": 1.0},
+    "ä": {"is_vowel": 1.0, "voiced": 1.0, "vowel_height": 0.05, "vowel_backness": 0.50},
+    "a\u0308": {"is_vowel": 1.0, "voiced": 1.0, "vowel_height": 0.05, "vowel_backness": 0.50},
+    "ᴀ": {"is_vowel": 1.0, "voiced": 1.0, "vowel_height": 0.05, "vowel_backness": 0.50},
+    "ᴇ": {"is_vowel": 1.0, "voiced": 1.0, "vowel_height": 0.52, "vowel_backness": 0.10},
+    "ɹ̩": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "manner_approx": 1.0, "vowel_height": 0.92, "vowel_backness": 0.25, "is_syllabic": 1.0},
+    "ɻ̩": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "place_retroflex": 1.0, "manner_approx": 1.0, "vowel_height": 0.88, "vowel_backness": 0.45, "is_syllabic": 1.0},
+    "ɿ": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "manner_approx": 1.0, "vowel_height": 0.92, "vowel_backness": 0.25, "is_syllabic": 1.0},
+    "ʅ": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "place_retroflex": 1.0, "manner_approx": 1.0, "vowel_height": 0.88, "vowel_backness": 0.45, "is_syllabic": 1.0},
+    "ʮ": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "manner_approx": 1.0, "rounded": 1.0, "vowel_height": 0.92, "vowel_backness": 0.25, "is_syllabic": 1.0},
+    "ʯ": {"is_vowel": 0.5, "is_consonant": 1.0, "voiced": 1.0, "place_coronal": 1.0, "place_retroflex": 1.0, "manner_approx": 1.0, "rounded": 1.0, "vowel_height": 0.88, "vowel_backness": 0.45, "is_syllabic": 1.0},
+    "ɑʊ": {"is_vowel": 1.0, "voiced": 1.0, "rounded": 0.65, "vowel_height": 0.30, "vowel_backness": 0.88},
+}
+
+
+def _lookup_base_spec_32(sym: str) -> Optional[Dict[str, float]]:
+    override = _OVERRIDE_32_SPECS.get(sym)
+    if override is not None:
+        return dict(override)
+    base = _IPA_SPECS.get(sym)
+    if base is None:
+        return None
+    merged = dict(base)
+    extra = _EXTRA_32_SPECS.get(sym)
+    if extra:
+        merged.update(extra)
+    return merged
+
+
+def _apply_ipa_diacritics_32(base_spec: Dict[str, float], full_sym: str) -> Dict[str, float]:
+    spec = dict(base_spec)
+    base_sym = _IPA_DIACRITIC_RE_32.sub(
+        "", _normalize_precomposed_ipa_32((full_sym or "").strip()).replace("͡", "").replace("͜", "")
+    )
+    is_plosive_or_affric = (spec.get("manner_stop", 0.0) >= 0.5) or (spec.get("manner_affric", 0.0) >= 0.5)
+    is_glottal_base = base_sym in _GLOTTAL_BASES
+    is_glottal_stop = base_sym == "ʔ"
+    has_voiceless = ("\u0325" in full_sym) or ("\u030a" in full_sym)
+    has_voiced = "\u032c" in full_sym
+
+    if has_voiceless and not has_voiced:
+        spec["voiced"] = 0.0
+    elif has_voiced and not has_voiceless and not is_glottal_stop:
+        spec["voiced"] = 1.0
+    if "ʰ" in full_sym and spec.get("is_vowel", 0.0) < 0.5 and not is_glottal_base and "\u031a" not in full_sym:
+        spec["aspirated"] = 1.0
+    if "\u031a" in full_sym:
+        spec["is_unreleased"] = 1.0
+        spec["aspirated"] = 0.0
+    if "\u0324" in full_sym:
+        spec["phonation_breathy"] = 1.0
+    if "\u0330" in full_sym:
+        spec["phonation_creaky"] = 1.0
+    is_obstr = is_plosive_or_affric or (spec.get("manner_fric", 0.0) >= 0.5)
+    if "ʼ" in full_sym and is_obstr and not is_glottal_stop and spec.get("voiced", 0.0) < 0.5:
+        spec["voiced"] = 0.0
+        spec["place_glottal"] = max(spec.get("place_glottal", 0.0), 0.5)
+        spec["airstream_glottalic"] = 1.0
+    if "ʷ" in full_sym and "\u031c" not in full_sym:
+        spec["rounded"] = 1.0
+        if spec.get("is_consonant", 0.0) >= 0.5:
+            spec["place_labial"] = max(spec.get("place_labial", 0.0), 0.5)
+    elif "\u0339" in full_sym and "\u031c" not in full_sym:
+        spec["rounded"] = max(spec.get("rounded", 0.0), 0.65)
+    elif "ᵝ" in full_sym and "\u031c" not in full_sym:
+        spec["rounded"] = max(spec.get("rounded", 0.0), 0.45)
+        if spec.get("is_consonant", 0.0) >= 0.5:
+            spec["place_labial"] = max(spec.get("place_labial", 0.0), 0.45)
+        elif spec.get("is_vowel", 0.0) >= 0.5 and base_sym == "ɯ":
+            spec["vowel_backness"] = max(0.55, spec.get("vowel_backness", 1.0) - 0.15)
+    if "\u031c" in full_sym and "\u0339" not in full_sym:
+        spec["rounded"] = max(0.0, spec.get("rounded", 0.0) - 0.5)
+    if "ʲ" in full_sym:
+        spec["place_palatal"] = max(spec.get("place_palatal", 0.0), 0.7)
+    if "ˠ" in full_sym or "\u0334" in full_sym:
+        spec["place_velar"] = max(spec.get("place_velar", 0.0), 0.7)
+    if "ˤ" in full_sym:
+        spec["place_glottal"] = max(spec.get("place_glottal", 0.0), 0.6)
+        spec["place_pharyngeal"] = max(spec.get("place_pharyngeal", 0.0), 0.7)
+    if "\u0303" in full_sym and not is_plosive_or_affric and not is_glottal_stop:
+        spec["manner_nasal"] = max(spec.get("manner_nasal", 0.0), 0.75)
+    if "˞" in full_sym:
+        spec["place_retroflex"] = max(spec.get("place_retroflex", 0.0), 0.85)
+    if "\u0329" in full_sym or "\u030d" in full_sym:
+        spec["is_syllabic"] = 1.0
+        if spec.get("is_consonant", 0.0) >= 0.5 and spec.get("is_vowel", 0.0) < 0.5:
+            spec["is_vowel"] = 0.5
+    if "\u0308" in full_sym and spec.get("is_vowel", 0.0) >= 0.5:
+        vb = float(spec.get("vowel_backness", 0.5))
+        spec["vowel_backness"] = vb + 0.75 * (0.50 - vb)
+    if "\u033d" in full_sym and spec.get("is_vowel", 0.0) >= 0.5:
+        vb = float(spec.get("vowel_backness", 0.5))
+        vh = float(spec.get("vowel_height", 0.5))
+        spec["vowel_backness"] = vb + 0.50 * (0.50 - vb)
+        spec["vowel_height"] = vh + 0.50 * (0.50 - vh)
+    if "\u0346" in full_sym:
+        spec["place_labial"] = max(spec.get("place_labial", 0.0), 1.0)
+        spec["place_labiodent"] = 1.0
+        spec["place_dental"] = max(spec.get("place_dental", 0.0), 0.5)
+    if "\u0347" in full_sym:
+        spec["place_coronal"] = max(spec.get("place_coronal", 0.0), 1.0)
+    if "\u032a" in full_sym:
+        if spec.get("place_labial", 0.0) >= 0.5 and spec.get("place_coronal", 0.0) < 0.5:
+            spec["place_labiodent"] = 1.0
+        else:
+            spec["place_dental"] = 1.0
+    if "\u033c" in full_sym and (spec.get("place_coronal", 0.0) >= 0.5 or spec.get("place_labial", 0.0) >= 0.5):
+        spec["place_labial"] = max(spec.get("place_labial", 0.0), 0.7)
+        spec["place_dental"] = max(spec.get("place_dental", 0.0), 0.8)
+    if "\u031e" in full_sym and "\u031d" not in full_sym and not is_glottal_base and not is_plosive_or_affric:
+        if spec.get("manner_fric", 0.0) >= 0.5:
+            spec["manner_approx"] = 1.0
+            spec["manner_fric"] = 0.2
+        elif spec.get("is_vowel", 0.0) >= 0.5:
+            spec["vowel_height"] = max(0.0, spec.get("vowel_height", 0.5) - 0.10)
+    if "\u031d" in full_sym and "\u031e" not in full_sym and not is_glottal_base and not is_plosive_or_affric:
+        if spec.get("manner_approx", 0.0) >= 0.5 and spec.get("is_vowel", 0.0) < 0.5:
+            spec["manner_fric"] = max(spec.get("manner_fric", 0.0), 0.75)
+        elif spec.get("is_vowel", 0.0) >= 0.5:
+            spec["vowel_height"] = min(1.0, spec.get("vowel_height", 0.5) + 0.10)
+    if "\u031f" in full_sym and "\u0320" not in full_sym and spec.get("is_vowel", 0.0) >= 0.5:
+        spec["vowel_backness"] = max(0.0, spec.get("vowel_backness", 0.5) - 0.10)
+    if "\u0320" in full_sym and "\u031f" not in full_sym and not is_glottal_base:
+        if spec.get("is_vowel", 0.0) >= 0.5:
+            spec["vowel_backness"] = min(1.0, spec.get("vowel_backness", 0.5) + 0.10)
+        elif spec.get("place_coronal", 0.0) >= 0.5:
+            spec["place_retroflex"] = max(spec.get("place_retroflex", 0.0), 0.35)
+    return spec
+
+
+def _resolve_ipa_spec_32(sym: str) -> Optional[Dict[str, float]]:
+    s = (sym or "").strip()
+    if not s:
+        return {"is_sil": 1.0}
+    exact = _lookup_base_spec_32(s)
+    if exact is not None:
+        return exact
+    s = _normalize_precomposed_ipa_32(s)
+    exact = _lookup_base_spec_32(s)
+    if exact is not None:
+        return exact
+
+    clean = s.replace("ː", "").replace("ˑ", "").replace("͡", "").replace("͜", "").replace("ˈ", "").replace("ˌ", "")
+    hit_clean = _lookup_base_spec_32(clean)
+    if hit_clean is not None:
+        return hit_clean
+
+    if "͡" in s or "͜" in s:
+        parts = [p for p in re.split(r"[͜͡]", s) if p]
+        if len(parts) == 2:
+            sp1 = _resolve_ipa_spec_32(parts[0])
+            sp2 = _resolve_ipa_spec_32(parts[1])
+            if sp1 is not None and sp2 is not None:
+                merged: Dict[str, float] = {}
+                for k in set(sp1.keys()) | set(sp2.keys()):
+                    merged[k] = max(sp1.get(k, 0.0), sp2.get(k, 0.0))
+                if sp1.get("manner_stop", 0.0) >= 0.5 and sp2.get("manner_fric", 0.0) >= 0.5:
+                    merged["manner_affric"] = 1.0
+                    merged["manner_stop"] = 0.5
+                    merged["manner_fric"] = 0.5
+                    if parts[0].strip() != "ʡ" and (sp1.get("voiced", 0.0) < 0.5 or sp2.get("voiced", 0.0) < 0.5):
+                        merged["voiced"] = 0.0
+                return merged
+
+    base = _IPA_DIACRITIC_RE_32.sub("", clean)
+    if base:
+        base_spec = _lookup_base_spec_32(base)
+        if base_spec is not None:
+            return _apply_ipa_diacritics_32(base_spec, clean)
+        if len(base) == 2:
+            sp1 = _lookup_base_spec_32(base[0])
+            sp2 = _lookup_base_spec_32(base[1])
+            if sp1 is not None and sp2 is not None:
+                merged = {k: max(sp1.get(k, 0.0), sp2.get(k, 0.0)) for k in set(sp1.keys()) | set(sp2.keys())}
+                if sp1.get("manner_stop", 0.0) >= 0.5 and sp2.get("manner_fric", 0.0) >= 0.5:
+                    merged["manner_affric"] = 1.0
+                    merged["manner_stop"] = 0.5
+                    merged["manner_fric"] = 0.5
+                    if sp1.get("voiced", 0.0) < 0.5 or sp2.get("voiced", 0.0) < 0.5:
+                        merged["voiced"] = 0.0
+                return _apply_ipa_diacritics_32(merged, clean)
+    return None
+
+
+def ipa_to_phon_features_32_checked(ipa: str) -> Tuple[np.ndarray, bool]:
+    """Map an IPA symbol into (32-dim PanPhon-enhanced feature vector, matched) for Stage 2 v4 models."""
+    vec = np.zeros(PHON_FEAT_DIM_32, dtype=np.float32)
+    sym = (ipa or "").strip()
+    if not sym:
+        vec[0] = 1.0
+        return vec, True
+    spec = _resolve_ipa_spec_32(sym)
+    if spec is None:
+        return vec, False
+    for k, v in spec.items():
+        idx = _PHON_FEAT_INDEX_32.get(k)
+        if idx is not None:
+            vec[idx] = float(v)
+    return vec, True
+
+
+def ipa_to_phon_features_32(ipa: str) -> np.ndarray:
+    """Map an IPA symbol into a 32-dim float32 vector (neutral vowel fallback when unknown)."""
+    vec, matched = ipa_to_phon_features_32_checked(ipa)
+    if matched:
+        return vec
     vec[1] = 0.5
     vec[17] = 1.0
     vec[20] = 0.5

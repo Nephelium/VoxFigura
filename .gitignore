@@ -1,12 +1,23 @@
-# 环境变量与密钥（严禁提交到仓库）
+# 环境变量、密钥与本机私人配置（严禁提交到仓库）
 .env
 .env.*
 !.env.example
 *.secret
 *.key
-/server/.zhihu-author-defaults.local.json
+*.pem
+*.pfx
+*.p12
+*.crt
+*.local
+*.local.json
+*.local.mjs
+*.local.ts
+.zhihu-author-defaults.local.json
+local-engine.token
+local-model-registry.json
+launcher-config.json
 
-# 本地研究资料与个人录音
+# 本地研究资料、试听成品与个人录音
 /docs/试听/
 /docs/ipa-constriction-audit.csv
 /docs/ipa-reference-inventory.csv
@@ -16,18 +27,29 @@
 /src/editions/hackathon/recordings/
 /assets/source-audio/onboarding/
 /public/onboarding/*.mp3
+/refs/
 
-# 本地推理权重与运行时依赖
-/engine/model_bundle/**/*.onnx
-/engine/model_bundle/**/*.pt
-/engine/model_bundle/**/*.pth
-/engine/model_bundle/**/*.safetensors
+# 本地推理权重、原生二进制与大型归档（严禁入库）
+*.onnx
+*.onnx_data
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.7z
+*.whl
+*.appx
 /engine/model_bundle/packages/kf_ipa_synth/assets/lexicon/TIMITDIC.TXT
 /engine/vendor/
 /engine/vtl_native/native/*.dll
-/refs/
 
-# 依赖与构建产物
+# 依赖、构建产物与工具缓存
 node_modules/
 dist/
 dist-public/
@@ -37,12 +59,30 @@ build/
 src-tauri/target/
 .cache/
 .playwright-cli/
+.vitest-cache/
+coverage/
+playwright-report/
+test-results/
+.venv/
+venv/
+env/
+*.tsbuildinfo
 
-# Python 临时文件
+# Python / 临时文件与日志
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.log
+*.tmp
+*.bak
+*.orig
+*.swp
 
-# 系统垃圾文件
+# 编辑器与系统垃圾文件
+.vscode/
+.idea/
+*.suo
+*.user
 .DS_Store
 Thumbs.db
+Desktop.ini

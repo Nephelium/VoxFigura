@@ -1,9 +1,15 @@
 import {
   PHONATION_M27_ANCHORS,
+  PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
+  assertValidF0Hz,
+  checkRange,
+  fail,
   interpolateGlottis10D,
+  ok,
   type Clip,
   type GlottisM27Params,
+  type Result,
   type SegmentAnchor,
   type TractParamName,
 } from '@vocalcut/core';
@@ -15,7 +21,9 @@ import {
   type TractPoseExtras,
 } from '@/data/ptb-ipa-presets';
 import { panelSnapshots } from '@/data/panel-snapshots';
+import { textPoseSource } from '@/data/ipa-pose-source';
 import { m27Session } from '@/components/research/m27-session';
+import { stageLayer } from '@/components/studio/nle-timeline';
 import { trackFrameAt } from '@/components/research/annotation-edit';
 import {
   VOQS_BUILTIN_PRESET_DEFAULTS,
@@ -142,17 +150,29 @@ function swanPhoneAtPhase(phase01: number, english = false): string {
   return 'n';
 }
 
-function row27ToTractAndGlottis(
+export function row27ToTractAndGlottis(
   row: readonly number[],
   fallbackTract: Record<TractParamName, number>,
   fallbackGlottis: GlottisM27Params,
-): { params: Record<TractParamName, number>; glottis: GlottisM27Params } {
-  if (row.length < 19) return { params: { ...fallbackTract }, glottis: { ...fallbackGlottis } };
+): Result<{ params: Record<TractParamName, number>; glottis: GlottisM27Params }> {
+  if (row.length < 19) {
+    return fail({
+      code: 'validation_error',
+      field: 'm27_row',
+      value: row.length,
+      hint: `M27 控制行维度不足（至少需要 19 维，实际 ${row.length}）`,
+    });
+  }
+  const f0Res = assertValidF0Hz('m27.f0_hz', row[17]);
+  if (!f0Res.ok) return f0Res;
+  const prRes = checkRange(row[18], PRESSURE_LIMIT_PA, 'm27.pr_pa', 'Pa');
+  if (!prRes.ok) return prRes;
+
   const arr19 = [...row.slice(0, 14), fallbackTract.TRX ?? 0, fallbackTract.TRY ?? 0, ...row.slice(14, 17)];
   const params = tractArray19ToRecord(arr19);
   const glottis: GlottisM27Params = {
-    f0_hz: Number.isFinite(row[17]) && row[17] > 20 ? row[17] : fallbackGlottis.f0_hz,
-    pr_pa: Number.isFinite(row[18]) ? Math.max(0, Math.min(1600, row[18])) : fallbackGlottis.pr_pa,
+    f0_hz: f0Res.value,
+    pr_pa: prRes.value,
     xb_cm: row[19] ?? fallbackGlottis.xb_cm,
     xt_cm: row[20] ?? fallbackGlottis.xt_cm,
     ca_cm2: row[21] ?? fallbackGlottis.ca_cm2,
@@ -162,7 +182,27 @@ function row27ToTractAndGlottis(
     fl: row[25] ?? fallbackGlottis.fl,
     shim: row[26] ?? fallbackGlottis.shim,
   };
-  return { params, glottis };
+  return ok({ params, glottis });
+}
+
+export function computeShiftedPresetF0(baseF0Hz: number, f0ShiftSemitones: number): Result<number> {
+  const baseChk = assertValidF0Hz('glottis.f0_hz', baseF0Hz);
+  if (!baseChk.ok) return baseChk;
+  const shifted = baseF0Hz * Math.pow(2, f0ShiftSemitones / 12);
+  return assertValidF0Hz(
+    'preset.shifted_f0_hz',
+    shifted,
+    `预设移调后基频 ${Number.isFinite(shifted) ? shifted.toFixed(1) : shifted} Hz 须为正有限值 (> 0 Hz)`,
+  );
+}
+
+function row27TractParamsForDisplay(
+  row: readonly number[],
+  fallbackTract: Record<TractParamName, number>,
+): Record<TractParamName, number> {
+  if (row.length < 17) return { ...fallbackTract };
+  const arr19 = [...row.slice(0, 14), fallbackTract.TRX ?? 0, fallbackTract.TRY ?? 0, ...row.slice(14, 17)];
+  return tractArray19ToRecord(arr19);
 }
 
 function lerpTract(
@@ -195,6 +235,51 @@ function lerpExtras(a: TractPoseExtras, b: TractPoseExtras, alpha: number): Trac
       number,
     ],
   });
+}
+
+export function hasAnyRealExperimentData(store: WorkbenchStore, contextSource?: string): boolean {
+  if (contextSource === 'explore' && store.activeWorkspace.value === 'explore') {
+    return true;
+  }
+  const syn = panelSnapshots.synthesis.value;
+  const activeClip = syn?.clip ?? store.project.value.clips[store.activeClipId.value] ?? null;
+  if (syn?.audioBuffer || store.annotationAudioBuffer.value || (activeClip && activeClip.syllable_order.length > 0)) {
+    return true;
+  }
+  if (panelSnapshots.ipa.value !== null) {
+    return true;
+  }
+  if (
+    m27Session.rows.value.length > 0 ||
+    Boolean(
+      m27Session.sourceFile.value ||
+      m27Session.decodedBuffer.value ||
+      m27Session.outputs.value.neural ||
+      m27Session.outputs.value.physical,
+    )
+  ) {
+    return true;
+  }
+  if (panelSnapshots.mixer.value?.outputBlob || panelSnapshots.mixer.value?.inputBlob) {
+    return true;
+  }
+  if (panelSnapshots.continuum.value && panelSnapshots.continuum.value.cells.length > 0) {
+    return true;
+  }
+  if (panelSnapshots.dialect.value && panelSnapshots.dialect.value.tones.length > 0) {
+    return true;
+  }
+  if (
+    panelSnapshots.arranger.value &&
+    (panelSnapshots.arranger.value.notes.length > 0 || Boolean(panelSnapshots.arranger.value.audioBuffer))
+  ) {
+    return true;
+  }
+  const savedNle = stageLayer(store.project.value, 'v0')?.keys?.nle_meta;
+  if (Array.isArray(savedNle) && savedNle.length > 0) {
+    return true;
+  }
+  return false;
 }
 
 export function listAvailablePlaybackSources(store: WorkbenchStore): CardPlaybackSourceInfo[] {
@@ -393,13 +478,17 @@ export function evaluateDynamicCardState(opts: {
     if (syn?.m27RowsPa?.length) {
       const idx = Math.max(0, Math.min(syn.m27RowsPa.length - 1, Math.round(absTime_s * 50 - 0.5)));
       const mapped = row27ToTractAndGlottis(syn.m27RowsPa[idx], baseParamsA, baseGlottis);
-      paramsA = mapped.params;
-      glottis = mapped.glottis;
+      if (mapped.ok) {
+        paramsA = mapped.value.params;
+        glottis = mapped.value.glottis;
+      } else {
+        paramsA = row27TractParamsForDisplay(syn.m27RowsPa[idx], baseParamsA);
+      }
       if (vowelSpan) {
         for (let k = Math.max(0, idx - 18); k <= idx; k += 2) {
           const tSmp = audioStartSmp + (k + 0.5) * (SAMPLE_RATE_HZ / 50);
           if (tSmp < vowelSpan.start_smp || tSmp >= vowelSpan.end_smp) continue;
-          const m = computeAnalyticalMetrics(row27ToTractAndGlottis(syn.m27RowsPa[k], baseParamsA, baseGlottis).params);
+          const m = computeAnalyticalMetrics(row27TractParamsForDisplay(syn.m27RowsPa[k], baseParamsA));
           trailPoints.push({ f1: m.f1_hz, f2: m.f2_hz });
         }
       }
@@ -437,13 +526,17 @@ export function evaluateDynamicCardState(opts: {
     if (rows.length > 0) {
       const idx = Math.max(0, Math.min(rows.length - 1, Math.round(absTime_s * 50 - 0.5)));
       const mapped = row27ToTractAndGlottis(rows[idx], baseParamsA, baseGlottis);
-      paramsA = mapped.params;
-      glottis = mapped.glottis;
+      if (mapped.ok) {
+        paramsA = mapped.value.params;
+        glottis = mapped.value.glottis;
+      } else {
+        paramsA = row27TractParamsForDisplay(rows[idx], baseParamsA);
+      }
       if (hitIv && isVowelOrApproximant(hitIv.text)) {
         for (let k = Math.max(0, idx - 20); k <= idx; k += 2) {
           const t_s = (k + 0.5) / 50;
           if (t_s < hitIv.xmin || t_s >= hitIv.xmax) continue;
-          const m = computeAnalyticalMetrics(row27ToTractAndGlottis(rows[k], baseParamsA, baseGlottis).params);
+          const m = computeAnalyticalMetrics(row27TractParamsForDisplay(rows[k], baseParamsA));
           trailPoints.push({ f1: m.f1_hz, f2: m.f2_hz });
         }
       }
@@ -468,8 +561,12 @@ export function evaluateDynamicCardState(opts: {
     if (arr?.m27RowsPa?.length) {
       const idx = Math.max(0, Math.min(arr.m27RowsPa.length - 1, Math.round(absTime_s * 50 - 0.5)));
       const mapped = row27ToTractAndGlottis(arr.m27RowsPa[idx], baseParamsA, baseGlottis);
-      paramsA = mapped.params;
-      glottis = mapped.glottis;
+      if (mapped.ok) {
+        paramsA = mapped.value.params;
+        glottis = mapped.value.glottis;
+      } else {
+        paramsA = row27TractParamsForDisplay(arr.m27RowsPa[idx], baseParamsA);
+      }
     } else if (arr?.poseFrames?.length) {
       const fr = trackFrameAt(arr.poseFrames, clipProgress01);
       if (fr) paramsA = tractArray19ToRecord(fr.params);
@@ -526,6 +623,27 @@ export function evaluateDynamicCardState(opts: {
     const totalSec = mix?.outputDuration_s || mix?.inputDuration_s || safeDur;
     clipProgress01 = Math.max(0, Math.min(1, absTime_s / Math.max(0.05, totalSec)));
     utteranceIpa = mix?.presetLabel ?? '气声调制';
+    if (!mix || mix.mode !== 'dual') {
+      const presetId = mix?.presetId ?? 'breathy';
+      const targetPreset = VOQS_BUILTIN_PRESET_DEFAULTS[presetId] ?? VOQS_BUILTIN_PRESET_DEFAULTS.breathy;
+      const knots = mix?.curves?.preset ?? [{ t: 0, v: 0.05 }, { t: 0.5, v: 0.85 }, { t: 1, v: 0.65 }];
+      const interp = mix?.interpolation ?? 'smoothstep';
+      const blendAtT = Math.max(0, Math.min(1, evalCurveAt(knots, clipProgress01, interp)));
+      const targetKey = (['breathy', 'pressed', 'creaky', 'falsetto', 'whisper'].includes(presetId)
+        ? presetId
+        : 'breathy') as keyof typeof PHONATION_M27_ANCHORS;
+      const anchorB = PHONATION_M27_ANCHORS[targetKey] ?? PHONATION_M27_ANCHORS.breathy;
+      const glRes = interpolateGlottis10D(PHONATION_M27_ANCHORS.modal, anchorB, blendAtT);
+      if (glRes.ok) {
+        const nextGlottis: GlottisM27Params = { ...glRes.value };
+        const shiftSt = mix?.f0ShiftSt ?? (targetPreset?.f0_shift_semitones ?? 0);
+        const shiftedRes = computeShiftedPresetF0(nextGlottis.f0_hz, shiftSt * blendAtT);
+        if (shiftedRes.ok) {
+          nextGlottis.f0_hz = shiftedRes.value;
+        }
+        glottis = nextGlottis;
+      }
+    }
   } else if (source === 'ipa') {
     const ipa = ipaAsset ?? panelSnapshots.ipa.value;
     if (ipa) {
@@ -539,8 +657,12 @@ export function evaluateDynamicCardState(opts: {
         clipProgress01 = Math.max(0, Math.min(1, absTime_s / Math.max(0.05, totalSec)));
         const idx = Math.max(0, Math.min(rows.length - 1, Math.round(absTime_s * 50 - 0.5)));
         const mapped = row27ToTractAndGlottis(rows[idx], paramsA, baseGlottis);
-        paramsA = mapped.params;
-        glottis = mapped.glottis;
+        if (mapped.ok) {
+          paramsA = mapped.value.params;
+          glottis = mapped.value.glottis;
+        } else {
+          paramsA = row27TractParamsForDisplay(rows[idx], paramsA);
+        }
         const phones = ipa.referencePhones;
         if (phones?.length) {
           const hit = phones.find((p) => absTime_s >= p.start_s && absTime_s < p.end_s);
@@ -757,6 +879,7 @@ export async function resolvePlaybackAudioBuffer(opts: {
           annotation: true,
           clipId: clip.id,
           phrase: clip,
+          ipaPoseSource: textPoseSource.value,
           signal,
         });
       }
@@ -810,11 +933,15 @@ export async function resolvePlaybackAudioBuffer(opts: {
       const glRes = interpolateGlottis10D(PHONATION_M27_ANCHORS.modal, anchorB, blendMid);
       const glottis = glRes.ok ? glRes.value : store.currentGlottisParams.value;
       const f0Shift = targetPreset?.f0_shift_semitones ?? 0;
-      const shiftedF0 = Math.max(60, Math.min(600, glottis.f0_hz * Math.pow(2, f0Shift / 12)));
+      const shiftedRes = computeShiftedPresetF0(glottis.f0_hz, f0Shift);
+      if (!shiftedRes.ok) {
+        store.pushToast(shiftedRes.error.hint, 'warning');
+        return null;
+      }
       fullBuffer = await store.synthesizeRange({
         mode: 'physical',
         tractParams: store.currentTractParams.value,
-        glottis: { ...glottis, f0_hz: shiftedF0 },
+        glottis: { ...glottis, f0_hz: shiftedRes.value },
         durationMs: Math.round(rangeDuration_s * 1000),
         signal,
       });

@@ -35,6 +35,7 @@ from validation import (
     out_of_range_error,
     validate_glottis_frames,
     validate_pose_target_or_delta,
+    validate_positive_series,
     validate_scalar_range,
     validate_scalar_series,
     validate_tract19_frames,
@@ -46,12 +47,13 @@ _BANK_LOCK = threading.Lock()
 _INFER_LOCK = threading.Lock()
 _CACHED_MODELS = None
 _CACHED_BANK = None
+_CACHED_BANK_KEY = None
 
 # Jaw and tongue columns in the 17-dimensional tract used by both renderers.
 _LATERAL_TRACT_COLS = (3, *range(8, 17))
 
 _ARTICULATORY_DIACRITICS = frozenset(
-    "ʷʲˠˤ˞\u0303\u0308\u0318\u0319\u031c\u031d\u031e\u031f\u0320\u032a\u0334\u0339\u033a\u033b\u033c\u033d"
+    "ʷᵝʲˠˤ˞\u0303\u0308\u0318\u0319\u031c\u031d\u031e\u031f\u0320\u032a\u0334\u0339\u033a\u033b\u033c\u033d"
 )
 
 
@@ -74,7 +76,7 @@ def _secondary_diacritic_dims(active_diacs: set[str], features: np.ndarray) -> T
     is_primary_labial = float(features[3]) >= 0.8 or float(features[4]) >= 0.5
     is_primary_palatal = float(features[7]) >= 0.8
     is_primary_velar = float(features[8]) >= 0.8
-    if "ʷ" in active_diacs or "\u0339" in active_diacs or "\u031c" in active_diacs:
+    if "ʷ" in active_diacs or "ᵝ" in active_diacs or "\u0339" in active_diacs or "\u031c" in active_diacs:
         dims.add(4)  # LP
         if not is_primary_labial:
             dims.add(5)  # LD is secondary open rounding aperture on non-labial consonants
@@ -147,23 +149,44 @@ def models():
     return ("IPA2Tract-Lite", "Tract2Area-Proxy")
 
 
+def _resolve_canonical_poses_path():
+    """Select sibling `canonical_ipa_poses_narrow.json` for mounted 121-ch v4 IPA2Tract-Lite, else built-in."""
+    from m27_bridge import TT3_ROOT
+    from model_registry_runtime import LOCAL_MODEL_MANAGER
+
+    assets = TT3_ROOT / "packages" / "kf_ipa_synth" / "assets"
+    builtin_canonical = assets / "canonical_ipa_poses.json"
+    fallback = assets / "jd2_starter_fallback_poses.json"
+    try:
+        from onnx_inference import active_ipa2tract_cond_dim
+
+        if active_ipa2tract_cond_dim() == 121:
+            active_onnx = LOCAL_MODEL_MANAGER.active_path("IPA2Tract-Lite")
+            narrow_sibling = active_onnx.parent / "canonical_ipa_poses_narrow.json"
+            if narrow_sibling.is_file():
+                return narrow_sibling, fallback
+    except Exception:
+        pass
+    return builtin_canonical, fallback
+
+
 def default_pose_bank():
-    global _CACHED_BANK
-    if _CACHED_BANK is not None:
+    global _CACHED_BANK, _CACHED_BANK_KEY
+    canonical, fallback = _resolve_canonical_poses_path()
+    key = (str(canonical), str(fallback), canonical.stat().st_mtime if canonical.is_file() else 0.0)
+    if _CACHED_BANK is not None and _CACHED_BANK_KEY == key:
         return _CACHED_BANK
     with _BANK_LOCK:
-        if _CACHED_BANK is not None:
+        if _CACHED_BANK is not None and _CACHED_BANK_KEY == key:
             return _CACHED_BANK
-        from m27_bridge import M27Bridge, TT3_ROOT
+        from m27_bridge import M27Bridge
         M27Bridge.ensure_tt3_imports()
         from kf_ipa_synth.pose_bank import PoseBank
 
-        assets = TT3_ROOT / "packages" / "kf_ipa_synth" / "assets"
-        canonical = assets / "canonical_ipa_poses.json"
-        fallback = assets / "jd2_starter_fallback_poses.json"
         if not canonical.is_file() or not fallback.is_file():
             raise FileNotFoundError("IPA2Tract-Lite 默认构型库不可用")
         _CACHED_BANK = PoseBank(canonical_json=canonical, fallback_json=fallback)
+        _CACHED_BANK_KEY = key
         return _CACHED_BANK
 
 
@@ -196,9 +219,10 @@ def predict(payload: Dict[str, Any]) -> Dict[str, Any]:
     if err:
         raise AnnotationControlError(err)
     alpha = float(alpha_raw)
-    if (base.ndim != 2 or not 1 <= len(base) <= 3000 or base.shape[1] != 26 or cond.shape != (len(base), 111)
+    if (base.ndim != 2 or not 1 <= len(base) <= 3000 or base.shape[1] != 26
+            or cond.ndim != 2 or cond.shape[0] != len(base) or cond.shape[1] not in (111, 121)
             or not np.isfinite(base).all() or not np.isfinite(cond).all()):
-        raise ValueError("关键帧输入须包含 1–3000 个同长度的 111 维条件帧及 26 维基线帧")
+        raise ValueError("关键帧输入须包含 1–3000 个同长度的 111/121 维条件帧及 26 维基线帧")
     groups = {"lips": (4, 5), "jaw": (2, 3), "tongue_tip": (10, 11),
               "tongue_blade": (12, 13), "tongue_body": (8, 9), "velum": (6, 7)}
     mask = payload.get("organ_mask") or {}
@@ -353,7 +377,7 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
     if err:
         raise AnnotationControlError(err)
 
-    f0_arr, err = validate_scalar_series("f0_hz", payload.get("f0_hz"), size, 60.0, 600.0, "Hz")
+    f0_arr, err = validate_positive_series("f0_hz", payload.get("f0_hz"), size, "Hz")
     if err:
         raise AnnotationControlError(err)
     pr_arr, err = validate_scalar_series("pressure_pa", payload.get("pressure_pa"), size, 0.0, 1600.0, "Pa")
@@ -376,6 +400,7 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
 
     from model_registry_runtime import LOCAL_MODEL_MANAGER
     from onnx_inference import (
+        active_ipa2tract_cond_dim,
         apply_soft_onset_200hz as _apply_soft_onset_200hz,
         apply_unreleased_zero_pressure_200hz as _apply_unreleased_zero_pressure_200hz,
         enforce_release_modes_50hz as _enforce_release_modes_50hz,
@@ -385,12 +410,19 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
     )
 
     ensure_pure_numpy_imports()
+    ipa_cond_dim = active_ipa2tract_cond_dim()
+    ipa_phon_dim = 32 if ipa_cond_dim == 121 else 22
     bank = default_pose_bank()
-    from kf_ipa_synth.baseline import build_condition_from_segments, kf26_and_f0_to_m27
+    from kf_ipa_synth.baseline import (
+        build_condition_from_segments,
+        compute_async_baseline_50hz,
+        kf26_and_f0_to_m27,
+    )
     from kf_ipa_synth.m27_contract import denormalize_m27, normalize_m27
-    from kf_ipa_synth.phonetics import SegmentEvent, ipa_to_phon_features_checked
+    from kf_ipa_synth.phonetics import SegmentEvent, ipa_to_phon_features_32_checked, ipa_to_phon_features_checked
     from kf_ipa_synth.schema import KeyframeSpec
     from kf_ipa_synth.tract_backend import qta_filter_m27_50_to_200
+    feat_checked_fn = ipa_to_phon_features_32_checked if ipa_phon_dim == 32 else ipa_to_phon_features_checked
 
     normalized = normalize_m27(raw)
     segments: List[SegmentEvent] = []
@@ -418,6 +450,39 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
     pose_source = payload.get("pose_source")
     use_custom_pose = pose_source in ("custom", "stored")
     has_pose_targets = any(isinstance(span, dict) and "pose_target_19" in span for span in spans)
+    reference_inpaint = bool(payload.get("reference_inpaint"))
+    inpaint_spans_raw = payload.get("inpaint_spans") if reference_inpaint else None
+    keep_ref_200 = np.ones(size, dtype=np.float64) if reference_inpaint else None
+    if reference_inpaint and isinstance(inpaint_spans_raw, list) and keep_ref_200 is not None:
+        buf_frames = 10  # 50 ms coarticulatory buffer at 200 Hz on each side of edited phones
+        for raw_pair in inpaint_spans_raw:
+            if not isinstance(raw_pair, (list, tuple)) or len(raw_pair) != 2:
+                continue
+            ia, ib = raw_pair[0], raw_pair[1]
+            if type(ia) is not int or type(ib) is not int:
+                continue
+            ia = max(0, min(size, ia))
+            ib = max(ia, min(size, ib))
+            if ib <= ia:
+                continue
+            keep_ref_200[ia:ib] = 0.0
+            left_start = max(0, ia - buf_frames)
+            if left_start < ia:
+                span_l = ia - left_start
+                # 1.0 at outer edge -> 0.0 at edited boundary ia
+                u_l = np.arange(span_l, 0, -1, dtype=np.float64) / float(span_l + 1)
+                ramp_l = 0.5 * (1.0 - np.cos(np.pi * u_l))
+                keep_ref_200[left_start:ia] = np.minimum(keep_ref_200[left_start:ia], ramp_l)
+            right_end = min(size, ib + buf_frames)
+            if ib < right_end:
+                span_r = right_end - ib
+                # 0.0 at edited boundary ib -> 1.0 at outer edge
+                u_r = np.arange(1, span_r + 1, dtype=np.float64) / float(span_r + 1)
+                ramp_r = 0.5 * (1.0 - np.cos(np.pi * u_r))
+                keep_ref_200[ib:right_end] = np.minimum(keep_ref_200[ib:right_end], ramp_r)
+        if np.all(keep_ref_200 >= 1.0 - 1e-6):
+            reference_inpaint = False
+            keep_ref_200 = None
     articulation_targets: List[ArticulatorTarget] = []
     lateral_frames = np.zeros(size, dtype=bool)
     secondary_runs: List[Dict[str, Any]] = []
@@ -438,7 +503,7 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
         sym_s = str(spans[idx_s].get("ipa", ""))
         if "\u0303" in sym_s:
             return True
-        feat_s, ok_s = ipa_to_phon_features_checked(sym_s)
+        feat_s, ok_s = feat_checked_fn(sym_s)
         return bool(ok_s and feat_s[2] >= 0.5 and feat_s[13] >= 0.5)
 
     def predict_area(tract):
@@ -520,7 +585,7 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
         spec = KeyframeSpec(
             ipa="sil" if silent else symbol,
             duration_ms=max(20.0, (end - start) / 48.0),
-            f0_hz=float(np.clip(raw[mid, 17], 45.0, 580.0)),
+            f0_hz=max(1e-3, float(raw[mid, 17])),
             phonation=kf_phonation,
             role=kf_role,
         )
@@ -530,11 +595,15 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
 
         # Explicit local edits take precedence over the selected set and preserve their original blend.
         authored_mid = np.delete(normalized[mid], 17)
-        if pose_locked and not has_bell_edit:
+        is_ref_anchor = reference_inpaint and bool(span.get("reference_anchor"))
+        if is_ref_anchor:
+            kf26_target[:] = authored_mid
+            w26_mask[:] = 1.0
+        elif pose_locked and not has_bell_edit:
             kf26_target[:17] = authored_mid[:17]
             w26_mask[:17] = 1.0
         active_diacs = set() if silent else _active_articulatory_diacritics(symbol)
-        features, matched = ipa_to_phon_features_checked(symbol) if not silent else (np.zeros(22, dtype=np.float32), False)
+        features, matched = feat_checked_fn(symbol) if not silent else (np.zeros(ipa_phon_dim, dtype=np.float32), False)
         prev_lateral_hold = (
             span_idx > 0
             and str(spans[span_idx - 1].get("ipa", "")) == symbol
@@ -556,7 +625,8 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
         same_prev = (span_idx > 0) and (str(spans[span_idx - 1].get("ipa", "")) == symbol)
         same_next = (span_idx + 1 < len(spans)) and (str(spans[span_idx + 1].get("ipa", "")) == symbol)
 
-        if use_custom_pose and not silent and not pose_locked and not has_bell_edit:
+        span_uses_custom = use_custom_pose and ("pose_target_19" in span or not has_pose_targets)
+        if span_uses_custom and not silent and not pose_locked and not has_bell_edit and not is_ref_anchor:
             selected = None
             if "pose_target_19" in span:
                 target_arr, err = validate_tract19_frames(
@@ -690,7 +760,7 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
                             hold_right=next_silent if active_diacs else False,
                         ))
         elif (
-            not use_custom_pose and not silent and not pose_locked and not has_bell_edit
+            not span_uses_custom and not silent and not pose_locked and not has_bell_edit and not is_ref_anchor
             and matched and active_diacs and role in ("normal", "closure", "release", "aspiration")
             and a < b and not np.any(reference_covered_200[a:b])
         ):
@@ -778,9 +848,28 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
     centers = np.arange((size + 3) // 4) * 4 + 2
     sample = np.minimum(centers, size - 1)
     f0 = normalized[sample, 17]
-    cond, base, _, _ = build_condition_from_segments(
-        segments, len(f0), f0, lambda seg: targets[id(seg)], mask_override=mask_override,
+    cond, base, w_mask_50, _ = build_condition_from_segments(
+        segments, len(f0), f0, lambda seg: targets[id(seg)], mask_override=mask_override, phon_dim=ipa_phon_dim,
     )
+    if reference_inpaint and keep_ref_200 is not None:
+        # Inject exact frame-by-frame real reconstructed 26-D anchors outside edited phones so
+        # IPA2Tract-Lite inpaints coarticulated vocal-tract, glottis, and pressure seamlessly.
+        keep_ref_50 = keep_ref_200[sample]
+        ref_kf26_50 = np.clip(np.delete(normalized[sample], 17, axis=1), -1.0, 1.0).astype(np.float32)
+        g_pose_50 = np.where(w_mask_50 > 1e-6, cond[:, 26:52] / np.maximum(w_mask_50, 1e-6), base).astype(np.float32)
+        w_inpaint = w_mask_50.copy()
+        anchor_50 = keep_ref_50 >= 0.99
+        buffer_50 = (keep_ref_50 > 1e-3) & (~anchor_50)
+        if np.any(anchor_50):
+            g_pose_50[anchor_50] = ref_kf26_50[anchor_50]
+            w_inpaint[anchor_50] = 1.0
+        if np.any(buffer_50):
+            # Let IPA2Tract-Lite freely coarticulate inside the 50 ms transition collar
+            w_inpaint[buffer_50] = 0.0
+        base = compute_async_baseline_50hz(g_pose_50, w_inpaint)
+        cond[:, :26] = base
+        cond[:, 26:52] = g_pose_50 * w_inpaint
+        cond[:, 52:78] = w_inpaint
     with _INFER_LOCK:
         output_26 = predict_ipa2tract(
             cond,
@@ -846,22 +935,37 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
                 delta27[m_col] += native_d
                 peak_native = float(rows_200[peak_abs, m_col]) + delta27[m_col]
                 peak_ui = peak_native / 10.0 if m_col == 18 else peak_native
-                lo_ui = 60.0 if m_col == 17 else float(M27_MIN_PA[m_col])
-                hi_ui = float(M27_MAX_PA[m_col])
-                if peak_ui < lo_ui - CONTROL_TOL or peak_ui > hi_ui + CONTROL_TOL:
-                    raise AnnotationControlError(
-                        out_of_range_error(
-                            f"articulation_spans[{span_idx}].pose_delta[{M27_PARAM_NAMES[m_col]}]",
-                            round(peak_ui, 5),
-                            lo_ui,
-                            hi_ui,
-                            M27_UNITS[m_col],
-                            f"微调峰值帧 {M27_PARAM_NAMES[m_col]} ({peak_ui:.4f}) 超出合法范围 [{lo_ui}, {hi_ui}]",
+                if m_col == 17:
+                    if not math.isfinite(peak_ui) or peak_ui <= 0.0:
+                        raise AnnotationControlError(
+                            positive_scalar_error(
+                                f"articulation_spans[{span_idx}].pose_delta[F0]",
+                                round(peak_ui, 5) if math.isfinite(peak_ui) else peak_ui,
+                                "Hz",
+                                f"微调峰值帧 F0 ({peak_ui}) 须为正有限值 (> 0 Hz)",
+                            )
                         )
-                    )
+                else:
+                    lo_ui = float(M27_MIN_PA[m_col])
+                    hi_ui = float(M27_MAX_PA[m_col])
+                    if peak_ui < lo_ui - CONTROL_TOL or peak_ui > hi_ui + CONTROL_TOL:
+                        raise AnnotationControlError(
+                            out_of_range_error(
+                                f"articulation_spans[{span_idx}].pose_delta[{M27_PARAM_NAMES[m_col]}]",
+                                round(peak_ui, 5),
+                                lo_ui,
+                                hi_ui,
+                                M27_UNITS[m_col],
+                                f"微调峰值帧 {M27_PARAM_NAMES[m_col]} ({peak_ui:.4f}) 超出合法范围 [{lo_ui}, {hi_ui}]",
+                            )
+                        )
             delta_full_200[a:b] += bell[:, None] * delta27[None, :]
-        rows_200 = np.clip(rows_200 + delta_full_200, M27_MIN.astype(np.float64), M27_MAX.astype(np.float64))
-        rows_50 = np.clip(rows_50 + delta_full_200[sample], M27_MIN.astype(np.float64), M27_MAX.astype(np.float64))
+        clip_min = M27_MIN.astype(np.float64).copy()
+        clip_max = M27_MAX.astype(np.float64).copy()
+        clip_min[17] = 1e-3
+        clip_max[17] = np.inf
+        rows_200 = np.clip(rows_200 + delta_full_200, clip_min, clip_max)
+        rows_50 = np.clip(rows_50 + delta_full_200[sample], clip_min, clip_max)
         rows_200[zero_pr_200, 18] = 0.0
         rows_50[zero_pr_50, 18] = 0.0
 
@@ -893,6 +997,17 @@ def apply_annotation_trajectory(payload: Dict[str, Any]) -> Tuple[Dict[str, Any]
             rows_50[ref_50, 18] = rows_200[sample[ref_50], 18]
             rows_50[ref_50, 19:] = rows_200[sample[ref_50], 19:]
             rows_50[zero_pr_50, 18] = 0.0
+
+    if reference_inpaint and keep_ref_200 is not None:
+        # Preserve untouched real human Vox2Tract-Lite frames verbatim and crossfade across the 50 ms collar.
+        w200 = keep_ref_200[:, None]
+        rows_200[:, :17] = rows_200[:, :17] * (1.0 - w200) + raw[:, :17] * w200
+        rows_200[:, 18:] = rows_200[:, 18:] * (1.0 - w200) + raw[:, 18:] * w200
+        w50 = keep_ref_200[sample, None]
+        rows_50[:, :17] = rows_50[:, :17] * (1.0 - w50) + raw[sample, :17] * w50
+        rows_50[:, 18:] = rows_50[:, 18:] * (1.0 - w50) + raw[sample, 18:] * w50
+        rows_200[zero_pr_200, 18] = 0.0
+        rows_50[zero_pr_50, 18] = 0.0
 
     result = tract_arr.copy()
     result[:, indices] = rows_200[:, :17]

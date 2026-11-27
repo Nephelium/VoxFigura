@@ -53,8 +53,12 @@ describe('arranger singing F0', () => {
     const erased = eraseArrangerPitch(drawn.value, 30000, 31680);
     expect(erased.map(pin => [pin.start_smp, pin.end_smp])).toEqual([[29040, 30000], [31680, 33840], [38640, 43441]]);
     expect(erased[2]).toBe(drawn.value[1]);
-    expect(drawArrangerPitch([], [{ t_smp: 29040, f0_hz: 601 }], notes)).toMatchObject({
-      ok: false, error: { code: 'out_of_range', allowed: { min: 60, max: 600 } },
+    expect(drawArrangerPitch([], [{ t_smp: 29040, f0_hz: 20 }, { t_smp: 31000, f0_hz: 1200 }], notes).ok).toBe(true);
+    expect(drawArrangerPitch([], [{ t_smp: 29040, f0_hz: 0 }], notes)).toMatchObject({
+      ok: false, error: { code: 'out_of_range', allowed: { min: 0, exclusiveMin: true, unit: 'Hz' } },
+    });
+    expect(drawArrangerPitch([], [{ t_smp: 29040, f0_hz: -5 }], notes)).toMatchObject({
+      ok: false, error: { code: 'out_of_range', allowed: { min: 0, exclusiveMin: true, unit: 'Hz' } },
     });
     expect(drawArrangerPitch([], [{ t_smp: 29040.5, f0_hz: 250 }], notes)).toMatchObject({
       ok: false, error: { code: 'out_of_range', field: 't_smp' },
@@ -83,7 +87,8 @@ describe('arranger singing F0', () => {
     expect(result?.map(pin => [pin.start_smp, pin.end_smp])).toEqual([[15600, 19440], [19440, 21921]]);
     expect(result?.[0].points[0].f0_hz).toBe(180);
     expect(result?.[1].points.at(-1)?.f0_hz).toBe(500);
-    expect(transposeArrangerPitchPins(drawn.value, [notes[1]], 24)).toBeNull();
+    const wide = transposeArrangerPitchPins(drawn.value, [notes[1]], 24);
+    expect(wide?.[1].points.at(-1)?.f0_hz).toBeCloseTo(1000, 3);
   });
 
   it('carries the authored curve and damping through arrangement compilation to the 200 Hz synthesis controls', () => {

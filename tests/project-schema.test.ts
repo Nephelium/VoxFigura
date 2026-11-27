@@ -158,8 +158,16 @@ describe('schema/project.schema.json contract synchronization', () => {
     (badSr.settings as Record<string, unknown>).sample_rate_hz = 44100;
     expect(validateAgainstSchema(schema, schema, badSr).length).toBeGreaterThan(0);
 
-    const imported = importPtbVocalJson({
+    const wideImported = importPtbVocalJson({
       frames: [{ name: 't', duration: 0.2, f0: 950 }],
+    });
+    expect(wideImported.ok).toBe(true);
+    if (wideImported.ok) {
+      expect(validateAgainstSchema(schema, schema, wideImported.value)).toEqual([]);
+    }
+
+    const imported = importPtbVocalJson({
+      frames: [{ name: 't', duration: 0.2, f0: -10 }],
     });
     expect(imported.ok).toBe(false);
     if (!imported.ok) expect(imported.error.code).toBe('out_of_range');

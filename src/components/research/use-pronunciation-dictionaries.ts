@@ -29,6 +29,7 @@ interface EntryDraft {
   row?: DictionaryRow;
   baseIpa: string;
   unit: number;
+  editedUnits: Record<number, string>;
   word: string;
   ipa: string;
   note: string;
@@ -68,6 +69,8 @@ function storedDialectProfile(id: string): SavedDialect | undefined {
   if (saved?.updatedAt) return saved;
   if (!saved && !Object.hasOwn(DIALECT_PACKS, id) && id !== 'new') return undefined;
   const profile = saved ?? builtInDialectProfile(id);
+  // Built-in presets stay clean and read-only; only recover local draft for saved dialects or legacy 'new' draft.
+  if (!saved && id !== 'new') return profile;
   const draft = readDialectDraft(id);
   return {
     ...profile,
@@ -113,6 +116,7 @@ export function usePronunciationDictionaries() {
   const changeScope = ref<'single' | 'batch'>('single');
   const batch = shallowRef<{ row: DictionaryRow; indexes: number[] }[]>();
   const scanning = ref(false);
+  const scanProgress = ref(0);
   let scanSequence = 0;
   let catalogSequence = 0;
   let importSequence = 0;
@@ -152,11 +156,32 @@ export function usePronunciationDictionaries() {
   const visibleRows = computed(() => filteredKeys.value.slice(page.value * pageSize, (page.value + 1) * pageSize)
     .map(readRow).filter((row): row is DictionaryRow => Boolean(row)));
   const editorUnits = computed(() => dictionaryIpaUnits(draft.value?.baseIpa ?? ''));
+  const pendingUnitEdits = computed<Record<number, string>>(() => {
+    const entry = draft.value;
+    if (!entry || entry.mode !== 'edit') return {};
+    const edits: Record<number, string> = { ...entry.editedUnits };
+    const original = editorUnits.value[entry.unit] ?? '';
+    if (entry.ipa.trim() !== original.trim()) edits[entry.unit] = entry.ipa;
+    else delete edits[entry.unit];
+    return edits;
+  });
+  const draftPreviewIpa = computed(() => {
+    const entry = draft.value;
+    if (!entry) return '';
+    if (entry.mode !== 'edit') return entry.ipa.trim();
+    let updated = entry.baseIpa;
+    const edits = pendingUnitEdits.value;
+    for (const [idxStr, replacement] of Object.entries(edits)) {
+      if (replacement.trim()) updated = replaceDictionaryUnits(updated, [Number(idxStr)], replacement, false);
+    }
+    return updated.trim().replace(/^[\[［]|[\]］]$/gu, '');
+  });
   const matchCount = computed(() => batch.value?.reduce((count, match) => count + match.indexes.length, 0));
 
   function clearBatch() {
     scanSequence++;
     scanning.value = false;
+    scanProgress.value = 0;
     batch.value = undefined;
   }
   function clearEditor() {
@@ -169,6 +194,10 @@ export function usePronunciationDictionaries() {
     page.value = 0;
     appliedFilter.value = { query: query.value, mode: searchMode.value };
   }
+  watch(searchMode, () => {
+    if (query.value.trim()) applySearch();
+    else appliedFilter.value = { query: '', mode: searchMode.value };
+  });
   watch(pageCount, count => { page.value = Math.min(page.value, count - 1); });
   watch(() => source.value.id, async id => {
     const sequence = ++catalogSequence;
@@ -198,7 +227,12 @@ export function usePronunciationDictionaries() {
       if (sequence === catalogSequence) loading.value = false;
     }
   }, { immediate: true });
-  watch(changeScope, clearBatch);
+  watch(changeScope, scope => {
+    clearBatch();
+    if (scope === 'batch' && rowKeys.value.length <= 2000 && draft.value?.row) {
+      void previewBatch();
+    }
+  });
   watch(personalOnly, () => {
     clearEditor();
     query.value = '';
@@ -208,7 +242,7 @@ export function usePronunciationDictionaries() {
   function openEntry(row: DictionaryRow, mode: EntryDraft['mode'] = 'edit') {
     clearEditor();
     draft.value = {
-      mode, row, baseIpa: row.ipa, unit: 0, word: row.word, ipa: mode === 'edit' ? dictionaryIpaUnits(row.ipa)[0] ?? '' : row.ipa,
+      mode, row, baseIpa: row.ipa, unit: 0, editedUnits: {}, word: row.word, ipa: mode === 'edit' ? dictionaryIpaUnits(row.ipa)[0] ?? '' : row.ipa,
       note: row.note ?? '', tone: row.tone ?? '', language: row.entry?.language ?? detectWordLanguage(row.word),
       standard: row.entry?.standard ?? '',
     };
@@ -216,18 +250,33 @@ export function usePronunciationDictionaries() {
   function addEntry() {
     if (book.value) personalOnly.value = true;
     clearEditor();
-    draft.value = { mode: 'add', baseIpa: '', unit: 0, word: '', ipa: '', note: '', tone: '', language: 'zh', standard: '' };
+    draft.value = { mode: 'add', baseIpa: '', unit: 0, editedUnits: {}, word: '', ipa: '', note: '', tone: '', language: 'zh', standard: '' };
   }
   function selectVariant(ipa: string) {
     if (!draft.value) return;
     draft.value.baseIpa = ipa;
-    selectUnit(0);
+    draft.value.editedUnits = {};
+    draft.value.unit = 0;
+    draft.value.ipa = editorUnits.value[0] ?? '';
+    clearBatch();
   }
   function selectUnit(index: number) {
-    if (!draft.value) return;
+    if (!draft.value || index === draft.value.unit) return;
+    const prevIdx = draft.value.unit;
+    const prevOriginal = editorUnits.value[prevIdx] ?? '';
+    if (draft.value.ipa.trim() !== prevOriginal.trim()) {
+      draft.value.editedUnits = { ...draft.value.editedUnits, [prevIdx]: draft.value.ipa };
+    } else if (prevIdx in draft.value.editedUnits) {
+      const nextEdits = { ...draft.value.editedUnits };
+      delete nextEdits[prevIdx];
+      draft.value.editedUnits = nextEdits;
+    }
     draft.value.unit = index;
-    draft.value.ipa = editorUnits.value[index] ?? '';
+    draft.value.ipa = draft.value.editedUnits[index] ?? editorUnits.value[index] ?? '';
     clearBatch();
+    if (changeScope.value === 'batch' && rowKeys.value.length <= 2000 && draft.value.row) {
+      void previewBatch();
+    }
   }
 
   async function previewBatch() {
@@ -238,9 +287,14 @@ export function usePronunciationDictionaries() {
     if (!signature) return;
     const sequence = scanSequence;
     scanning.value = true;
+    scanProgress.value = 0;
+    const total = Math.max(1, rowKeys.value.length);
     const matches: NonNullable<typeof batch.value> = [];
     for (const [index, id] of rowKeys.value.entries()) {
-      if (index % 400 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+      if (index % 400 === 0) {
+        scanProgress.value = Math.round((index / total) * 100);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
       if (sequence !== scanSequence) return;
       const row = id === entry.row.id ? { ...entry.row, ipa: entry.baseIpa } : readRow(id);
       if (!row) continue;
@@ -248,6 +302,7 @@ export function usePronunciationDictionaries() {
       if (indexes.length) matches.push({ row, indexes });
     }
     batch.value = matches;
+    scanProgress.value = 100;
     scanning.value = false;
   }
 
@@ -257,13 +312,15 @@ export function usePronunciationDictionaries() {
     const title = name ?? (copy || !current
       ? uniqueName(`${profile.name} · 副本`, savedDialects.value.map(item => item.name)) : profile.name);
     const saved = saveDialect({ ...profile, name: title }, copy ? undefined : current?.id);
+    try { localStorage.removeItem(dialectDraftKey(saved.id)); } catch { /* ignore */ }
     selectDictionary(saved.id);
     return saved;
   }
-  function saveDialectTools(profile: SavedDialect, section: 'tone' | 'sandhi') {
+  function saveDialectTools(profile: SavedDialect, section: 'tone' | 'sandhi' | 'all') {
     try {
       saveDialectProfile(profile);
-      store.pushToast(section === 'sandhi' ? '已保存变调规则' : '已保存调型', 'success');
+      const label = section === 'sandhi' ? '已保存变调规则' : section === 'tone' ? '已保存调型' : '已保存方言工具';
+      store.pushToast(label, 'success');
     } catch (error) { notifyError(error); }
   }
 
@@ -273,13 +330,22 @@ export function usePronunciationDictionaries() {
     return [{ row: { ...entry.row, ipa: entry.baseIpa }, indexes: [entry.unit] }];
   }
 
+  function applyUnitEdits(baseIpa: string, edits: Record<number, string>): string {
+    let updated = baseIpa;
+    for (const [idxStr, replacement] of Object.entries(edits)) {
+      updated = replaceDictionaryUnits(updated, [Number(idxStr)], replacement, false);
+    }
+    return updated;
+  }
+
   function writeDialectDraft(entry: EntryDraft, profile: SavedDialect) {
     const all = changeScope.value === 'batch';
     const rows = [...profile.lexicon];
+    const singleEdits = all ? {} : { ...pendingUnitEdits.value, [entry.unit]: entry.ipa };
     for (const { row, indexes } of changes(entry)) {
       rows[Number(row.id)] = {
         text: all ? row.word : entry.word.trim(),
-        ipa: replaceDictionaryUnits(row.ipa, indexes, entry.ipa, all),
+        ipa: all ? replaceDictionaryUnits(row.ipa, indexes, entry.ipa, true) : applyUnitEdits(row.ipa, singleEdits),
         note: all ? row.note ?? '' : entry.note.trim(),
         tone: (all ? row.tone : entry.tone.trim()) || undefined,
       };
@@ -294,6 +360,7 @@ export function usePronunciationDictionaries() {
     const all = changeScope.value === 'batch';
     const builtin = builtinEditing.value;
     const entries: UserLexiconEntry[] = [];
+    const singleEdits = all ? {} : { ...pendingUnitEdits.value, [entry.unit]: entry.ipa };
     const append = (word: string, language: LexiconLang, ipa: string, scope: Parameters<typeof personalEntryForReading>[3],
       previous?: UserLexiconEntry, note?: string) => {
       const key = userLexiconEntryKey(word, language, scope);
@@ -302,13 +369,14 @@ export function usePronunciationDictionaries() {
       entries.push(next);
     };
     for (const { row, indexes } of changes(entry)) {
-      const updated = replaceDictionaryUnits(row.ipa, indexes, entry.ipa, all);
+      const updated = all ? replaceDictionaryUnits(row.ipa, indexes, entry.ipa, true) : applyUnitEdits(row.ipa, singleEdits);
       if (builtin) {
         const output = dictionaryIpaUnits(updated);
         const count = dictionaryIpaUnits(row.ipa).length;
         const choseAlternate = builtin.kind === 'english' && row.id === entry.row?.id && row.ipa !== entry.row.ipa;
         if (choseAlternate) append(row.word, 'en', output.join('.'), {});
-        const positions = choseAlternate ? output.map((_, index) => index) : indexes;
+        const editedIndexes = all ? indexes : Object.keys(singleEdits).map(Number);
+        const positions = choseAlternate ? output.map((_, index) => index) : editedIndexes;
         for (const index of positions) {
           const scope = builtInReadingScope(builtin, index, count);
           append(row.word, scope.language, output[index] ?? '', scope);
@@ -335,8 +403,14 @@ export function usePronunciationDictionaries() {
     if (!entry) return;
     const all = changeScope.value === 'batch';
     try {
-      if (!entry.word.trim() || !isDictionaryIpa(entry.ipa)
-        || (entry.mode === 'edit' && dictionaryIpaUnits(entry.ipa).length !== 1)) throw new Error('请填写有效的字词和 IPA。编辑音节时请输入一个音节');
+      const requireSingleUnit = entry.mode === 'edit' && (all || editorUnits.value.length > 1 || Boolean(builtinEditing.value));
+      const allUnitValues = entry.mode === 'edit' && !all
+        ? Object.values({ ...pendingUnitEdits.value, [entry.unit]: entry.ipa })
+        : [entry.ipa];
+      if (!entry.word.trim() || allUnitValues.some(val => !isDictionaryIpa(val))
+        || (requireSingleUnit && allUnitValues.some(val => dictionaryIpaUnits(val).length !== 1))) {
+        throw new Error(requireSingleUnit ? '请填写有效的字词和 IPA。编辑多音节或批量替换时，每个音节槽位请输入一个音节' : '请填写有效的字词和 IPA');
+      }
       if (all && !matchCount.value) throw new Error('请先预览同音节范围');
       let rowId: string | undefined;
       if (profile) {
@@ -472,7 +546,7 @@ export function usePronunciationDictionaries() {
       if (extension !== 'json') {
         const rows = readDialectTable(raw);
         if ((rows[0]?.length ?? 0) < 2) throw new Error('词表至少要有字词和 IPA 两列，以逗号或制表符分隔。可参照 CSV 示例。');
-        const header = /汉字|音标|IPA|词条|word/iu.test(rows[0].join(' '));
+        const header = /字词|读音|汉字|音标|IPA|词条|word/iu.test(rows[0].join(' '));
         tableImport.value = {
           name: file.name.replace(/\.[^.]+$/u, ''), rows, header, profile, kind: profile ? 'dialect' : 'personal',
           columns: [0, 1, header ? rows[0].findIndex(value => /备注|note/iu.test(value)) : rows[0].length > 2 ? 2 : -1,
@@ -535,8 +609,8 @@ export function usePronunciationDictionaries() {
   return {
     groups, source, book, dialect, currentPersonal, dictionaryPrefs, userLexiconBooks, builtinEditing, personalOnly,
     query, searchMode, page, pageCount, visibleRows, filteredKeys, loading, catalogError,
-    draft, editorUnits, changeScope, matchCount, scanning, selectDictionary, applySearch,
-    openEntry, addEntry, selectVariant, selectUnit, clearEditor, previewBatch, saveEntry, saveDialectTools,
+    draft, editorUnits, pendingUnitEdits, draftPreviewIpa, changeScope, matchCount, scanning, scanProgress, selectDictionary, applySearch,
+    openEntry, addEntry, selectVariant, selectUnit, clearEditor, clearBatch, previewBatch, saveEntry, saveDialectTools,
     nameDialog, beginCreate, beginRename, submitName, copyDictionary, useSelectedBook,
     deletion, beginDelete, confirmDelete, exportDictionary,
     tableImport, importError, downloadImportExample, cancelTableImport, importFile, submitTableImport,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
   SAMPLE_RATE_HZ,
   type Clip,
@@ -86,6 +86,8 @@ const selected = computed(() => anchors.value.find((item) => item.id === store.s
 const draftSymbol = ref('V');
 const draftSmp = ref(0);
 const draftDegree = ref<1 | 2 | 3>(3);
+const editorZoom = ref(1);
+let activeWindowDragCleanup: (() => void) | null = null;
 
 const draggingVoqsSymbol = ref<string | null>(null);
 const dropHoverTarget = ref<
@@ -96,7 +98,10 @@ const dropHoverTarget = ref<
 >(null);
 const laneRangeDraft = ref<{ symbol: string; startSmp: number; curSmp: number } | null>(null);
 
-const ticks = computed(() => Array.from({ length: 6 }, (_, i) => (safeDurationSmp.value * i) / 5));
+const ticks = computed(() => {
+  const divs = Math.min(24, Math.max(5, Math.round(5 * editorZoom.value)));
+  return Array.from({ length: divs + 1 }, (_, i) => (safeDurationSmp.value * i) / divs);
+});
 const pct = (sample: number) => (100 * Math.max(0, Math.min(safeDurationSmp.value, sample))) / safeDurationSmp.value;
 const seconds = (sample: number) => (sample / SAMPLE_RATE_HZ).toFixed(3);
 
@@ -104,7 +109,7 @@ const waveformBars = computed(() => {
   const buf = effAudio.value;
   if (!buf || !buf.length) return [];
   const ch = buf.getChannelData(0);
-  const bucketCount = 240;
+  const bucketCount = Math.min(960, Math.round(240 * editorZoom.value));
   const durSmp = safeDurationSmp.value;
   const audioStartSmp = effAudioOffsetSmp.value;
   const rateRatio = buf.sampleRate / SAMPLE_RATE_HZ;
@@ -154,6 +159,15 @@ function selectAnchor(anchor: PhonationAnchor) {
   store.playheadSmp.value = anchor.t_smp;
   draftSmp.value = anchor.t_smp;
   draftSymbol.value = voqsLane(anchor);
+  const b = typeof anchor.blend === 'number' && Number.isFinite(anchor.blend) ? anchor.blend : 1;
+  draftDegree.value = b <= 0.52 ? 1 : b <= 0.85 ? 2 : 3;
+}
+
+function clearDropHoverOnLeave(e: DragEvent, match: () => boolean): void {
+  const cur = e.currentTarget as HTMLElement | null;
+  const rel = e.relatedTarget as Node | null;
+  if (cur && rel && cur.contains(rel)) return;
+  if (match()) dropHoverTarget.value = null;
 }
 
 function resetDraft() {
@@ -209,12 +223,17 @@ function onLanePointerDown(profile: VoqsProfile, e: PointerEvent) {
     laneRangeDraft.value = { symbol: profile.symbol, startSmp, curSmp };
   };
 
-  const onUp = () => {
+  const cleanup = () => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    window.removeEventListener('pointercancel', onUp);
-    const range = laneRangeDraft.value;
+    window.removeEventListener('pointercancel', onCancel);
+    if (activeWindowDragCleanup === cleanup) activeWindowDragCleanup = null;
     laneRangeDraft.value = null;
+  };
+  const onCancel = () => cleanup();
+  const onUp = () => {
+    const range = laneRangeDraft.value;
+    cleanup();
     if (dragged && range && Math.abs(range.curSmp - range.startSmp) >= Math.round(SAMPLE_RATE_HZ * 0.02)) {
       const s0 = Math.min(range.startSmp, range.curSmp);
       const s1 = Math.max(range.startSmp, range.curSmp);
@@ -229,9 +248,11 @@ function onLanePointerDown(profile: VoqsProfile, e: PointerEvent) {
     }
   };
 
+  activeWindowDragCleanup?.();
+  activeWindowDragCleanup = cleanup;
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
-  window.addEventListener('pointercancel', onUp);
+  window.addEventListener('pointercancel', onCancel);
 }
 
 function startPointDrag(anchor: PhonationAnchor, e: PointerEvent) {
@@ -254,19 +275,26 @@ function startPointDrag(anchor: PhonationAnchor, e: PointerEvent) {
     store.playheadSmp.value = nextSmp;
   };
 
-  const onUp = () => {
+  const cleanup = () => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    window.removeEventListener('pointercancel', onUp);
+    window.removeEventListener('pointercancel', onCancel);
+    if (activeWindowDragCleanup === cleanup) activeWindowDragCleanup = null;
     draggingAnchor.value = null;
+  };
+  const onCancel = () => cleanup();
+  const onUp = () => {
+    cleanup();
     if (moved && nextSmp !== anchor.t_smp) {
       moveRecordedVoqsAnchor(store, anchor.id, nextSmp, safeDurationSmp.value);
     }
   };
 
+  activeWindowDragCleanup?.();
+  activeWindowDragCleanup = cleanup;
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
-  window.addEventListener('pointercancel', onUp);
+  window.addEventListener('pointercancel', onCancel);
 }
 
 // Drag-and-drop VoQS button onto phoneme / syllable / lane interval (T-13)
@@ -506,6 +534,10 @@ onMounted(() => {
   else resetDraft();
   dialog.value?.showModal();
 });
+
+onBeforeUnmount(() => {
+  activeWindowDragCleanup?.();
+});
 </script>
 
 <template>
@@ -524,6 +556,11 @@ onMounted(() => {
           </small>
         </div>
         <div class="phon-head-actions">
+          <label class="phon-zoom-ctrl" title="横向缩放时间标尺与泳道（适合长句精细定位）">
+            <span class="muted">横向缩放</span>
+            <input v-model.number="editorZoom" type="range" min="1" max="6" step="0.25" />
+            <span class="mono">{{ Math.round(editorZoom * 100) }}%</span>
+          </label>
           <button
             v-if="selectedSegmentEntry"
             type="button"
@@ -549,7 +586,13 @@ onMounted(() => {
 
       <div class="phon-edit-body">
         <!-- Unified Shared-Scroll Grid: Left Column (VoQS Buttons) + Right Column (Synchronized Waveform, Tiers & Swimlanes) -->
-        <div ref="gridScrollRef" class="phon-unified-scroll" aria-label="同步参考层与发声类型泳道矩阵">
+        <div
+          ref="gridScrollRef"
+          class="phon-unified-scroll"
+          :style="{ '--phon-zoom': String(editorZoom) }"
+          aria-label="同步参考层与发声类型泳道矩阵"
+        >
+          <div class="phon-zoom-stage">
           <!-- Sticky Synchronized Reference Top Stack (Shares exact 2-column grid alignment!) -->
           <div class="phon-sticky-top">
             <!-- 1. Time Ruler -->
@@ -616,7 +659,7 @@ onMounted(() => {
                   :title="`${syl.text} · 拖入左栏 VoQS 自动配对整音节发声类型`"
                   @click="selectHeaderSyllable(syl)"
                   @dragover="onSylDragOver(syl, $event)"
-                  @dragleave="dropHoverTarget?.kind === 'syl' && dropHoverTarget.id === syl.id && (dropHoverTarget = null)"
+                  @dragleave="clearDropHoverOnLeave($event, () => dropHoverTarget?.kind === 'syl' && dropHoverTarget.id === syl.id)"
                   @drop="onSylDrop(syl, $event)"
                 >
                   <span>{{ syl.text }}</span>
@@ -647,7 +690,7 @@ onMounted(() => {
                   :title="`[${seg.ipa}] · 点击选中，或将左栏 VoQS 拖入此音素自动生成起止锚点`"
                   @click="selectHeaderSegment(syl, seg)"
                   @dragover="onSegDragOver(syl, seg, $event)"
-                  @dragleave="dropHoverTarget?.kind === 'seg' && dropHoverTarget.id === seg.id && (dropHoverTarget = null)"
+                  @dragleave="clearDropHoverOnLeave($event, () => dropHoverTarget?.kind === 'seg' && dropHoverTarget.id === seg.id)"
                   @drop="onSegDrop(syl, seg, $event)"
                 >
                   {{ seg.ipa }}
@@ -693,7 +736,7 @@ onMounted(() => {
                   :title="`点击定位或横向拖选区间写入 ${profile.symbol} · ${profile.label}`"
                   @pointerdown="onLanePointerDown(profile, $event)"
                   @dragover="onLaneDragOver(profile, $event)"
-                  @dragleave="dropHoverTarget?.kind === 'lane' && (dropHoverTarget = null)"
+                  @dragleave="clearDropHoverOnLeave($event, () => dropHoverTarget?.kind === 'lane')"
                   @drop="onLaneDrop(profile, $event)"
                 >
                   <div class="phon-map-playhead" :style="{ left: pct(store.playheadSmp.value) + '%' }" />
@@ -740,6 +783,7 @@ onMounted(() => {
                 </div>
               </div>
             </template>
+          </div>
           </div>
         </div>
 
@@ -811,7 +855,7 @@ onMounted(() => {
 
           <div class="phon-list-label">全部锚点 · {{ anchors.length }}</div>
           <p v-if="!anchors.length" class="muted phon-empty">
-            可拖拽左侧 VoQS 到顶部音素块自动生成配对锚点，或在泳道内点击写入单点。
+            可拖拽左侧 VoQS 到顶部音素块或在泳道内横向拖选自动生成配对锚点，也可点击上方「写入声门锚点」写入单点。
           </p>
           <div v-else class="phon-anchor-list">
             <button
@@ -844,18 +888,29 @@ onMounted(() => {
   margin: auto;
   padding: 0;
   border: 1px solid var(--panel-border);
-  border-radius: var(--r-ctrl, 12px);
-  background: var(--panel, #f4f7fb);
-  color: var(--text, #19263a);
+  border-radius: var(--r-panel);
+  background: var(--panel);
+  color: var(--text);
   overflow: hidden;
   --phon-left-col: 204px;
+  --phon-zoom: 1;
 }
 .phonation-editor[open] {
   display: flex;
   flex-direction: column;
 }
 .phonation-editor::backdrop {
-  background: #19283b75;
+  background: var(--overlay);
+}
+.phon-zoom-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.833333rem;
+  margin-right: 4px;
+}
+.phon-zoom-ctrl input {
+  width: 74px;
 }
 .phon-edit-head {
   min-height: 46px;
@@ -889,22 +944,26 @@ onMounted(() => {
   overflow: hidden;
 }
 
-/* Single shared vertical scroll container ensures 100% horizontal & vertical alignment */
+/* Single shared scroll container ensures 100% horizontal & vertical alignment */
 .phon-unified-scroll {
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
   scrollbar-width: thin;
+}
+
+.phon-zoom-stage {
+  min-width: 100%;
+  width: calc(var(--phon-left-col) + (100% - var(--phon-left-col)) * var(--phon-zoom));
 }
 
 .phon-sticky-top {
   position: sticky;
   top: 0;
-  z-index: 8;
+  z-index: var(--z-sticky);
   background: var(--panel);
   border-bottom: 2px solid var(--panel-border);
-  box-shadow: 0 2px 8px color-mix(in srgb, #000 8%, transparent);
+  box-shadow: var(--panel-shadow);
 }
 
 .phon-sync-row,
@@ -915,6 +974,9 @@ onMounted(() => {
 }
 
 .phon-row-hdr {
+  position: sticky;
+  left: 0;
+  z-index: var(--z-base);
   display: flex;
   align-items: center;
   gap: 5px;
@@ -951,7 +1013,7 @@ onMounted(() => {
   transform: none;
   padding-left: 4px;
 }
-.phon-map-ticks span:last-child {
+.phon-map-ticks span:last-of-type {
   transform: translateX(-100%);
   padding-right: 4px;
 }
@@ -1060,10 +1122,14 @@ onMounted(() => {
 }
 
 .phon-type-cell {
+  position: sticky;
+  left: 0;
+  z-index: var(--z-base);
   display: flex;
   align-items: center;
   padding: 3px 6px;
   border-right: 1px solid var(--panel-border);
+  background: var(--panel);
 }
 .phon-type {
   justify-content: flex-start;

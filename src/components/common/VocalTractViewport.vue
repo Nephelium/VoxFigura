@@ -13,6 +13,7 @@ interface EmbedMountHandle {
   setTheme: (theme: Record<string, unknown>) => void;
   setSection: (index: number) => void;
   setPosePreview?: (active: boolean) => void;
+  setPlaying?: (active: boolean) => void;
   resetView: () => void;
   destroy: () => void;
 }
@@ -83,13 +84,14 @@ import {
 import { loadReferenceGeometry, referenceFrame, paintReferenceFrame, type ReferenceClip } from '@/data/reference-geometry';
 import { interpM27AnimState, renderM27TractSvg } from '@/vendor/m27-tract-studio/tract-renderer.js';
 import type { M27TrajectoryAnim } from '@vocalcut/model-adapters';
-import { resolveVtlPose, type TongueRootGesture } from '@/data/vtl-pose-client';
+import { getCachedVtlPose, resolveVtlPose, type TongueRootGesture } from '@/data/vtl-pose-client';
 
 const props = withDefaults(
   defineProps<{
     focusOral?: boolean;
     sectionIndex?: number;
     posePreview?: boolean;
+    playing?: boolean;
     pauseUpdates?: boolean;
     referenceSample?: string;
     referenceTimeSec?: number;
@@ -115,6 +117,7 @@ const props = withDefaults(
     linkLips?: boolean;
     transparentBg?: boolean;
     compact?: boolean;
+    dockHud?: boolean;
     camera?: { zoom: number; pan: [number, number] } | null;
     visualVariant?: 'solid' | 'overlay-primary' | 'overlay-ghost';
   }>(),
@@ -123,7 +126,6 @@ const props = withDefaults(
     referenceSample: '',
     referenceTimeSec: 0,
     extras: null,
-    viewMode: 'sagittal',
     allowViewToggle: true,
     interactive: true,
     showGrid: false,
@@ -136,6 +138,7 @@ const props = withDefaults(
     linkLips: true,
     transparentBg: false,
     compact: false,
+    dockHud: false,
     camera: null,
     visualVariant: 'solid',
   },
@@ -155,7 +158,11 @@ const store = useWorkbenchStore();
 const embedHostRef = ref<HTMLDivElement | null>(null);
 const svgRef = ref<SVGSVGElement | null>(null);
 
-const localViewMode = ref<'sagittal' | 'model'>(props.viewMode);
+const preferredViewMode = computed<'sagittal' | 'model'>(() =>
+  store.defaultTractViewMode.value === '3d' ? 'model' : 'sagittal',
+);
+const userOverrodeViewMode = ref(false);
+const localViewMode = ref<'sagittal' | 'model'>(props.viewMode ?? preferredViewMode.value);
 const embedReady = ref(false);
 const embedFailed = ref(false);
 const localState = shallowRef<Record<string, unknown> | null>(null);
@@ -208,6 +215,11 @@ function buildPoseSig(vec: number[], ex: TractPoseExtras): string {
 }
 
 const effectiveMetadata = computed(() => props.metadata ?? store.engineMeta.value);
+const isPlanarSpeaker = computed(() => {
+  const meta = effectiveMetadata.value;
+  if (!meta) return false;
+  return String(meta.speaker ?? '').endsWith('-2D') || Boolean(meta.planar);
+});
 const effectiveState = computed(() => {
   if (props.state) return props.state;
   if (isIndependentPose.value) return localState.value;
@@ -340,9 +352,10 @@ async function tryMountRealEmbed(): Promise<void> {
     const mounted = await mod.mountVocalTract(host, {
       metadata: meta,
       state: st,
-      view: localViewMode.value,
+      view: isPlanarSpeaker.value ? 'sagittal' : localViewMode.value,
       options: getEmbedOptions(),
       linkLips: props.linkLips,
+      captureUndo: false,
       // Do NOT pass theme keys like `dark`/`panel`/`muted`/`line`; embed.mjs paint() would delete
       // document.documentElement.dataset.theme and override global workbench variables.
       theme: null,
@@ -441,6 +454,7 @@ async function tryMountRealEmbed(): Promise<void> {
     embedHandle = mounted;
     if (props.sectionIndex != null) embedHandle.setSection(props.sectionIndex);
     embedHandle.setPosePreview?.(Boolean(props.posePreview));
+    embedHandle.setPlaying?.(Boolean(props.playing));
     const newest = effectiveState.value;
     if (newest && newest !== st) embedHandle.update(newest);
     applyCameraToViewer();
@@ -459,22 +473,49 @@ async function tryMountRealEmbed(): Promise<void> {
   }
 }
 
-function switchView(next: 'sagittal' | 'model'): void {
-  localViewMode.value = next;
-  emit('update:viewMode', next);
+function applyViewMode(next: 'sagittal' | 'model', shouldEmit: boolean): void {
+  const target: 'sagittal' | 'model' = next === 'model' && isPlanarSpeaker.value ? 'sagittal' : next;
+  localViewMode.value = target;
+  if (shouldEmit) emit('update:viewMode', target);
   if (embedHandle) {
     try {
-      embedHandle.setView(next);
+      embedHandle.setView(target);
     } catch {
       embedHandle.destroy();
       embedHandle = null;
       embedReady.value = false;
       void tryMountRealEmbed();
     }
-  } else if (next === 'model' && !embedReady.value) {
+  } else if (target === 'model' && !embedReady.value && shouldEmit) {
     store.pushToast('3D 空间声道模型需连接 VTL 2.4 几何引擎，当前以 2D 工程剖面展示', 'info', 2600);
   }
 }
+
+function switchView(next: 'sagittal' | 'model'): void {
+  userOverrodeViewMode.value = true;
+  applyViewMode(next, true);
+}
+
+watch(
+  () => props.viewMode,
+  (next) => {
+    if (next !== undefined && next !== localViewMode.value) {
+      applyViewMode(next, false);
+    }
+  },
+);
+
+watch(preferredViewMode, (next) => {
+  if (props.viewMode === undefined && !userOverrodeViewMode.value && next !== localViewMode.value) {
+    applyViewMode(next, false);
+  }
+});
+
+watch(isPlanarSpeaker, (planar) => {
+  if (planar && localViewMode.value === 'model') {
+    applyViewMode('sagittal', true);
+  }
+});
 
 const reference = shallowRef<ReferenceClip | null>(null);
 const referenceError = ref('');
@@ -510,6 +551,7 @@ watch([svgRef, offlineFrame, () => props.referenceAnimation, () => props.referen
 
 watch(() => props.sectionIndex, index => { if (index != null) embedHandle?.setSection(index); });
 watch(() => props.posePreview, active => embedHandle?.setPosePreview?.(Boolean(active)));
+watch(() => props.playing, active => embedHandle?.setPlaying?.(Boolean(active)));
 watch(() => [props.interactive, props.enabledHandles] as const, ([editable, enabledHandles]) => {
   embedHandle?.setOptions({ editable, enabledHandles });
 });
@@ -557,16 +599,28 @@ watch(
 );
 
 watch(
-  () => [mergedParams.value, effectiveExtras.value, store.engineStatus.value,props.pauseUpdates] as const,
-  ([next, nextEx]) => {
-    if (props.referenceOnly || props.pauseUpdates || suppressPoseWatch || store.engineStatus.value !== 'python-vtl') return;
+  () => [mergedParams.value, effectiveExtras.value, store.engineStatus.value, props.pauseUpdates, Boolean(props.state)] as const,
+  ([next, nextEx, , , hasExternalState]) => {
+    if (props.referenceOnly || props.pauseUpdates || suppressPoseWatch || hasExternalState || store.engineStatus.value !== 'python-vtl') return;
     const vec = tractRecordToArray19(next);
     const sig = buildPoseSig(vec, nextEx);
     if (sig === lastPushedParamSig) return;
     lastPushedParamSig = sig;
 
     if (isIndependentPose.value || !props.interactive) {
-      localPoseRequest = { vector:vec,extras:nextEx };
+      const spk = typeof props.metadata?.speaker === 'string'
+        ? props.metadata.speaker
+        : store.project.value.voices[store.activeVoiceId.value]?.speaker ?? 'JD2';
+      const cached = getCachedVtlPose({ speaker: spk, section_count: 65, params: vec, ...nextEx });
+      if (cached) {
+        localPoseEpoch++;
+        localPoseRequest = null;
+        const resolved = (cached.state as Record<string, unknown>) ?? cached;
+        localState.value = resolved;
+        emit('poseResolved', resolved);
+        return;
+      }
+      localPoseRequest = { vector: vec, extras: nextEx };
       void drainLocalPose();
       return;
     }
@@ -618,6 +672,7 @@ defineExpose({
     :class="{
       'is-transparent': transparentBg || visualVariant !== 'solid',
       'is-compact': compact,
+      'is-dock-hud': dockHud && !compact,
       'is-overlay-primary': visualVariant === 'overlay-primary',
       'is-overlay-ghost': visualVariant === 'overlay-ghost',
     }"
@@ -625,12 +680,15 @@ defineExpose({
     @pointermove="emitViewerCameraIfChanged"
     @pointerup="emitViewerCameraIfChanged"
   >
-    <!-- Top floating engine badge & 2D/3D toggle -->
-    <div v-if="!compact" class="vt-hud-top">
-      <span class="vt-badge mono" :class="{ live: embedReady }">
-        <i :class="embedReady ? 'dot-ok' : 'dot-warn'" style="margin-right: 4px" />
-        {{ statusBadgeText }}
-      </span>
+    <!-- Top engine badge & 2D/3D toggle -->
+    <div v-if="!compact" class="vt-hud-top" :class="{ 'is-docked': dockHud }">
+      <div class="vt-hud-left">
+        <span class="vt-badge mono" :class="{ live: embedReady }">
+          <i :class="embedReady ? 'dot-ok' : 'dot-warn'" style="margin-right: 4px" />
+          {{ statusBadgeText }}
+        </span>
+        <slot name="hud-meta" />
+      </div>
       <div v-if="allowViewToggle" class="seg vt-view-seg">
         <button
           type="button"
@@ -641,7 +699,9 @@ defineExpose({
         </button>
         <button
           type="button"
-          :disabled="!embedReady" title="3D 视图需要实时 VTL 几何" :class="{ active: embedReady && localViewMode === 'model' }"
+          :disabled="!embedReady || isPlanarSpeaker"
+          :title="isPlanarSpeaker ? '当前说话人仅含 2D 矢状轮廓，不支持 3D 空间视图' : '3D 视图需要实时 VTL 几何'"
+          :class="{ active: embedReady && !isPlanarSpeaker && localViewMode === 'model' }"
           @click="switchView('model')"
         >
           3D 空间
@@ -649,14 +709,16 @@ defineExpose({
       </div>
     </div>
 
-    <!-- Real PhoneticToolbox_v3 embed.mjs mount host (always keeps real layout dimensions, never display:none) -->
-    <div ref="embedHostRef" class="vt-embed-host" :class="{ 'is-pending': !embedReady }" />
+    <div class="vt-canvas-stage">
+      <!-- Real PhoneticToolbox_v3 embed.mjs mount host (always keeps real layout dimensions, never display:none) -->
+      <div ref="embedHostRef" class="vt-embed-host" :class="{ 'is-pending': !embedReady }" />
 
-    <svg v-if="!embedReady && (referenceAnimation || offlineFrame)" ref="svgRef" class="vt-reference" role="img"
-      :aria-label="referenceAnimation ? referenceAnimationTitle + ' · 重建声道轮廓' : reference?.title + ' · 预渲染声道轮廓'" />
-    <span v-else-if="!embedReady" class="muted">{{ referenceError || (referenceSample ? '读取参考轮廓…' : '等待 VTL 声道几何') }}</span>
-    <div v-if="showGrid" class="vt-grid-overlay" aria-hidden="true" />
-    <small v-if="!embedReady && reference && !compact" class="vt-reference-label">参考样本 · {{ reference.title }}</small>
+      <svg v-if="!embedReady && (referenceAnimation || offlineFrame)" ref="svgRef" class="vt-reference" role="img"
+        :aria-label="referenceAnimation ? referenceAnimationTitle + ' · 重建声道轮廓' : reference?.title + ' · 预渲染声道轮廓'" />
+      <span v-else-if="!embedReady" class="muted">{{ referenceError || (referenceSample ? '读取参考轮廓…' : '等待 VTL 声道几何') }}</span>
+      <div v-if="showGrid && localViewMode !== 'model'" class="vt-grid-overlay" aria-hidden="true" />
+      <small v-if="!embedReady && reference && !compact" class="vt-reference-label">参考样本 · {{ reference.title }}</small>
+    </div>
   </div>
 </template>
 
@@ -669,6 +731,17 @@ defineExpose({
   min-height: 0;
   background: var(--anatomy-bg, var(--panel));
   border-radius: max(2px, calc(var(--r-panel) - 3px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.vt-canvas-stage {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -684,12 +757,32 @@ defineExpose({
   top: 6px;
   left: 8px;
   right: 8px;
-  z-index: 5;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   pointer-events: none;
+}
+
+.vt-hud-top.is-docked {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  flex: none;
+  padding: 5px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 72%, transparent);
+  background: color-mix(in srgb, var(--sidebar) 64%, var(--panel));
+  pointer-events: auto;
+}
+
+.vt-hud-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
 }
 
 .vt-hud-top > * {

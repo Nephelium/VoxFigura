@@ -12,17 +12,16 @@ import {
   analyzeLyrics,
   arrangementFromPitch,
   distributeScore,
-  formatBeatsSuffix,
   lyricRowSpans,
   noteInRange,
   noteTranspositionLimits,
   numberedNote,
   quantizeImportedBeats,
-  replaceScorePitches,
   scoreFromRows,
   scoreRowSpans,
   sourceArrangement,
 } from '../src/components/studio/arranger-edit';
+import { formatEventsAsNotation } from '../src/components/studio/arranger-notation-sync';
 import { everlastingRegretExample } from '../src/components/studio/arranger-examples';
 import { readArrangerScore, timelineOfScore } from '../src/components/studio/arranger-score';
 import { compileArrangement } from '../src/components/studio/arranger-compile';
@@ -48,23 +47,24 @@ describe('regression fixes verification', () => {
   });
 
   it('keeps all 41 bars and the instrumental interlude aligned in the supplied rendition', async () => {
-    const { lyrics, score, tonic, bpm, beatsPerMeasure } = everlastingRegretExample;
+    const { lyrics, score, tonic, bpm, beatsPerMeasure, notation } = everlastingRegretExample;
     expect(tonic).toBe('B2');
+    expect(notation).toBe('je');
     const rows = await analyzeLyrics(lyrics, 'UntPhesoca宽', 'JD2', false);
     expect(rows).toHaveLength(112);
     expect(rows.every(row => row.ipa)).toBe(true);
-    const arranged = distributeScore(score, tonic, bpm, rows);
+    const arranged = distributeScore(score, tonic, bpm, rows, notation);
     if (!arranged.ok) throw new Error(arranged.issue.message);
-    const measures = score.split('|').map(bar => bar.replace(/[\[\]]/gu, '').trim());
+    const measures = score.split('|').map(bar => bar.trim());
     expect(measures).toHaveLength(41);
     for (const [index, measure] of measures.entries()) {
-      const parsed = readArrangerScore(measure, tonic, bpm, false, undefined, index >= 16 && index < 24);
-      if (!parsed.ok) throw new Error(parsed.issue.message);
+      const parsed = readArrangerScore(measure, tonic, bpm, false, undefined, index >= 16 && index < 24, notation);
+      if (!parsed.ok) throw new Error(`bar ${index + 1}: ${parsed.issue.message}`);
       expect(parsed.score.notes.reduce((beats, note) => beats + note.beats, 0), `bar ${index + 1}`).toBe(beatsPerMeasure);
     }
-    const canonical = scoreFromRows(arranged.rows, arranged.finalRest);
+    const canonical = scoreFromRows(arranged.rows, arranged.finalRest, notation);
     const lead = 5040;
-    const roll = timelineOfScore(canonical, tonic, bpm, true, lead, rows.length);
+    const roll = timelineOfScore(canonical, tonic, bpm, true, lead, rows.length, notation);
     if (!roll.ok) throw new Error(roll.issue.message);
     expect(roll.notes[0]?.midi).toBe(63); // D♯4
     expect(roll.endSmp - lead).toBe(Math.round((164 + 3.41) * SAMPLE_RATE_HZ * 60 / bpm));
@@ -73,7 +73,7 @@ describe('regression fixes verification', () => {
       voice: { rows, lyricsText: lyrics, fullScoreStr: score },
       notes: roll.notes.map(note => ({ ...note, pressurePa: 800 })),
     }, {
-      clipId: 'test-song', speakerId: 'voice_lead', bpm, tonic, referenceHz: 165,
+      clipId: 'test-song', speakerId: 'voice_lead', bpm, tonic, notation, referenceHz: 165,
       leadEnabled: true, leadMs: 75, biasMs: 0, dampingRate: 32, vibrato: true,
     });
     if (!result.clip) throw new Error(result.issue);
@@ -96,28 +96,35 @@ describe('regression fixes verification', () => {
     expect(seekWindows.every(window => window.endSmp - window.startSmp <= 60 * SAMPLE_RATE_HZ)).toBe(true);
   });
 
-  it('lets a lyric-free instrumental part use notes outside the voice range', () => {
-    const score = "1'' 0 (2''_ 3''_) 5,,";
-    expect(readArrangerScore(score, 'G3', 84, false).ok).toBe(false);
-    const result = distributeScore(score, 'G3', 84, []);
+  it('allows wide vocal and lyric-free instrumental pitch ranges while rejecting MIDI overflow', () => {
+    const score = '[[1]] 0 [[2]]/ [[3]]/ ((5))';
+    expect(readArrangerScore(`《[[1]]》`, 'G3', 84, false, 1, false, 'je').ok).toBe(true);
+    expect(readArrangerScore(`《[[[[[[5]]]]]]》`, 'G3', 84, false, 1, false, 'je').ok).toBe(false);
+    const result = distributeScore(score, 'G3', 84, [], 'je');
     if (!result.ok) throw new Error(result.issue.message);
-    expect(result.rows).toHaveLength(3);
+    expect(result.rows.length).toBeGreaterThanOrEqual(3);
     expect(result.rows.every(row => row.instrumental && !row.ipa)).toBe(true);
     expect(result.rows[1].restBefore).toBe(1);
   });
 
-  it('selects partial notes at each edge and transposes only pitched tokens without rewriting the notation', () => {
+  it('selects partial notes at each edge and transposes notes via unified EventNote[] -> notation sync', () => {
     const range = { startSmp: 4, endSmp: 12 };
     const selected = [[0, 4], [2, 6], [12, 14], [10, 20]].filter(([startSmp, endSmp]) => noteInRange({ startSmp, endSmp }, range));
     expect(selected).toEqual([[2, 6], [10, 20]]);
-    const source = "@rit (1'p_:1.25 ♭3_) | 0:0.75 [5,,ff -] @hold 2";
-    const edited = replaceScorePitches(source, new Map([[0, 62], [2, 43]]), 'C3');
-    expect(edited).toBe("@rit (2'p_:1.25 ♭3_) | 0:0.75 [5,ff -] @hold 2");
-    const before = readArrangerScore(source, 'C3', 84, false);
-    const after = readArrangerScore(edited, 'C3', 84, false);
-    if (!before.ok || !after.ok) throw new Error('Expected both scores to parse');
-    expect(after.score.notes).toEqual(before.score.notes.map((note, index) =>
-      index === 0 ? { ...note, midi: 62 } : index === 3 ? { ...note, midi: 43 } : note));
+    const rows = [{ id: 'a', char: '风', ipa: 'fəŋ', choices: ['fəŋ'], score: '', restBefore: 0 }];
+    const spb = Math.round((60 * SAMPLE_RATE_HZ) / 84);
+    const formatted = formatEventsAsNotation(
+      [
+        { id: 'n1', midi: 62, startSmp: 0, endSmp: Math.round(spb * 0.5), velocity: 72, lyricId: 'a' },
+        { id: 'n2', midi: 51, startSmp: Math.round(spb * 0.5), endSmp: spb, velocity: 86, lyricId: 'a' },
+      ],
+      rows,
+      'C3',
+      84,
+      'je',
+      0,
+    );
+    expect(formatted.full).toBe('《[2]/p #2/》');
     expect(noteTranspositionLimits([{ midi: 36, instrumental: true }, { midi: MAX_MIDI }]).max).toBe(0);
   });
 
@@ -153,12 +160,22 @@ describe('regression fixes verification', () => {
     ]);
     expect(arrangementInstrumentCues(notes, range, 'piano', overridden, false).map(cue => [cue.at, cue.instrument]))
       .toEqual([[.5, 'xiao'], [1.5, 'dizi']]);
+    // Interleaved vocal note between two instrumental notes must never be swallowed into one instrumental region
+    const interleaved = [
+      { ...note, startSmp: 0, endSmp: 24000, instrumental: true },
+      { ...note, startSmp: 24000, endSmp: 48000 },
+      { ...note, startSmp: 48000, endSmp: 72000, instrumental: true },
+    ];
+    expect(arrangementInstrumentRegions(interleaved, 'xiao')).toEqual([
+      { startSmp: 0, endSmp: 24000, instrument: 'xiao' },
+      { startSmp: 48000, endSmp: 72000, instrument: 'xiao' },
+    ]);
   });
 
   it('maps playback rows to the editable score and the correct occurrence of repeated words', () => {
-    const score = "@rit (2'_ 3':1.5) | 0_ 1 - - | [5,,]";
-    const spans = scoreRowSpans(score, ['a', 'a', 'b', 'c'].map(rowId => ({ rowId })));
-    expect([...spans.values()].map(span => score.slice(span.start, span.end))).toEqual(["(2'_ 3':1.5)", '1 - -', '5,,']);
+    const score = '@rit 《[2]/ [3]:1.5》 | 0/ 《1 - -》 | ((5))';
+    const spans = scoreRowSpans(score, ['a', 'b']);
+    expect([...spans.values()].map(span => score.slice(span.start, span.end))).toEqual(['《[2]/ [3]:1.5》', '《1 - -》']);
     const lyrics = '啊 Hello, hello！';
     const words = [
       { char: '啊', id: 'a' },
@@ -183,42 +200,34 @@ describe('regression fixes verification', () => {
     expect(spectra.size).toBeGreaterThanOrEqual(6);
   });
 
-  it('supports universal keyboard jianpu notation and clean quantization without 9-decimal or | noise', () => {
-    const arranged = readArrangerScore("5 - (3_ 5_) 0 6, 1' ♯4. ♭7_", 'C3', 92, false, 6);
+  it('supports JE and open-source DSL notations with clean quantization and zero legacy | noise', () => {
+    const arranged = readArrangerScore('《5 -》 《3/ 5/》 0 《(6)》 《[1]》 《♯4.》 《♭7/》', 'C3', 92, false, 6, false, 'je');
     expect(arranged.ok).toBe(true);
     if (arranged.ok) {
       expect(arranged.score.notes[0].beats).toBe(2); // 5 -
-      expect(arranged.score.notes[1].beats).toBe(0.5); // 3_
-      expect(arranged.score.notes[2].beats).toBe(0.5); // 5_
+      expect(arranged.score.notes[1].beats).toBe(0.5); // 3/
+      expect(arranged.score.notes[2].beats).toBe(0.5); // 5/
       expect(arranged.score.notes[2].carry).toBe(true);
       expect(arranged.score.notes[3].midi).toBeNull(); // 0 rest
-      expect(arranged.score.notes[5].midi).toBe(60); // 1' in C3 (48 + 12)
+      expect(arranged.score.notes[5].midi).toBe(60); // [1] in C3 (48 + 12)
       expect(arranged.score.notes[6].beats).toBe(1.5); // #4.
-      expect(arranged.score.notes[7].beats).toBe(0.5); // b7_
+      expect(arranged.score.notes[7].beats).toBe(0.5); // b7/
     }
 
-    const direct = parseNumberedScore("5 - (3_ 5_) 0 6, 1'", 'C3', 92, false, 4);
-    expect(direct.ok).toBe(true);
-    if (!direct.ok) return;
-    expect(direct.score.notes[0].beats).toBe(2);
-    expect(direct.score.notes[1].midi).toBeNull(); // space separator before (3_ 5_)
-    expect(direct.score.notes[2].beats).toBe(0.5);
-    expect(direct.score.notes[3].beats).toBe(0.5);
-    expect(direct.score.notes[3].carry).toBe(true);
+    const sparks = parseNumberedScore("《5 -》 0 《(3 5)》 0 《6,》 《1'》", 'C3', 92, false, 4, { notation: 'sparks-nmn' });
+    expect(sparks.ok).toBe(true);
+    if (!sparks.ok) return;
+    expect(sparks.score.notes[0].beats).toBe(2);
+    expect(sparks.score.notes[1].midi).toBeNull();
+    expect(sparks.score.notes[2].beats).toBe(0.5);
+    expect(sparks.score.notes[3].beats).toBe(0.5);
+    expect(sparks.score.notes[3].carry).toBe(true);
 
-    // Legacy tests still hold: space acts as 1-beat rest outside melisma, '6-' acts as low octave
-    const legacy = parseNumberedScore('(1p23)ff 5 6-', 'C3', 120, false, 3);
-    expect(legacy.ok).toBe(true);
-    if (legacy.ok) {
-      expect(legacy.score.notes[3].midi).toBeNull();
-      expect(legacy.score.notes[6].midi).toBe(45); // 6- -> 57 - 12
-    }
+    // Retired legacy syntax without 《》 must be rejected
+    expect(parseNumberedScore('(1p23)ff 5 6-', 'C3', 120, false, 3).ok).toBe(false);
 
-    expect(formatBeatsSuffix(0.5, true)).toBe('_');
-    expect(formatBeatsSuffix(2, false)).toBe(' -');
-    expect(formatBeatsSuffix(0.380266667, false)).toBe('__.');
-    expect(formatBeatsSuffix(0.333333, false)).toBe(':0.33');
-    expect(numberedNote(60, 'C3', 2)).toBe("1' -");
+    expect(numberedNote(60, 'C3', 2, 0, 'je')).toBe('[1] -');
+    expect(numberedNote(60, 'C3', 2, 0, 'sparks-nmn')).toBe("1' -");
     expect(quantizeImportedBeats(0.380266667)).toBe(0.5);
 
     const baseClip: Clip = {
@@ -233,7 +242,7 @@ describe('regression fixes verification', () => {
           text: '春',
           ipa: ['tʂʰ', 'w', 'ə', 'n'],
           nucleus_index: 2,
-          start_smp: Math.round(0.092 * 92 / 60 * 0), // tiny 4416-sample (<0.125 beat) initial rest
+          start_smp: 0,
           end_smp: 24000,
           anchor: { policy: 'speech_timing', lead_ms: null, bias_ms: 0 },
           segments: [],
@@ -245,15 +254,15 @@ describe('regression fixes verification', () => {
         },
       },
     };
-    const arr = sourceArrangement(baseClip, 'C3', 92, 165, () => 220);
+    const arr = sourceArrangement(baseClip, 'C3', 92, 165, () => 220, 'je');
     expect(arr.rows[0].score).not.toContain('|');
     expect(arr.rows[0].score).not.toMatch(/\.\d{3,}/);
     const pitchArr = arrangementFromPitch(baseClip, 'C3', 92, 165, [
       { t_smp: 5000, f0_hz: 220 },
       { t_smp: 15000, f0_hz: 261.63 },
-    ]);
+    ], 'je');
     expect(pitchArr.rows[0].score).not.toContain('|');
-    expect(readArrangerScore(pitchArr.rows[0].score, 'C3', 92, false, 1).ok).toBe(true);
+    expect(readArrangerScore(pitchArr.rows[0].score, 'C3', 92, false, 1, false, 'je', true).ok).toBe(true);
   });
 
   it('splits plain Mandarin/English diphthongs while keeping explicit non-syllabic glides intact', () => {

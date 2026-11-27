@@ -82,13 +82,63 @@ function tempoMap(tempos: Tempo[]): BeatChange[] {
   }
   return result;
 }
-const children = (e: Element, ...names: string[]) =>
-  Array.from(e.children).filter((c) => names.includes(c.localName));
-const field = (e: Element, ...names: string[]) => children(e, ...names)[0]?.textContent?.trim() ?? '';
-const numeric = (e: Element, ...names: string[]) => number(field(e, ...names), names.join('/'));
+interface XmlNode {
+  localName: string;
+  children: XmlNode[];
+  textContent: string;
+}
+
+function parseXmlTree(xml: string): XmlNode {
+  if (typeof DOMParser !== 'undefined') {
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    const toNode = (el: Element): XmlNode => ({
+      localName: el.localName,
+      children: Array.from(el.children).map(toNode),
+      textContent: el.textContent ?? '',
+    });
+    return toNode(doc.documentElement);
+  }
+  const stripped = xml
+    .replace(/<\?[\s\S]*?\?>/gu, '')
+    .replace(/<!--[\s\S]*?-->/gu, '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gu, (_, body: string) =>
+      body.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'));
+  const root: XmlNode = { localName: '__root__', children: [], textContent: '' };
+  const stack: XmlNode[] = [root];
+  const tokenRe = /<(\/?)([^\s/>]+)(?:[^<>]*?)(\/?)>|([^<]+)/gu;
+  const decode = (s: string) => s
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&apos;', "'")
+    .replaceAll('&amp;', '&');
+  for (const m of stripped.matchAll(tokenRe)) {
+    if (m[4] !== undefined) {
+      const txt = decode(m[4]);
+      for (const ancestor of stack) ancestor.textContent += txt;
+    } else {
+      const isClose = m[1] === '/';
+      const rawName = m[2];
+      const localName = rawName.includes(':') ? rawName.slice(rawName.indexOf(':') + 1) : rawName;
+      const selfClosing = m[3] === '/';
+      if (isClose) {
+        if (stack.length > 1) stack.pop();
+      } else {
+        const node: XmlNode = { localName, children: [], textContent: '' };
+        stack[stack.length - 1].children.push(node);
+        if (!selfClosing) stack.push(node);
+      }
+    }
+  }
+  return root.children[0] ?? { localName: '', children: [], textContent: '' };
+}
+
+const children = (e: XmlNode, ...names: string[]) =>
+  e.children.filter((c) => names.includes(c.localName));
+const field = (e: XmlNode, ...names: string[]) => children(e, ...names)[0]?.textContent?.trim() ?? '';
+const numeric = (e: XmlNode, ...names: string[]) => number(field(e, ...names), names.join('/'));
 function vsqx(text: string) {
-  const doc = new DOMParser().parseFromString(text, 'application/xml'),
-    root = doc.documentElement;
+  const root = parseXmlTree(text);
   if (!['vsq3', 'vsq4'].includes(root.localName)) throw new Error('请选择完整的 VOCALOID 3 或 4 VSQX 工程');
   const master = children(root, 'masterTrack')[0];
   if (!master) return bad('masterTrack');
@@ -126,11 +176,12 @@ function vsqx(text: string) {
         .sort((a, b) => a.at - b.at);
       return children(part, 'note').map((n) => {
         const tick = numeric(n, 't', 'posTick');
+        const velRaw = field(n, 'v', 'velocity');
         return {
           beat: offset + tick / ppq,
           length: numeric(n, 'dur', 'durTick') / ppq,
           pitch: numeric(n, 'n', 'noteNum'),
-          velocity: numeric(n, 'v', 'velocity'),
+          velocity: velRaw ? number(velRaw, 'v/velocity') : 64,
           lyric: field(n, 'y', 'lyric'),
           phones: field(n, 'p', 'phnms'),
           alphabet: 'vocaloid-' + (singers.filter((s) => s.at <= tick).at(-1)?.lang ?? ''),
@@ -151,6 +202,7 @@ interface SvpNote {
 interface Group {
   uuid: string;
   notes: SvpNote[];
+  database?: { language?: string; phoneset?: string; languageOverride?: string; phonesetOverride?: string };
 }
 interface GroupRef {
   groupID: string;
@@ -192,6 +244,7 @@ function svp(text: string) {
   const tracks = project.tracks.map((track, i) => {
     const notes: SingingNote[] = [];
     function add(group: Group, ref?: GroupRef) {
+      const db = ref?.database ?? group.database;
       for (const n of group.notes)
         notes.push({
           beat: (number(n.onset, 'onset') + number(ref?.blickOffset ?? 0, 'blickOffset')) / quarter,
@@ -204,10 +257,10 @@ function svp(text: string) {
             n.attributes?.phonemes ||
             (n.lyrics?.startsWith('.') ? n.lyrics.slice(1).trim() : ''),
           alphabet:
-            ref?.database?.phonesetOverride ||
-            ref?.database?.phoneset ||
-            ref?.database?.languageOverride ||
-            ref?.database?.language ||
+            db?.phonesetOverride ||
+            db?.phoneset ||
+            db?.languageOverride ||
+            db?.language ||
             'synthv',
         });
     }
@@ -262,11 +315,104 @@ const vocaloidPhones: Record<string, string> = {
   r: 'ɹ',
   g: 'ɡ',
 };
+const vocaloidZhXsampa: Record<string, string> = {
+  'ts\\': 'tɕ',
+  's\\': 'ɕ',
+  'ts`': 'tʂ',
+  's`': 'ʂ',
+  'z`': 'ʐ',
+  'i\\': 'ɨ',
+  'i`': 'ɻ̩',
+  'i\\`': 'ɻ̩',
+  '@': 'ə',
+  '@`': 'ɚ',
+  '7': 'ɤ',
+  '9': 'œ',
+  A: 'ɑ',
+  E: 'ɛ',
+  I: 'ɪ',
+  O: 'ɔ',
+  U: 'ʊ',
+  N: 'ŋ',
+  '1': 'ɨ',
+  y: 'y',
+  H: 'ɥ',
+  'v\\': 'ʋ',
+  'r\\': 'ɹ',
+  'r\\`': 'ɻ',
+  ts: 'ts',
+  aI: 'aɪ',
+  eI: 'eɪ',
+  AU: 'ɑʊ',
+  aU: 'aʊ',
+  '@U': 'əʊ',
+  oU: 'oʊ',
+  iA: 'jɑ',
+  iE: 'jɛ',
+  ia: 'ja',
+  ua: 'wa',
+  uA: 'wɑ',
+  uo: 'wo',
+  yE: 'ɥɛ',
+  Sil: '',
+  SP: '',
+  br: '',
+};
+
+const synthvMandarinPhones: Record<string, string> = {
+  // Initials (SynthV Standard Mandarin phoneme set)
+  b: 'p', p: 'pʰ', m: 'm', f: 'f',
+  d: 't', t: 'tʰ', n: 'n', l: 'l',
+  g: 'k', k: 'kʰ', h: 'x',
+  j: 'tɕ', q: 'tɕʰ', x: 'ɕ',
+  zh: 'tʂ', ch: 'tʂʰ', sh: 'ʂ', r: 'ʐ',
+  z: 'ts', c: 'tsʰ', s: 's',
+  y: 'j', w: 'w',
+  // Finals & vowels
+  a: 'a', o: 'o', e: 'ɤ', i: 'i', u: 'u', v: 'y',
+  i0: 'ɨ', ir: 'ɻ̩', ':i': 'ɨ', ':\\i': 'ɻ̩',
+  er: 'ɚ', ai: 'aɪ', ei: 'eɪ', ao: 'ɑʊ', ou: 'oʊ',
+  an: 'an', en: 'ən', ang: 'ɑŋ', eng: 'əŋ', ong: 'uŋ',
+  ia: 'ja', ie: 'jɛ', iao: 'jɑʊ', iu: 'joʊ', iou: 'joʊ',
+  ian: 'jɛn', in: 'in', iang: 'jɑŋ', ing: 'iŋ', iong: 'jyŋ',
+  ua: 'wa', uo: 'wo', uai: 'waɪ', ui: 'weɪ', uei: 'weɪ',
+  uan: 'wan', un: 'wən', uen: 'wən', uang: 'wɑŋ', ueng: 'wəŋ',
+  ve: 'ɥɛ', van: 'ɥɛn', vn: 'yn',
+  ng: 'ŋ',
+  sil: '', sp: '', br: '', pau: '', cl: '',
+};
+
+function mapMandarinXsampa(phones: readonly string[]): string {
+  const values = phones.map((p) => {
+    if (p === 'Sil' || p === 'SP' || p === 'br' || p === 'pau') return '';
+    const base = p.replace(/_h$/u, '');
+    const ipa = vocaloidZhXsampa[base] ?? (/^[abdefhijklmnoprstuwxz]$/u.test(base) ? base : '');
+    return ipa && p.endsWith('_h') ? ipa + 'ʰ' : ipa;
+  });
+  const nonEmpty = values.filter(Boolean);
+  return nonEmpty.length && values.every((v, idx) => Boolean(v) || /^(Sil|SP|br|pau)$/u.test(phones[idx])) ? nonEmpty.join('') : '';
+}
+
+function mapSynthvMandarin(phones: readonly string[]): string {
+  // If tokens contain X-SAMPA markers (`\`, `` ` ``, `_h`, uppercase vowels), route to X-SAMPA table first
+  if (phones.some((p) => /[\\`]|_h|^[AEN791@H]$/u.test(p))) {
+    const xs = mapMandarinXsampa(phones);
+    if (xs) return xs;
+  }
+  const values = phones.map((p) => {
+    const key = p.toLowerCase();
+    if (key in synthvMandarinPhones) return synthvMandarinPhones[key];
+    return '';
+  });
+  const matchedAll = values.every((v, idx) => v !== '' || /^(sil|sp|br|pau|cl)$/iu.test(phones[idx]));
+  return matchedAll ? values.join('') : '';
+}
+
 function sourceIpa(n: SingingNote): string {
   const phones = n.phones
     .trim()
     .split(/\s+/u)
-    .filter((p) => p !== '-');
+    .filter((p) => p && p !== '-');
   if (!phones.length) return '';
   if (n.alphabet === 'vocaloid-1') {
     const values = phones.map((p) => vocaloidPhones[p] ?? (/^[abdefhijklmnopstuvwz]$/u.test(p) ? p : ''));
@@ -291,40 +437,16 @@ function sourceIpa(n: SingingNote): string {
     };
     const values = phones.map((p) => {
       const base = p.replace(/'$/u, '');
-      const ipa = japanese[base] ?? (/^[abdehijkmnostwz]$/u.test(base) ? base : '');
+      const ipa = japanese[base] ?? (/^[abdehijkmnopstwz]$/u.test(base) ? base : '');
       return ipa && p.endsWith("'") ? ipa + 'ʲ' : ipa;
     });
     return values.every(Boolean) ? values.join('') : '';
   }
-  if (/xsampa/i.test(n.alphabet) || n.alphabet === 'mandarin') {
-    // The Mandarin inventory uses affricates and aspiration as single tokens.
-    const symbols: Record<string, string> = {
-      'ts\\': 'tɕ',
-      's\\': 'ɕ',
-      'ts`': 'tʂ',
-      's`': 'ʂ',
-      'z`': 'ʐ',
-      'i\\': 'ɨ',
-      '@': 'ə',
-      '7': 'ɤ',
-      '9': 'œ',
-      A: 'ɑ',
-      E: 'ɛ',
-      N: 'ŋ',
-      '1': 'ɨ',
-      y: 'y',
-      H: 'ɥ',
-      'v\\': 'ʋ',
-      'r\\': 'ɹ',
-      'r\\`': 'ɻ',
-      ts: 'ts',
-    };
-    const values = phones.map((p) => {
-      const base = p.replace(/_h$/u, '');
-      const ipa = symbols[base] ?? (/^[abdefhijklmnoprstuwxz]$/u.test(base) ? base : '');
-      return ipa && p.endsWith('_h') ? ipa + 'ʰ' : ipa;
-    });
-    return values.every(Boolean) ? values.join('') : '';
+  if (n.alphabet === 'vocaloid-4' || /xsampa/i.test(n.alphabet)) {
+    return mapMandarinXsampa(phones);
+  }
+  if (/^(mandarin|chinese|zh|cmn|cantonese)/i.test(n.alphabet)) {
+    return mapSynthvMandarin(phones);
   }
   if (/ipa/i.test(n.alphabet) && !/sampa/i.test(n.alphabet)) return phones.join('');
   if (/^(synthv|english|en-us|arpabet)$/i.test(n.alphabet)) {
@@ -354,12 +476,16 @@ export async function readSingingProject(file: File, standard: string, speaker: 
     ).values(),
   ];
   const cache = new Map<string, LyricRow[]>();
+  const warnings: string[] = [];
   const parts = [];
+  const AUTO_TRIM_OVERLAP_SMP = Math.round(SAMPLE_RATE_HZ * 0.03); // 30 ms micro-overlap auto-trim
   for (const track of tracks) {
     const rows: LyricRow[] = [],
       events: EventNote[] = [];
     const ordered = track.notes.sort((a, b) => a.beat - b.beat);
     let pendingSyllables: LyricRow[] = [];
+    let trimmedCount = 0;
+    let remainingOverlapCount = 0;
     for (const [index, n] of ordered.entries()) {
       if (
         !Number.isInteger(n.pitch) ||
@@ -373,6 +499,16 @@ export async function readSingingProject(file: File, standard: string, speaker: 
         end = gridSample(n.beat + n.length - firstBeat, beatMap);
       if (end <= start || end - leading > 900 * SAMPLE_RATE_HZ)
         return bad(track.name + ' 超出 15 分钟编曲范围');
+      const prevEvent = events.at(-1);
+      if (prevEvent && prevEvent.endSmp > start) {
+        const overlap = prevEvent.endSmp - start;
+        if (overlap <= AUTO_TRIM_OVERLAP_SMP && start > prevEvent.startSmp) {
+          prevEvent.endSmp = start;
+          trimmedCount++;
+        } else {
+          remainingOverlapCount++;
+        }
+      }
       const lyric = n.lyric.trim(),
         previous = rows.at(-1);
       let row = previous;
@@ -386,19 +522,21 @@ export async function readSingingProject(file: File, standard: string, speaker: 
         const word = lyric.replace(/-$/u, '');
         let ipa = sourceIpa(n);
         let reading: LyricRow | undefined;
-        if (!n.phones.trim()) {
+        if (!n.phones.trim() || !ipa) {
           if (!cache.has(word)) cache.set(word, await analyzeLyrics(word, standard, speaker, false));
           const readings = cache.get(word)!;
           reading = readings[0];
           let count = 1;
           while (ordered[index + count]?.lyric === '+' && count < readings.length) count++;
           pendingSyllables = readings.slice(1, count).map((r) => ({ ...r }));
-          ipa = count > 1 ? readings[0].ipa : readings.map((r) => r.ipa).join('');
-          if (pendingSyllables.length)
-            pendingSyllables[pendingSyllables.length - 1].ipa += readings
-              .slice(count)
-              .map((r) => r.ipa)
-              .join('');
+          if (!ipa) {
+            ipa = count > 1 ? readings[0]?.ipa ?? '' : readings.map((r) => r.ipa).join('');
+            if (pendingSyllables.length)
+              pendingSyllables[pendingSyllables.length - 1].ipa += readings
+                .slice(count)
+                .map((r) => r.ipa)
+                .join('');
+          }
         }
         row = {
           ...reading,
@@ -423,19 +561,26 @@ export async function readSingingProject(file: File, standard: string, speaker: 
         rows.push(row);
       } else if (n.phones.trim()) {
         const tail = sourceIpa(n);
-        if (tail) previous.ipa += tail;
+        // Avoid duplicating trailing sustained vowel on continuation `-` notes
+        if (tail && !previous.ipa.endsWith(tail)) previous.ipa += tail;
       }
       events.push({
         id: crypto.randomUUID(),
         midi: n.pitch,
         startSmp: start,
         endSmp: end,
-        velocity: Math.max(1, n.velocity),
+        velocity: Math.max(1, Math.min(127, Math.round(n.velocity || 86))),
         lyricId: row!.id,
         sourceLyric: n.lyric,
         sourcePhones: n.phones,
         sourceAlphabet: n.alphabet,
       });
+    }
+    if (trimmedCount > 0) {
+      warnings.push(`${track.name} 自动微调了 ${trimmedCount} 处 ≤30 ms 的音符边缘重叠`);
+    }
+    if (remainingOverlapCount > 0) {
+      warnings.push(`${track.name} 含有 ${remainingOverlapCount} 处较长音符重叠，人声试听前请在卷帘错开`);
     }
     const words = ordered.map((n) => n.lyric.trim()).filter((l) => l && !/^[+\-/]$/u.test(l));
     const lyrics = words.join(words.some((word) => /[a-z]/i.test(word)) ? ' ' : '');
@@ -450,5 +595,5 @@ export async function readSingingProject(file: File, standard: string, speaker: 
       meters: signatures,
     });
   }
-  return { parts, bpm: (SAMPLE_RATE_HZ * 60) / clock[0].samplesPerBeat };
+  return { parts, warnings, bpm: (SAMPLE_RATE_HZ * 60) / clock[0].samplesPerBeat };
 }

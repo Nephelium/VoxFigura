@@ -7,6 +7,7 @@ import { VOQS_GROUPS, voqsProfile } from '@/data/voqs-library';
 import { M27CurveEditor, type MorphKnot } from '@/vendor/m27-voice-morph/curve-editor.js';
 import { withImportedTractFrames } from '@/components/research/annotation-edit';
 import { parseWavDataDurationSmp } from '@/data/workspace-transfer';
+import CustomSelect, { type SelectOption } from '@/components/common/CustomSelect.vue';
 import { outputPoses, transferAnchors, transferOutputClip, transferRange, voiceTransferOperand, type TransferChoice, type VoiceTransferResult } from './voice-transfer';
 
 const props = defineProps<{
@@ -23,6 +24,19 @@ const groups = [
   { id: 'f0_pr', label: '基频与气压' },
 ] as const;
 type Group = typeof groups[number]['id'];
+const SOURCE_KIND_OPTIONS: ReadonlyArray<SelectOption<'clip' | 'voqs'>> = [
+  { value: 'clip', label: '时间线片段或素材' },
+  { value: 'voqs', label: 'VoQS 实录发声类型' },
+];
+const VOQS_SYMBOL_OPTIONS: ReadonlyArray<SelectOption<string>> = VOQS_GROUPS.flatMap(group =>
+  group.profiles.map(profile => ({
+    value: profile.symbol,
+    label: `${profile.symbol} · ${profile.label}`,
+    group: group.label,
+    disabled: group.id === 'height',
+  })),
+);
+
 const reusable = (): MorphKnot[] => [{ t: 0, v: 0 }, { t: 1, v: 1 }];
 const curves = ref<Record<Group, MorphKnot[]>>({ speaker: reusable(), tract_all: reusable(), glottis: reusable(), f0_pr: reusable() });
 const enabled = ref<Group[]>(['tract_all']);
@@ -44,6 +58,7 @@ const rhythm = ref(false);
 const voicingGate = ref(true);
 const canvas = ref<HTMLCanvasElement>();
 const status = ref('');
+const statusKind = ref<'info' | 'error'>('info');
 const busy = ref(false);
 const saving = ref(false);
 const saved = ref(false);
@@ -63,6 +78,26 @@ const visibleGroups = computed(() => sourceKind.value === 'voqs' ? groups.filter
 const resultSeconds = computed(() => Math.max(0, rhythm.value ? sourceTo.value - sourceFrom.value : targetTo.value - targetFrom.value));
 const allowRender = computed(() => usable.value && (rhythm.value || enabled.value.length > 0));
 const title = (choice: TransferChoice) => `${choice.label} · ${duration(choice).toFixed(2)} 秒 · ${choice.audio ? '音频' : '轨迹'}`;
+
+const targetOptions = computed<SelectOption<string>[]>(() => [
+  { value: '', label: '选择目标' },
+  ...props.choices.map(choice => ({ value: choice.id, label: title(choice) })),
+]);
+const sourceOptions = computed<SelectOption<string>[]>(() => [
+  { value: '', label: '选择来源' },
+  ...props.choices.map(choice => ({ value: choice.id, label: title(choice) })),
+]);
+const voqsTakeOptions = computed<SelectOption<string>[]>(() =>
+  (voqs.value?.takes ?? []).map(take => ({ value: take.id, label: take.id })),
+);
+const drawingOptions = computed<SelectOption<Group>[]>(() =>
+  visibleGroups.value.map(group => ({
+    value: group.id,
+    label: group.label,
+    disabled: group.id === 'speaker' && !canBlendSpeaker.value,
+  })),
+);
+
 defineExpose({
   openFor(id: string) {
     if (!panel.value || !props.choices.some(choice => choice.id === id)) return;
@@ -78,6 +113,20 @@ watch(() => props.choices, list => {
 }, { immediate: true });
 watch(targetId, () => { targetFrom.value = 0; targetTo.value = Math.min(15, duration(target.value)); }, { immediate: true });
 watch(sourceId, () => { sourceFrom.value = 0; sourceTo.value = Math.min(15, duration(source.value)); }, { immediate: true });
+watch(() => target.value?.durationSmp, () => {
+  const maxDur = duration(target.value);
+  if (targetFrom.value < 0 || targetFrom.value > maxDur) targetFrom.value = 0;
+  if (targetTo.value > maxDur || targetTo.value <= targetFrom.value) targetTo.value = Math.min(15, maxDur);
+});
+watch(() => source.value?.durationSmp, () => {
+  const maxDur = duration(source.value);
+  if (sourceFrom.value < 0 || sourceFrom.value > maxDur) sourceFrom.value = 0;
+  if (sourceTo.value > maxDur || sourceTo.value <= sourceFrom.value) sourceTo.value = Math.min(15, maxDur);
+});
+watch(drawing, group => {
+  if (group === 'speaker' && !canBlendSpeaker.value) return;
+  if (!enabled.value.includes(group)) enabled.value = [...enabled.value, group];
+});
 watch(canBlendSpeaker, available => {
   if (!available) {
     enabled.value = enabled.value.filter(group => group !== 'speaker');
@@ -111,24 +160,35 @@ function clearPreview() {
   replaced.value = false;
 }
 
-watch([targetId, sourceId, sourceKind, voqsSymbol, voqsTakeId, targetFrom, targetTo, sourceFrom, sourceTo, rhythm, voicingGate, curves, enabled], () => {
+const activeCurveSnapshot = computed(() => JSON.stringify(enabled.value.map(g => [g, curves.value[g]])));
+watch([targetId, sourceId, sourceKind, voqsSymbol, voqsTakeId, targetFrom, targetTo, sourceFrom, sourceTo, rhythm, voicingGate, activeCurveSnapshot], () => {
   renderVersion++;
   cancel?.abort();
   busy.value = false;
   status.value = '';
+  statusKind.value = 'info';
   clearPreview();
-}, { deep: true });
+});
+
+function cancelRender() {
+  renderVersion++;
+  cancel?.abort();
+  busy.value = false;
+  statusKind.value = 'info';
+  status.value = '已取消重合成';
+}
 
 function updateEditor() {
   editor?.setKnots(curves.value[drawing.value], true);
   const clock = rhythm.value ? source.value : target.value;
-  const offset = (clock?.startSmp ?? 0) + Math.round((rhythm.value ? sourceFrom.value : targetFrom.value) * SAMPLE_RATE_HZ);
+  const fromSec = Math.max(0, rhythm.value ? sourceFrom.value : targetFrom.value);
+  const offset = Math.max(0, (clock?.startSmp ?? 0) + Math.round(fromSec * SAMPLE_RATE_HZ));
   const samples = clock?.audio?.getChannelData(0);
   const step = Math.ceil(resultSeconds.value * SAMPLE_RATE_HZ / 96);
   const waveformPeaks = samples && step > 0 ? Array.from({ length: 96 }, (_, i) => {
-    const start = offset + i * step;
+    const start = Math.max(0, offset + i * step);
     let peak = 0;
-    for (let s = start; s < Math.min(samples.length, start + step); s += 4) peak = Math.max(peak, Math.abs(samples[s]));
+    for (let s = start; s < Math.min(samples.length, start + step); s += 4) peak = Math.max(peak, Math.abs(samples[s] ?? 0));
     return peak;
   }) : [];
   editor?.setVisualContext({ durSec: resultSeconds.value, smoothMs: 25, enableGate: voicingGate.value, waveformPeaks });
@@ -165,9 +225,9 @@ async function render() {
         voqs_source_id: sourceRange ? undefined : voqsTake.value?.id, audio_gain: synthesisGainMode.value,
         curves: Object.fromEntries(enabled.value.map(group => [group, curves.value[group]])), rhythm: rhythm.value, voicing_gate: voicingGate.value }),
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
     if (version !== renderVersion) return;
-    if (!response.ok || !data.ok) throw new Error(data.hint || data.error?.hint || `声音属性迁移失败（${response.status}）`);
+    if (!response.ok || !data?.ok) throw new Error(data?.hint || data?.error?.hint || `声音属性迁移失败（HTTP ${response.status}）`);
     const bytes = Uint8Array.from(atob(data.audio_base64), character => character.charCodeAt(0));
     const title = `${targetRange.choice.label.replace(/\.[^./\\]+$/, '')} · 属性迁移`;
     const file = new File([bytes], title + '.wav', { type: 'audio/wav' });
@@ -181,9 +241,13 @@ async function render() {
         targetRange.endSmp - targetRange.startSmp === destination.stageClip.lengthSmp) replacementTarget.value = destination;
     previewUrl.value = URL.createObjectURL(file);
     const alignment = data.align_mode === 'voqs' ? `VoQS 实录 ${voqsSymbol.value} · ${voqsTake.value?.id}` : data.align_mode === 'textgrid' ? '已有标注锚点' : 'DTW';
+    statusKind.value = 'info';
     status.value = `${alignment} · ${data.label} · ${(durationSmp / SAMPLE_RATE_HZ).toFixed(2)} 秒`;
   } catch (error) {
-    if (version === renderVersion) status.value = error instanceof Error ? error.message : '声音属性迁移失败';
+    if (version === renderVersion) {
+      statusKind.value = 'error';
+      status.value = error instanceof Error ? error.message : '声音属性迁移失败';
+    }
   } finally { if (version === renderVersion) busy.value = false; }
 }
 
@@ -199,8 +263,10 @@ async function savePreview(replace = false) {
       await props.save(result);
       if (preview.value === result) saved.value = true;
     }
-  } catch (error) { status.value = error instanceof Error ? error.message : '无法保存迁移结果'; }
-  finally { saving.value = false; }
+  } catch (error) {
+    statusKind.value = 'error';
+    status.value = error instanceof Error ? error.message : '无法保存迁移结果';
+  } finally { saving.value = false; }
 }
 
 onBeforeUnmount(() => {
@@ -216,26 +282,70 @@ onBeforeUnmount(() => {
     <summary>声音属性迁移</summary>
     <fieldset :disabled="busy || saving" class="transfer-body">
       <section class="transfer-pair">
-        <label>目标片段 <select v-model="targetId"><option value="">选择目标</option><option v-for="choice in choices" :key="choice.id" :value="choice.id">{{ title(choice) }}</option></select></label>
-        <div v-if="target" class="transfer-range">
-          <label>目标入点 (s)<input v-model.number="targetFrom" type="number" min="0" :max="duration(target)" step="0.001" /></label>
-          <label>目标出点 (s)<input v-model.number="targetTo" type="number" min="0" :max="duration(target)" step="0.001" /></label>
+        <div class="transfer-field">
+          <span class="transfer-field-label">目标片段</span>
+          <CustomSelect
+            :model-value="targetId"
+            :options="targetOptions"
+            :disabled="busy || saving"
+            size="sm"
+            aria-label="声音属性迁移目标片段"
+            @update:model-value="v => { targetId = String(v); }"
+          />
         </div>
-        <label>属性来源 <select v-model="sourceKind"><option value="clip">时间线片段或素材</option><option value="voqs">VoQS 实录发声类型</option></select></label>
-        <label v-if="sourceKind === 'clip'">来源片段 <select v-model="sourceId"><option value="">选择来源</option><option v-for="choice in choices" :key="choice.id" :value="choice.id">{{ title(choice) }}</option></select></label>
+        <div v-if="target" class="transfer-range">
+          <label>目标入点 (s)<input v-model.number="targetFrom" class="inp mono" type="number" min="0" :max="duration(target)" step="0.001" /></label>
+          <label>目标出点 (s)<input v-model.number="targetTo" class="inp mono" type="number" min="0" :max="duration(target)" step="0.001" /></label>
+        </div>
+        <div class="transfer-field">
+          <span class="transfer-field-label">属性来源</span>
+          <CustomSelect
+            :model-value="sourceKind"
+            :options="SOURCE_KIND_OPTIONS"
+            :disabled="busy || saving"
+            size="sm"
+            aria-label="声音属性迁移来源类型"
+            @update:model-value="v => { sourceKind = v as 'clip' | 'voqs'; }"
+          />
+        </div>
+        <div v-if="sourceKind === 'clip'" class="transfer-field">
+          <span class="transfer-field-label">来源片段</span>
+          <CustomSelect
+            :model-value="sourceId"
+            :options="sourceOptions"
+            :disabled="busy || saving"
+            size="sm"
+            aria-label="声音属性迁移来源片段"
+            @update:model-value="v => { sourceId = String(v); }"
+          />
+        </div>
         <div v-if="sourceKind === 'clip' && source" class="transfer-range">
-          <label>来源入点 (s)<input v-model.number="sourceFrom" type="number" min="0" :max="duration(source)" step="0.001" /></label>
-          <label>来源出点 (s)<input v-model.number="sourceTo" type="number" min="0" :max="duration(source)" step="0.001" /></label>
+          <label>来源入点 (s)<input v-model.number="sourceFrom" class="inp mono" type="number" min="0" :max="duration(source)" step="0.001" /></label>
+          <label>来源出点 (s)<input v-model.number="sourceTo" class="inp mono" type="number" min="0" :max="duration(source)" step="0.001" /></label>
         </div>
         <template v-if="sourceKind === 'voqs'">
-          <label>VoQS 实录类型 <select v-model="voqsSymbol" class="ipa" translate="no">
-            <optgroup v-for="group in VOQS_GROUPS" :key="group.id" :label="group.label">
-              <option v-for="profile in group.profiles" :key="profile.symbol" :value="profile.symbol" :disabled="group.id === 'height'">{{ profile.symbol }} · {{ profile.label }}</option>
-            </optgroup>
-          </select></label>
-          <label v-if="voqs && voqs.takes.length > 1">VoQS 实录样本 <select :value="voqsTake?.id" @change="voqsTakeId = ($event.target as HTMLSelectElement).value">
-            <option v-for="take in voqs.takes" :key="take.id" :value="take.id">{{ take.id }}</option>
-          </select></label>
+          <div class="transfer-field">
+            <span class="transfer-field-label">VoQS 实录类型</span>
+            <CustomSelect
+              :model-value="voqsSymbol"
+              :options="VOQS_SYMBOL_OPTIONS"
+              :disabled="busy || saving"
+              size="sm"
+              aria-label="VoQS 实录类型"
+              @update:model-value="v => { voqsSymbol = String(v); }"
+            />
+          </div>
+          <div v-if="voqs && voqs.takes.length > 1" class="transfer-field">
+            <span class="transfer-field-label">VoQS 实录样本</span>
+            <CustomSelect
+              :model-value="voqsTake?.id ?? ''"
+              :options="voqsTakeOptions"
+              :disabled="busy || saving"
+              size="sm"
+              aria-label="VoQS 实录样本"
+              @update:model-value="v => { voqsTakeId = String(v); }"
+            />
+          </div>
           <p>喉位高低需要独立喉位控制，当前声道迁移支持其余发声类型。</p>
         </template>
       </section>
@@ -246,23 +356,38 @@ onBeforeUnmount(() => {
           <label v-if="sourceKind === 'clip'"><input v-model="rhythm" type="checkbox" />节奏<span v-if="rhythm"> · 用来源的时间轴</span></label>
         </div>
         <p v-if="sourceKind === 'clip' && !canBlendSpeaker">音色需同时提供两条参考音频。纯轨迹可用物理声管合成。</p>
-        <label>编辑混合曲线<select v-model="drawing"><option v-for="group in visibleGroups" :key="group.id" :value="group.id" :disabled="group.id === 'speaker' && !canBlendSpeaker">{{ group.label }}</option></select></label>
+        <div class="transfer-field">
+          <span class="transfer-field-label">编辑混合曲线</span>
+          <CustomSelect
+            :model-value="drawing"
+            :options="drawingOptions"
+            :disabled="busy || saving"
+            size="sm"
+            aria-label="编辑混合曲线"
+            @update:model-value="v => { drawing = v as Group; }"
+          />
+        </div>
         <canvas ref="canvas" aria-label="混合曲线，点击新增节点，拖动节点修改权重" />
         <div class="transfer-actions">
-          <button type="button" @click="resetDrawing(null)">渐变</button><button type="button" @click="resetDrawing(1)">全量</button><button type="button" @click="resetDrawing(0)">清零</button>
+          <button type="button" class="btn xs" @click="resetDrawing(null)">渐变</button>
+          <button type="button" class="btn xs" @click="resetDrawing(1)">全量</button>
+          <button type="button" class="btn xs" @click="resetDrawing(0)">清零</button>
         </div>
         <p>0% 保留目标，100% 使用来源。每段选区最长 15 秒。</p>
         <div class="transfer-checks"><label><input v-model="voicingGate" type="checkbox" />保护清音和静音</label></div>
         <p>{{ sourceKind === 'voqs' ? '保留目标的时间轴与声道构型。' : alignedBoundaries.length ? `已匹配 ${alignedBoundaries.length} 个标注边界` : '将按声道轨迹 DTW 对齐' }}</p>
       </template>
-      <button type="button" class="transfer-primary" :disabled="!allowRender" @click="render">{{ busy ? '正在重合成…' : '生成试听' }}</button>
+      <button type="button" class="btn sm primary" :disabled="!allowRender" @click="render">{{ busy ? '正在重合成…' : '生成试听' }}</button>
     </fieldset>
+    <div v-if="busy" class="transfer-actions">
+      <button type="button" class="btn xs danger" @click="cancelRender">取消重合成</button>
+    </div>
     <div v-if="status || previewUrl" class="transfer-results" aria-live="polite">
-      <p v-if="status">{{ status }}</p>
+      <p v-if="status" :class="{ 'transfer-status-error': statusKind === 'error' }">{{ status }}</p>
       <audio v-if="previewUrl" :src="previewUrl" controls preload="metadata" />
       <div v-if="previewUrl" class="transfer-actions">
-        <button type="button" :disabled="saved || saving" @click="savePreview()">{{ saved ? '已保存为新素材' : '保存为新素材' }}</button>
-        <button v-if="replacementTarget" type="button" :disabled="replaced || saving"
+        <button type="button" class="btn xs" :disabled="saved || saving" @click="savePreview()">{{ saved ? '已保存为新素材' : '保存为新素材' }}</button>
+        <button v-if="replacementTarget" type="button" class="btn xs primary" :disabled="replaced || saving"
           @click="savePreview(true)">{{ replaced ? '已替换原片段' : '替换原片段' }}</button>
       </div>
       <p v-if="previewUrl && target?.stageClip && !replacementTarget">若要回写此选区，可先在时间线上切分，再迁移整个片段。</p>
@@ -272,7 +397,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .voice-transfer {
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   padding: 8px 0;
   --vm-canvas-bg: var(--app);
   --vm-grid-line: color-mix(in srgb, var(--border) 68%, transparent);
@@ -286,21 +411,19 @@ onBeforeUnmount(() => {
   --vm-knot-stroke: var(--accent);
   --vm-knot-active: var(--warning);
 }
-summary { cursor: pointer; font-weight: 600; padding-block: 4px; }
+summary { cursor: pointer; font-weight: 600; padding-block: 4px; color: var(--text); }
 .transfer-body, .transfer-results, .transfer-pair { display: grid; gap: 7px; min-width: 0; }
-.transfer-body { margin: 5px 0 0; border: 0; padding: 0; }
+.transfer-body { margin: 6px 0 0; border: 0; padding: 0; }
 .transfer-results { margin-top: 8px; }
-.transfer-body label { display: grid; gap: 3px; }
-.transfer-body select, .transfer-body input:not([type='checkbox']), button { box-sizing: border-box; min-width: 0; min-height: 26px; font: inherit; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 5px; padding: 2px 5px; }
-.transfer-body select { width: 100%; }
+.transfer-field, .transfer-range label { display: grid; gap: 3px; min-width: 0; }
+.transfer-field-label, .transfer-range label { font-size: 0.875rem; color: var(--muted); }
 .transfer-range { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.transfer-checks, .transfer-actions { display: flex; gap: 5px 8px; flex-wrap: wrap; }
-.transfer-checks label { display: flex; align-items: center; gap: 4px; }
+.transfer-range .inp { width: 100%; min-width: 0; box-sizing: border-box; }
+.transfer-checks, .transfer-actions { display: flex; gap: 5px 8px; flex-wrap: wrap; align-items: center; }
+.transfer-checks label { display: flex; align-items: center; gap: 4px; font-size: 0.875rem; cursor: pointer; }
 .transfer-checks input { margin: 0; accent-color: var(--accent); }
-button { cursor: pointer; }
-button:disabled { opacity: 0.55; cursor: default; }
-.transfer-primary { border-color: var(--accent); }
-p { color: var(--muted); margin: 0; line-height: 1.45; }
-canvas { display: block; width: 100%; height: 134px; border-radius: 5px; border: 1px solid var(--border); touch-action: none; }
+.transfer-status-error { color: var(--danger); font-weight: 600; }
+p { color: var(--muted); margin: 0; line-height: 1.45; font-size: 0.875rem; }
+canvas { display: block; width: 100%; height: 134px; border-radius: var(--r-ctrl); border: 1px solid var(--border); touch-action: none; }
 audio { width: 100%; height: 30px; }
 </style>

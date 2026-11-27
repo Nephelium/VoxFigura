@@ -1,21 +1,43 @@
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { fileURLToPath } from 'node:url';
 import { studioEncoding } from './studio-encoding.mjs';
-import { handlePortableCacheRequest } from './portable-cache.mjs';
+import { handlePortableCacheRequest, isJsonContentType } from './portable-cache.mjs';
 
+const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const DEV_ENGINE_TOKEN_PATH = join(REPO_ROOT, '.cache', 'local-engine.token');
 const ENGINE_BASE_URL = (process.env.TENSORTRACT_API_URL || 'http://127.0.0.1:8765').replace(/\/+$/, '');
-const ENGINE_TOKEN = process.env.VOCALCUT_ENGINE_TOKEN;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 const MAX_AI_CHAT_BYTES = 20 * 1024 * 1024;
 const MAX_DEEPSEEK_AUDIO_BYTES = 8 * 1024 * 1024;
 const DEEPSEEK_ASR_ENDPOINT = 'https://api.deepseek.com/v1/tools/asr';
 const ENGINE_TIMEOUT_MS = 120_000;
+const ENGINE_ROUTE_TIMEOUTS_MS = Object.freeze({
+  '/api/m27/reconstruct': 185_000,
+});
 const UPDATE_TIMEOUT_MS = 8_000;
-const DEFAULT_UPDATE_MANIFEST_URLS = [
+export const DEFAULT_UPDATE_MANIFEST_URLS = Object.freeze([
   'https://www.phonetictoolbox.com/voxfigura/updates/latest.json',
-  'http://8.134.196.183/voxfigura/updates/latest.json',
-];
+]);
+export const ALLOWED_UPDATE_HOSTS = Object.freeze([
+  'phonetictoolbox.com',
+  'www.phonetictoolbox.com',
+  'github.com',
+  'gitee.com',
+]);
+const DEV_ALLOWED_ORIGIN_PORTS = new Set([5173, 5174, 5175, 4173, 4174, 4175]);
+const SIMPLE_FORM_MEDIA_TYPES = new Set([
+  'text/plain',
+  'application/x-www-form-urlencoded',
+  'multipart/form-data',
+]);
+const BINARY_ENGINE_ROUTES = new Set([
+  '/api/models/dpdfnet',
+  '/api/models/local/mount-binary',
+]);
 const VISION_UNSUPPORTED_HINT =
   '当前所选模型不支持图片多模态输入，请切换支持视觉的模型（如 GPT-4o / Gemini / Claude / Qwen-VL）或移除图片后重试';
 const VISION_UNSUPPORTED_RE =
@@ -25,6 +47,189 @@ class BodyTooLargeError extends Error {
   constructor() {
     super('Request body exceeds 64 MiB limit');
   }
+}
+
+export function getEngineTimeoutMs(pathname) {
+  return ENGINE_ROUTE_TIMEOUTS_MS[pathname] ?? ENGINE_TIMEOUT_MS;
+}
+
+export function resolveEngineToken() {
+  const envToken = (process.env.VOCALCUT_ENGINE_TOKEN || '').trim();
+  if (envToken) return envToken;
+  try {
+    const fileToken = readFileSync(DEV_ENGINE_TOKEN_PATH, 'utf8').trim();
+    if (fileToken) return fileToken;
+  } catch {
+    // Dev token file may not exist if engine is not started via start-engine.mjs
+  }
+  return '';
+}
+
+function isLoopbackHostname(hostname) {
+  const lower = String(hostname || '').toLowerCase();
+  return lower === '127.0.0.1' || lower === 'localhost' || lower === '[::1]' || lower === '::1';
+}
+
+function parseHostHeader(rawHost) {
+  if (typeof rawHost !== 'string') return null;
+  const trimmed = rawHost.trim();
+  if (!trimmed || /[\s/\\@#?]/.test(trimmed)) return null;
+  try {
+    const u = new URL('http://' + trimmed);
+    const port = u.port ? Number(u.port) : 80;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+    return { hostname: u.hostname.toLowerCase(), port, raw: trimmed.toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedDevOrigin(originStr, listenPort) {
+  if (typeof originStr !== 'string' || !originStr.trim()) return false;
+  let parsed;
+  try {
+    parsed = new URL(originStr.trim());
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:') return false;
+  if (!isLoopbackHostname(parsed.hostname)) return false;
+  if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    return false;
+  }
+  const port = parsed.port ? Number(parsed.port) : 80;
+  if (listenPort && port === listenPort) return true;
+  return DEV_ALLOWED_ORIGIN_PORTS.has(port);
+}
+
+function isJsonWriteRoute(method, pathname) {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
+  if (pathname.startsWith('/api/portable/cache/')) return true;
+  if (pathname === '/api/ai/chat') return true;
+  if (pathname === '/api/zhihu/random') return true;
+  if (/^\/api\/(vtl|m27|models)\//.test(pathname)) {
+    return !BINARY_ENGINE_ROUTES.has(pathname);
+  }
+  return false;
+}
+
+export function validateProxyRequest(req, pathname, { expectedOrigin, listenPort } = {}) {
+  if (!req.url || !req.url.startsWith('/') || req.url.startsWith('//')) {
+    return { ok: false, status: 403, code: 'forbidden_url', hint: '请求路径无效' };
+  }
+
+  const hostHeader = req.headers.host;
+  const origin = req.headers.origin;
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  const method = String(req.method || 'GET').toUpperCase();
+  const isApi = pathname.startsWith('/api/');
+  const isStateChanging = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+
+  if (expectedOrigin) {
+    if ('http://' + hostHeader !== expectedOrigin ||
+        (origin && origin !== expectedOrigin) ||
+        (isApi && secFetchSite === 'cross-site')) {
+      return { ok: false, status: 403, code: 'forbidden_origin', hint: '请求须来自本机工作台' };
+    }
+  } else {
+    // Development proxy: enforce loopback Host allowlist against DNS rebinding.
+    const parsedHost = parseHostHeader(hostHeader);
+    const effectivePort = Number(listenPort || req.socket?.localPort || 0);
+    if (!parsedHost || !isLoopbackHostname(parsedHost.hostname) ||
+        (effectivePort > 0 && parsedHost.port !== effectivePort)) {
+      return { ok: false, status: 403, code: 'forbidden_host', hint: '请求 Host 不在本地允许白名单内' };
+    }
+    if (isApi) {
+      if (secFetchSite === 'cross-site') {
+        return { ok: false, status: 403, code: 'forbidden_cross_site', hint: '禁止跨站访问本地工作台接口' };
+      }
+      if (origin !== undefined && !isAllowedDevOrigin(origin, effectivePort)) {
+        return { ok: false, status: 403, code: 'forbidden_origin', hint: '请求 Origin 不在本地允许白名单内' };
+      }
+      if (isStateChanging && origin === undefined && typeof req.headers.referer === 'string' && req.headers.referer.trim()) {
+        let refOrigin = '';
+        try {
+          refOrigin = new URL(req.headers.referer.trim()).origin;
+        } catch {
+          return { ok: false, status: 403, code: 'forbidden_origin', hint: '请求 Referer 无效' };
+        }
+        if (!isAllowedDevOrigin(refOrigin, effectivePort)) {
+          return { ok: false, status: 403, code: 'forbidden_origin', hint: '请求 Referer 不在本地允许白名单内' };
+        }
+      }
+    }
+  }
+
+  if (isApi && isStateChanging) {
+    const rawCt = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : '';
+    const mediaType = rawCt.split(';', 1)[0].trim().toLowerCase();
+    if (mediaType && SIMPLE_FORM_MEDIA_TYPES.has(mediaType)) {
+      return {
+        ok: false,
+        status: 415,
+        code: 'unsupported_media_type',
+        hint: '不支持简单表单或纯文本 Content-Type，请使用 application/json 或受支持的二进制接口格式',
+      };
+    }
+    if (isJsonWriteRoute(method, pathname) && !isJsonContentType(rawCt)) {
+      return {
+        ok: false,
+        status: 415,
+        code: 'unsupported_media_type',
+        hint: '该接口须使用 Content-Type: application/json',
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+export function isAllowedUpdateHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase();
+  if (!host) return false;
+  return ALLOWED_UPDATE_HOSTS.some((allowed) => host === allowed || host.endsWith('.' + allowed));
+}
+
+export function isAllowedUpdateUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    return isAllowedUpdateHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function sanitizeUpdateManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object') return null;
+  if (manifest.schema !== 'voxfigura/update-manifest' || !manifest.channels || typeof manifest.channels !== 'object') {
+    return null;
+  }
+  const cleanChannels = {};
+  for (const [channelKey, rawInfo] of Object.entries(manifest.channels)) {
+    if (!rawInfo || typeof rawInfo !== 'object') continue;
+    const info = { ...rawInfo };
+    if (typeof info.download_url === 'string' && info.download_url.trim()) {
+      info.download_url = isAllowedUpdateUrl(info.download_url) ? new URL(info.download_url.trim()).toString() : '';
+    } else {
+      delete info.download_url;
+    }
+    if (typeof info.page_url === 'string' && info.page_url.trim()) {
+      info.page_url = isAllowedUpdateUrl(info.page_url) ? new URL(info.page_url.trim()).toString() : '';
+    } else {
+      delete info.page_url;
+    }
+    if (typeof info.sha256 === 'string' && !/^[0-9a-f]{64}$/i.test(info.sha256.trim())) {
+      delete info.sha256;
+    }
+    if (Array.isArray(info.notes)) {
+      info.notes = info.notes.filter((n) => typeof n === 'string');
+    }
+    cleanChannels[channelKey] = info;
+  }
+  return { ...manifest, channels: cleanChannels };
 }
 
 export function sendJson(res, status, data) {
@@ -231,20 +436,22 @@ async function handleDeepSeekAsr(req, res) {
 
 async function handleEngineProxy(req, res, urlObj) {
   const streamArchive = urlObj.pathname === '/api/models/ipa-references/library-bundle/download';
+  const timeoutMs = getEngineTimeoutMs(urlObj.pathname);
   const cancel = new AbortController();
   let timedOut = false;
   res.once('close', () => cancel.abort());
   const timeout = streamArchive ? null : setTimeout(() => {
     timedOut = true;
     cancel.abort(new Error('Upstream engine timeout'));
-  }, ENGINE_TIMEOUT_MS);
+  }, timeoutMs);
   const targetPath = urlObj.pathname.replace(/^\/api/, '') + urlObj.search;
   const targetUrl = `${ENGINE_BASE_URL}${targetPath}`;
   try {
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await readBody(req);
     const headers = {};
     if (body) headers['Content-Type'] = req.headers['content-type'] || 'application/json';
-    if (ENGINE_TOKEN) headers['X-VoxFigura-Engine-Token'] = ENGINE_TOKEN;
+    const engineToken = resolveEngineToken();
+    if (engineToken) headers['X-VoxFigura-Engine-Token'] = engineToken;
     const upstream = await fetch(targetUrl, {
       method: req.method,
       headers,
@@ -253,13 +460,13 @@ async function handleEngineProxy(req, res, urlObj) {
     });
     const isNdjsonStream = (upstream.headers.get('content-type') || '').includes('application/x-ndjson');
     if ((streamArchive || isNdjsonStream) && upstream.ok && upstream.body) {
-      const headers = { 'Cache-Control': 'no-store' };
-      if (isNdjsonStream) headers['X-Accel-Buffering'] = 'no';
+      const respHeaders = { 'Cache-Control': 'no-store' };
+      if (isNdjsonStream) respHeaders['X-Accel-Buffering'] = 'no';
       for (const name of ['content-type', 'content-length', 'content-disposition']) {
         const value = upstream.headers.get(name);
-        if (value !== null) headers[name] = value;
+        if (value !== null) respHeaders[name] = value;
       }
-      res.writeHead(upstream.status, headers);
+      res.writeHead(upstream.status, respHeaders);
       await pipeline(Readable.fromWeb(upstream.body), res);
       return;
     }
@@ -282,9 +489,10 @@ async function handleEngineProxy(req, res, urlObj) {
       });
     }
     if (timedOut) {
+      const secs = Math.round(timeoutMs / 1000);
       return sendJson(res, 504, {
         ok: false,
-        error: { code: 'engine_timeout', hint: '本地引擎处理超时（超过 120 秒），请缩短片段或切换设备' },
+        error: { code: 'engine_timeout', hint: `本地引擎处理超时（超过 ${secs} 秒），请缩短片段或切换设备` },
       });
     }
     return sendJson(res, 503, {
@@ -299,7 +507,15 @@ async function handleEngineProxy(req, res, urlObj) {
 
 async function handleUpdateCheck(req, res) {
   const override = typeof process.env.VOXFIGURA_UPDATE_URL === 'string' ? process.env.VOXFIGURA_UPDATE_URL.trim() : '';
-  const urls = override ? [override] : DEFAULT_UPDATE_MANIFEST_URLS;
+  let urls;
+  if (override) {
+    if (!isAllowedUpdateUrl(override)) {
+      return sendJson(res, 400, { ok: false, hint: '更新清单地址须为受信任域名的 HTTPS 链接' });
+    }
+    urls = [override];
+  } else {
+    urls = DEFAULT_UPDATE_MANIFEST_URLS;
+  }
   const cancel = new AbortController();
   res.once('close', () => cancel.abort());
 
@@ -307,6 +523,7 @@ async function handleUpdateCheck(req, res) {
     try {
       const upstream = await fetch(target, {
         method: 'GET',
+        redirect: 'error',
         headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
         signal: AbortSignal.any([cancel.signal, AbortSignal.timeout(UPDATE_TIMEOUT_MS)]),
       });
@@ -314,8 +531,9 @@ async function handleUpdateCheck(req, res) {
         await upstream.body?.cancel();
         continue;
       }
-      const manifest = await upstream.json();
-      if (manifest?.schema === 'voxfigura/update-manifest' && manifest?.channels && typeof manifest.channels === 'object') {
+      const rawManifest = await upstream.json();
+      const manifest = sanitizeUpdateManifest(rawManifest);
+      if (manifest) {
         return sendJson(res, 200, { ok: true, source: target, manifest });
       }
     } catch {
@@ -325,25 +543,25 @@ async function handleUpdateCheck(req, res) {
   return sendJson(res, 502, { ok: false, hint: '暂时无法连接更新服务器，请检查网络后重试' });
 }
 
-export function createProxyServer(extension, { expectedOrigin, serveStatic } = {}) {
+export function createProxyServer(extension, { expectedOrigin, serveStatic, listenPort } = {}) {
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
       const path = url.pathname;
-      if (expectedOrigin) {
-        const origin = req.headers.origin;
-        if ('http://' + req.headers.host !== expectedOrigin ||
-            !req.url.startsWith('/') || req.url.startsWith('//') ||
-            (origin && origin !== expectedOrigin) ||
-            (path.startsWith('/api/') && req.headers['sec-fetch-site'] === 'cross-site')) {
-          return sendJson(res, 403, { ok: false, hint: '请求须来自本机工作台' });
-        }
+      const check = validateProxyRequest(req, path, { expectedOrigin, listenPort });
+      if (!check.ok) {
+        req.resume();
+        return sendJson(res, check.status, {
+          ok: false,
+          error: { code: check.code, hint: check.hint },
+          hint: check.hint,
+        });
       }
       if (serveStatic && !path.startsWith('/api/')) return await serveStatic(req, res, url);
       if (path === '/api/health') return sendJson(res, 200, { ok: true, service: 'vocalcut-node-proxy', engine_url: ENGINE_BASE_URL });
       if (req.method === 'GET' && path === '/api/app/update-check') return await handleUpdateCheck(req, res);
       if (path.startsWith('/api/portable/cache') && await handlePortableCacheRequest(req, res, url)) return;
-      if (path.startsWith('/api/studio/')) return await studioEncoding(req,res,url);
+      if (path.startsWith('/api/studio/')) return await studioEncoding(req, res, url);
       if (req.method === 'POST' && path === '/api/ai/chat') return await handleAiChat(req, res);
       if (req.method === 'POST' && path === '/api/ai/deepseek-asr') return await handleDeepSeekAsr(req, res);
       if (/^\/api\/(vtl|m27|models)\//.test(path)) return await handleEngineProxy(req, res, url);
@@ -357,9 +575,12 @@ export function createProxyServer(extension, { expectedOrigin, serveStatic } = {
 }
 
 export function startProxy(extension, defaultPort = 3001) {
-  const host = process.env.HOST || '127.0.0.1';
+  const requestedHost = (process.env.HOST || '127.0.0.1').trim();
+  const host = isLoopbackHostname(requestedHost) || process.env.VOCALCUT_ALLOW_NON_LOOPBACK === '1'
+    ? requestedHost
+    : '127.0.0.1';
   const port = Number(process.env.PORT || defaultPort);
-  createProxyServer(extension).listen(port, host, () => {
+  createProxyServer(extension, { listenPort: port }).listen(port, host, () => {
     console.log('VoxFigura proxy listening on http://' + host + ':' + port);
   });
 }

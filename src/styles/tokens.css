@@ -71,6 +71,14 @@
   --tract-tongue-stroke: rgba(176, 88, 86, 0.86);
   --overlay: rgba(15, 20, 32, 0.46);
 
+  /* Piano Roll Keyboard Tokens (white keys always brighter than ebony black keys in both themes) */
+  --piano-white-base: var(--panel);
+  --piano-white-shade: color-mix(in srgb, var(--sidebar) 76%, var(--panel));
+  --piano-white-fg: var(--text);
+  --piano-black-top: color-mix(in srgb, var(--shadow-ink) 78%, var(--panel));
+  --piano-black-bot: color-mix(in srgb, var(--shadow-ink) 94%, var(--panel));
+  --piano-black-fg: var(--panel);
+
   /* Adaptive Scale & Layout Density */
   --page-scale: 1;
   --track-row-scale: 1;
@@ -112,6 +120,9 @@
     inset 0 0 0 0.5px rgba(15, 23, 42, 0.05);
   --shadow-panel: var(--panel-shadow);
   --ctrl-bg: rgba(252, 252, 252, 0.86);
+  --themed-button-bg: color-mix(in srgb, var(--accent) 8%, var(--ctrl-bg));
+  --themed-button-hover-bg: color-mix(in srgb, var(--accent) 16%, var(--ctrl-bg));
+  --themed-button-border: color-mix(in srgb, var(--accent) 22%, var(--ctrl-border));
   --ctrl-shadow:
     2px 3px 7px rgba(15, 23, 42, 0.065),
     -2px -2px 5px rgba(255, 255, 255, 0.82),
@@ -147,6 +158,7 @@
   --z-popover: 50;
   --z-overlay: 70;
   --z-modal: 90;
+  --z-tooltip: 1200;
 }
 
 :root[data-theme="dark"] {
@@ -155,6 +167,12 @@
   --tract-tongue: rgba(224, 138, 136, 0.30);
   --tract-tongue-stroke: rgba(236, 158, 156, 0.84);
   --overlay: rgba(4, 8, 16, 0.66);
+  --piano-white-base: color-mix(in srgb, var(--text) 78%, var(--panel));
+  --piano-white-shade: color-mix(in srgb, var(--text) 66%, var(--panel));
+  --piano-white-fg: color-mix(in srgb, var(--shadow-ink) 88%, var(--panel));
+  --piano-black-top: color-mix(in srgb, var(--shadow-ink) 74%, var(--panel));
+  --piano-black-bot: color-mix(in srgb, var(--shadow-ink) 92%, var(--panel));
+  --piano-black-fg: color-mix(in srgb, var(--text) 90%, var(--panel));
   --glass-alpha: 64%;
   --panel-strong: color-mix(in srgb, var(--sidebar) 88%, #ffffff 4%);
   --line: rgba(255, 255, 255, 0.11);

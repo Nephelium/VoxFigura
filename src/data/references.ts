@@ -75,13 +75,13 @@ export const METHOD_REFERENCES: MethodReference[] = [
     "modules": ["工作台与基础架构", "国际音标表 Plus", "发音字典管理"],
     "importance": 99,
     "acknowledgement_group": "software",
-    "authors": "井韶子",
+    "authors": "井立文",
     "license": "GPL-3.0-or-later",
     "urls": {
       "phonetictoolbox.com": "https://www.phonetictoolbox.com/",
       "github": "https://github.com/Nephelium/PhoneticToolbox"
     },
-    "citation": "井韶子. PhoneticToolbox v3 (3.1.3)[CP/OL]. https://www.phonetictoolbox.com/ (GitHub: https://github.com/Nephelium/PhoneticToolbox).",
+    "citation": "井立文. PhoneticToolbox v3 (3.1.3)[CP/OL]. https://www.phonetictoolbox.com/ (GitHub: https://github.com/Nephelium/PhoneticToolbox).",
     "reference_note": "同作者前序开源工程（GPL-3.0-or-later）。VoxFigura 复用了其中的国际音标表 Plus 体系、多语文字转 IPA 流程、2D/3D 声道可视化底座及文献致谢架构。"
   },
   {
@@ -586,7 +586,7 @@ export const METHOD_REFERENCES: MethodReference[] = [
     "modules": ["国际音标表 Plus", "发音卡工坊", "工作台与基础架构"],
     "importance": 78,
     "acknowledgement_group": "software",
-    "authors": "井韶子；SIL Global；Noto authors",
+    "authors": "井立文；SIL Global；Noto authors",
     "license": "SIL Open Font License 1.1",
     "urls": {
       "upstream": "https://software.sil.org/doulos/",
@@ -594,7 +594,7 @@ export const METHOD_REFERENCES: MethodReference[] = [
       "noto_delimiters": "https://raw.githubusercontent.com/notofonts/noto-fonts/main/hinted/ttf/NotoSansMath/NotoSansMath-Regular.ttf",
       "noto_license": "https://raw.githubusercontent.com/notofonts/noto-fonts/main/LICENSE"
     },
-    "citation": "井韶子. PTB IPA Plus 1.000[CP/OL]. https://github.com/Nephelium/PhoneticToolbox.\nSIL INTERNATIONAL. Doulos SIL 7.000[CP/OL]. https://software.sil.org/doulos/.\nNOTO AUTHORS. Noto Sans Math[CP/OL]. https://github.com/notofonts/noto-fonts.",
+    "citation": "井立文. PTB IPA Plus 1.000[CP/OL]. https://github.com/Nephelium/PhoneticToolbox.\nSIL INTERNATIONAL. Doulos SIL 7.000[CP/OL]. https://software.sil.org/doulos/.\nNOTO AUTHORS. Noto Sans Math[CP/OL]. https://github.com/notofonts/noto-fonts.",
     "reference_note": ""
   },
   {

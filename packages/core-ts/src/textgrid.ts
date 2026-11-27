@@ -6,6 +6,7 @@
 import {
   DEFAULT_FPS,
   SAMPLE_RATE_HZ,
+  assertValidF0Hz,
   fail,
   ok,
   outOfRange,
@@ -463,28 +464,6 @@ export function parsePitchTier(content: string): Result<{ xmin: number; xmax: nu
   return ok({ xmin, xmax, points });
 }
 
-export function exportIntensityTier(
-  points: ReadonlyArray<{ time_s: number; db: number }>,
-  xmin: number = 0,
-  xmax?: number,
-): string {
-  const end = xmax ?? (points.length > 0 ? points[points.length - 1].time_s : 1);
-  const lines = [
-    'File type = "ooTextFile"',
-    'Object class = "IntensityTier"',
-    '',
-    `xmin = ${xmin}`,
-    `xmax = ${end}`,
-    `points: size = ${points.length}`,
-  ];
-  points.forEach((pt, idx) => {
-    lines.push(`points [${idx + 1}]:`);
-    lines.push(`    number = ${pt.time_s}`);
-    lines.push(`    value = ${pt.db}`);
-  });
-  return lines.join('\n') + '\n';
-}
-
 function fmtSrtTime(sec: number): string {
   const msTotal = Math.max(0, Math.round(sec * 1000));
   const h = Math.floor(msTotal / 3600000);
@@ -652,8 +631,9 @@ export function importPtbVocalJson(raw: unknown): Result<VcProject> {
       if (typeof f.f0 !== 'number' || !Number.isFinite(f.f0)) {
         return fail({ code: 'validation_error', field: `frames[${idx}].f0`, value: f.f0, hint: '导入帧的 f0 必须为有限数字 (Hz)' });
       }
-      if (f.f0 < 60 || f.f0 > 600) {
-        return outOfRange(`frames[${idx}].f0`, f.f0, 60, 600, 'Hz');
+      if (f.f0 <= 0) {
+        const f0Chk = assertValidF0Hz(`frames[${idx}].f0`, f.f0);
+        if (!f0Chk.ok) return f0Chk;
       }
     }
     const f0 = typeof f.f0 === 'number' ? f.f0 : fRefHz;

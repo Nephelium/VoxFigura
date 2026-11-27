@@ -174,7 +174,7 @@ export function mixStageTrackSettings(project: VcProject, clips: readonly NleCli
   return clips.map(clip => {
     if (!isStageAudioTrack(clip.track)) return clip;
     const track = tracks.get(clip.track);
-    if (!track) return clip;
+    if (!track) return anySolo ? { ...clip, muted: true } : clip;
     const effectiveTrackMuted = track.muted || (anySolo && !track.solo);
     return { ...clip, gain: (clip.gain ?? 1) * track.gain, muted: Boolean(clip.muted || effectiveTrackMuted) };
   });
@@ -216,6 +216,7 @@ export function readTimeline(project: VcProject, clipId: string): NleClip[] {
             region && isInstrument(region.instrument) && Number.isSafeInteger(region.startSmp) &&
             Number.isSafeInteger(region.endSmp) && region.startSmp >= 0 && region.endSmp > region.startSmp) : undefined,
         } : undefined,
+        gain: typeof data.gain === 'number' && Number.isFinite(data.gain) && data.gain >= 0 ? data.gain : undefined,
         gainPoints: isStageAudioTrack(data.track) ? readStageGainPoints(data.gainPoints) : undefined,
         startSmp: t_smp!,
       },

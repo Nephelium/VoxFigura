@@ -34,7 +34,7 @@ export function snapshot(view){return JSON.parse(JSON.stringify({metadata:view.v
 // spatial model and can switch between both.
 // pose: async pose => state. With it the view is editable: a drag asks for the
 // state of the new articulation, and Ctrl+Z / Ctrl+Y step through the drags.
-export async function mountVocalTract(host,{metadata,state,view='sagittal',pose=null,options={},theme=null,locale=null,linkLips=true,onChange=()=>{},onSelect=()=>{},onCommit=()=>{}}={}){
+export async function mountVocalTract(host,{metadata,state,view='sagittal',pose=null,options={},theme=null,locale=null,linkLips=true,captureUndo=true,sagittalOnly=null,onChange=()=>{},onSelect=()=>{},onCommit=()=>{}}={}){
   if(!host||!metadata)throw new Error('vocal-tract view: host and metadata are required');
   await styles();paint(theme);if(locale)await setFrameLocale(locale);
   const frame=document.createElement('div'),compass=document.createElement('div');
@@ -90,7 +90,10 @@ export async function mountVocalTract(host,{metadata,state,view='sagittal',pose=
     if(rootPending&&busy){rootCommit=true;return;}
     commitCurrent();
   };
-  const viewer=new VocalTractViewer(frame,drag,{onStart:()=>{rootAccepted=null;if(current)history.begin(current);},onEnd:end,onSelect,sagittalOnly:planar||view==='sagittal',editable:!!pose});
+  const viewerOpts={onStart:()=>{rootAccepted=null;if(current)history.begin(current);},onEnd:end,onSelect,sagittalOnly:sagittalOnly??planar,editable:!!pose};
+  let viewer;
+  try{viewer=new VocalTractViewer(frame,drag,viewerOpts);}
+  catch(err){if(viewerOpts.sagittalOnly||view==='model')throw err;viewer=new VocalTractViewer(frame,drag,{...viewerOpts,sagittalOnly:true});}
   viewer.metadata=metadata;await viewer.load();
   viewer.setOptions({teeth:true,...options});viewer.setView(view!=='model');
   if(state)viewer.update(state);
@@ -100,13 +103,19 @@ export async function mountVocalTract(host,{metadata,state,view='sagittal',pose=
     const key=e.key.toLowerCase();
     if(key==='z'||key==='y'){e.preventDefault();step(key==='z'&&!e.shiftKey);}
   };
-  frame.addEventListener('keydown',keys);
+  if(captureUndo)frame.addEventListener('keydown',keys);
   return {
     viewer,element:frame,
     // Shows a state from the engine and makes it the articulation that drags start from.
     update(next){if(viewer.rawState!==next){current=poseOf(next);viewer.update(next);}},
     setSection(index){viewer.setScanSection(index);},
     setPosePreview(active){viewer.setPosePreview(active);},
+    setPlaying(active){
+      const next=Boolean(active);
+      if(viewer.playing===next)return;
+      viewer.playing=next;
+      if(!next&&viewer.rawState){viewer.draw2D();if(!viewer.sagittal)viewer.style3D();}
+    },
     get pose(){return current;},
     setView(name){if(name==='model'&&viewer.sagittalOnly)throw new Error('vocal-tract view: mounted for the sagittal section only');viewer.setView(name!=='model');},
     setOptions(next){viewer.setOptions(next);},
@@ -114,7 +123,7 @@ export async function mountVocalTract(host,{metadata,state,view='sagittal',pose=
     resetView(){viewer.reset();},
     undo:()=>step(true),redo:()=>step(false),
     // Call after the host theme changed.
-    setTheme(next){paint(next);viewer.draw2D();viewer.style3D();},
-    destroy(){closed=true;frame.removeEventListener('keydown',keys);viewer.dispose();},
+    setTheme(next){paint(next);viewer.invalidateTheme?.();viewer.draw2D();viewer.style3D();},
+    destroy(){closed=true;if(captureUndo)frame.removeEventListener('keydown',keys);viewer.dispose();},
   };
 }

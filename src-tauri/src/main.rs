@@ -2,9 +2,12 @@
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::env;
+use std::ffi::{c_void, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -12,26 +15,102 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{Manager, RunEvent};
+use tauri::{webview::PageLoadEvent, Manager, RunEvent};
 
 const FOOTER_MAGIC: &[u8; 8] = b"VFPORT2!";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CACHE_ROOT_MARKER: &str = ".voxfigura-cache-root";
+const DEDICATED_SUBDIR_NAME: &str = "VoxFigura-Cache";
+const ERROR_ALREADY_EXISTS: u32 = 183;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateMutexW(
+        lp_mutex_attributes: *mut c_void,
+        b_initial_owner: i32,
+        lp_name: *const u16,
+    ) -> *mut c_void;
+    fn GetLastError() -> u32;
+    fn CloseHandle(h_object: *mut c_void) -> i32;
+}
+
+struct SingleInstanceGuard {
+    handle: *mut c_void,
+}
+
+unsafe impl Send for SingleInstanceGuard {}
+unsafe impl Sync for SingleInstanceGuard {}
+
+impl SingleInstanceGuard {
+    fn acquire(edition: &str) -> (Option<Self>, bool) {
+        let safe_ed: String = edition
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let name = format!(
+            "Local\\VoxFigura-SingleInstance-{}",
+            if safe_ed.is_empty() { "default" } else { &safe_ed }
+        );
+        let wide: Vec<u16> = OsStr::new(&name).encode_wide().chain(Some(0)).collect();
+        unsafe {
+            let handle = CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr());
+            if handle.is_null() {
+                return (None, false);
+            }
+            let already_exists = GetLastError() == ERROR_ALREADY_EXISTS;
+            if already_exists {
+                let _ = CloseHandle(handle);
+                return (None, true);
+            }
+            (Some(Self { handle }), false)
+        }
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct OverlayMeta {
     edition: String,
     archive_sha256: String,
     manifest_sha256: String,
+    #[serde(default)]
+    extractor_sha256: Option<String>,
     extractor_offset: u64,
     extractor_len: u64,
     archive_offset: u64,
     archive_len: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct BundleManifestFile {
+    bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleManifest {
+    files: HashMap<String, BundleManifestFile>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct LauncherConfig {
     #[serde(rename = "cacheRoot")]
     cache_root: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct UiStatusState {
+    last_status: Option<String>,
+    last_error: Option<String>,
 }
 
 struct PreparedBundle {
@@ -85,6 +164,15 @@ fn read_overlay_meta(exe: &mut File) -> Result<OverlayMeta, String> {
     serde_json::from_slice(&meta_buf).map_err(|e| format!("解析包头 JSON 失败: {e}"))
 }
 
+fn peek_edition() -> String {
+    env::current_exe()
+        .ok()
+        .and_then(|p| File::open(p).ok())
+        .and_then(|mut f| read_overlay_meta(&mut f).ok())
+        .map(|m| m.edition)
+        .unwrap_or_else(|| "default".to_string())
+}
+
 fn extract_slice(exe: &mut File, offset: u64, len: u64, target: &Path, compute_hash: bool) -> Result<Option<String>, String> {
     exe.seek(SeekFrom::Start(offset)).map_err(|e| format!("定位内嵌数据失败: {e}"))?;
     let mut out = File::create(target).map_err(|e| format!("创建临时文件失败: {e}"))?;
@@ -107,19 +195,67 @@ fn extract_slice(exe: &mut File, offset: u64, len: u64, target: &Path, compute_h
     Ok(hasher.map(|h| hex_encode(&h.finalize())))
 }
 
+fn is_critical_bundle_file(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    if lower.ends_with(".onnx")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".pyd")
+        || lower.ends_with(".exe")
+        || lower.starts_with("server/")
+    {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "engine/server.py" | "engine/dense_channel.py" | "engine/validation.py" | "engine/onnx_inference.py"
+    )
+}
+
 fn is_ready(app: &Path, manifest_hash: &str) -> bool {
-    let manifest = app.join("bundle-manifest.json");
-    if !manifest.is_file() {
+    let manifest_path = app.join("bundle-manifest.json");
+    if !manifest_path.is_file() {
         return false;
     }
-    match sha256_file(&manifest) {
-        Ok(h) if h == manifest_hash => {
-            app.join("runtime").join("node").join("node.exe").is_file()
-                && app.join("runtime").join("python").join("python.exe").is_file()
-                && app.join("server").join("portable.mjs").is_file()
-        }
-        _ => false,
+    match sha256_file(&manifest_path) {
+        Ok(h) if h == manifest_hash => {}
+        _ => return false,
     }
+    let raw = match fs::read_to_string(&manifest_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let manifest: BundleManifest = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    for required in [
+        "runtime/node/node.exe",
+        "runtime/python/python.exe",
+        "runtime/media/ffmpeg.exe",
+        "server/portable.mjs",
+        "server/proxy.mjs",
+        "engine/server.py",
+    ] {
+        if !manifest.files.contains_key(required) {
+            return false;
+        }
+    }
+
+    for (rel, entry) in &manifest.files {
+        if !is_critical_bundle_file(rel) {
+            continue;
+        }
+        let target = app.join(rel);
+        let meta = match fs::symlink_metadata(&target) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if !meta.is_file() || meta.len() != entry.bytes {
+            return false;
+        }
+    }
+    true
 }
 
 fn acquire_lock(lock_path: &Path) -> Result<File, String> {
@@ -151,6 +287,31 @@ fn unique_suffix() -> String {
     format!("{}-{:x}", std::process::id(), nanos)
 }
 
+fn same_path_ci(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase()
+        == b.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase()
+}
+
+fn is_safe_direct_cache_dir(dir: &Path) -> Result<bool, ()> {
+    match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err(()),
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(());
+            }
+            let marker = dir.join(CACHE_ROOT_MARKER);
+            if let Ok(m) = fs::symlink_metadata(&marker) {
+                if m.is_file() {
+                    return Ok(true);
+                }
+            }
+            let mut entries = fs::read_dir(dir).map_err(|_| ())?;
+            Ok(entries.next().is_none())
+        }
+    }
+}
+
 fn resolve_cache_root(local_appdata: &str) -> (PathBuf, PathBuf) {
     let base = PathBuf::from(local_appdata).join("VoxFigura");
     let config_path = base.join("launcher-config.json");
@@ -159,14 +320,43 @@ fn resolve_cache_root(local_appdata: &str) -> (PathBuf, PathBuf) {
         if let Ok(cfg) = serde_json::from_str::<LauncherConfig>(&raw) {
             if let Some(custom) = cfg.cache_root {
                 let trimmed = custom.trim();
+                let has_ctrl = trimmed.chars().any(|c| c.is_control());
                 let candidate = PathBuf::from(trimmed);
-                if !trimmed.is_empty() && candidate.is_absolute() && candidate.parent().is_some() {
-                    return (candidate, config_path);
+                if !trimmed.is_empty() && !has_ctrl && candidate.is_absolute() && candidate.parent().is_some() {
+                    if same_path_ci(&candidate, &default_root) {
+                        return (default_root, config_path);
+                    }
+                    match is_safe_direct_cache_dir(&candidate) {
+                        Ok(true) => return (candidate, config_path),
+                        Ok(false) => {
+                            let already_dedicated = candidate
+                                .file_name()
+                                .map(|n| n.to_string_lossy().eq_ignore_ascii_case(DEDICATED_SUBDIR_NAME))
+                                .unwrap_or(false);
+                            if !already_dedicated {
+                                let subdir = candidate.join(DEDICATED_SUBDIR_NAME);
+                                if matches!(is_safe_direct_cache_dir(&subdir), Ok(true)) {
+                                    return (subdir, config_path);
+                                }
+                            }
+                        }
+                        Err(()) => {}
+                    }
                 }
             }
         }
     }
     (default_root, config_path)
+}
+
+fn ensure_cache_root_marker(root: &Path) {
+    let marker = root.join(CACHE_ROOT_MARKER);
+    if !marker.is_file() {
+        let _ = fs::write(
+            &marker,
+            "{\n  \"app\": \"VoxFigura\",\n  \"purpose\": \"portable-cache-root\"\n}\n",
+        );
+    }
 }
 
 fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, String> {
@@ -181,6 +371,7 @@ fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, Str
 
     let (root, config_path) = resolve_cache_root(&local_appdata);
     fs::create_dir_all(&root).map_err(|e| format!("无法创建运行缓存目录 ({}): {e}", root.display()))?;
+    ensure_cache_root_marker(&root);
 
     let hash_prefix = &meta.archive_sha256[..meta.archive_sha256.len().min(16)];
     let app_dir = root.join(format!("{}-{}", meta.edition, hash_prefix));
@@ -205,7 +396,20 @@ fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, Str
         let extracted_dir = scratch.join("app");
         fs::create_dir_all(&extracted_dir).map_err(|e| format!("无法创建解压目标目录: {e}"))?;
 
-        extract_slice(&mut exe_file, meta.extractor_offset, meta.extractor_len, &extractor_path, false)?;
+        let actual_extractor_hash = extract_slice(
+            &mut exe_file,
+            meta.extractor_offset,
+            meta.extractor_len,
+            &extractor_path,
+            true,
+        )?
+        .unwrap_or_default();
+        if let Some(expected_ext_hash) = meta.extractor_sha256.as_deref() {
+            if !expected_ext_hash.is_empty() && actual_extractor_hash != expected_ext_hash {
+                return Err("内嵌解压器 SHA-256 校验不匹配，程序文件可能已损坏。".to_string());
+            }
+        }
+
         let actual_hash = extract_slice(&mut exe_file, meta.archive_offset, meta.archive_len, &archive_path, true)?
             .unwrap_or_default();
         if actual_hash != meta.archive_sha256 {
@@ -225,7 +429,7 @@ fn prepare_bundle(mut on_status: impl FnMut(&str)) -> Result<PreparedBundle, Str
             return Err("内嵌运行包解压失败，请检查磁盘空间后重试。".to_string());
         }
         if !is_ready(&extracted_dir, &meta.manifest_sha256) {
-            return Err("解压完成后缺少必需的运行文件。".to_string());
+            return Err("解压完成后缺少必需的运行文件或文件校验失败。".to_string());
         }
         if app_dir.exists() {
             let stale = root.join(format!("{}-{}.incomplete-{}", meta.edition, hash_prefix, unique_suffix()));
@@ -350,11 +554,29 @@ fn run_headless(no_browser: bool) -> i32 {
     code
 }
 
-fn set_window_status(window: &tauri::WebviewWindow, fn_name: &str, text: &str) {
-    if let Ok(json_text) = serde_json::to_string(text) {
-        let script = format!("window.{fn_name} && window.{fn_name}({json_text});");
+fn eval_window_status(window: &tauri::WebviewWindow, fn_name: &str, text: &str) {
+    if let (Ok(json_fn), Ok(json_text)) = (serde_json::to_string(fn_name), serde_json::to_string(text)) {
+        let script = format!(
+            "(function(fn,msg){{if(typeof window[fn]==='function'){{window[fn](msg);}}else{{window.__vfPending=window.__vfPending||[];window.__vfPending.push([fn,msg]);}}}})({json_fn},{json_text});"
+        );
         let _ = window.eval(&script);
     }
+}
+
+fn set_window_status(
+    window: &tauri::WebviewWindow,
+    ui_state: &Arc<Mutex<UiStatusState>>,
+    fn_name: &str,
+    text: &str,
+) {
+    if let Ok(mut guard) = ui_state.lock() {
+        if fn_name == "__vfSetError" {
+            guard.last_error = Some(text.to_string());
+        } else {
+            guard.last_status = Some(text.to_string());
+        }
+    }
+    eval_window_status(window, fn_name, text);
 }
 
 fn main() {
@@ -366,30 +588,67 @@ fn main() {
         std::process::exit(run_headless(true));
     }
 
+    let edition = peek_edition();
+    let (instance_guard, already_running) = SingleInstanceGuard::acquire(&edition);
+    let _instance_guard_holder = Arc::new(Mutex::new(instance_guard));
+
     let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     let child_for_setup = Arc::clone(&child_slot);
     let child_for_exit = Arc::clone(&child_slot);
+    let ui_state: Arc<Mutex<UiStatusState>> = Arc::new(Mutex::new(UiStatusState::default()));
+    let ui_for_load = Arc::clone(&ui_state);
+    let ui_for_setup = Arc::clone(&ui_state);
 
     let app = tauri::Builder::default()
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                let url_str = payload.url().as_str();
+                if !url_str.starts_with("http://127.0.0.1:") {
+                    if let Some(window) = webview.app_handle().get_webview_window("main") {
+                        let snapshot = ui_for_load
+                            .lock()
+                            .ok()
+                            .map(|g| (g.last_error.clone(), g.last_status.clone()));
+                        if let Some((err_opt, status_opt)) = snapshot {
+                            if let Some(err_msg) = err_opt {
+                                eval_window_status(&window, "__vfSetError", &err_msg);
+                            } else if let Some(status_msg) = status_opt {
+                                eval_window_status(&window, "__vfSetStatus", &status_msg);
+                            }
+                        }
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             let window = app.get_webview_window("main").expect("main window must exist");
             let win_bg = window.clone();
+            let ui_bg = Arc::clone(&ui_for_setup);
+            if already_running {
+                set_window_status(
+                    &win_bg,
+                    &ui_bg,
+                    "__vfSetError",
+                    "检测到同版本的 VoxFigura 实例正在运行，请切换回已有窗口或关闭后再重新启动。",
+                );
+                return Ok(());
+            }
             thread::spawn(move || {
                 let bundle = match prepare_bundle(|msg| {
-                    set_window_status(&win_bg, "__vfSetStatus", msg);
+                    set_window_status(&win_bg, &ui_bg, "__vfSetStatus", msg);
                 }) {
                     Ok(b) => b,
                     Err(err) => {
-                        set_window_status(&win_bg, "__vfSetError", &err);
+                        set_window_status(&win_bg, &ui_bg, "__vfSetError", &err);
                         return;
                     }
                 };
 
-                set_window_status(&win_bg, "__vfSetStatus", "正在启动本地物理声道与神经推理引擎…");
+                set_window_status(&win_bg, &ui_bg, "__vfSetStatus", "正在启动本地物理声道与神经推理引擎…");
                 let mut child = match spawn_portable_server(&bundle) {
                     Ok(c) => c,
                     Err(err) => {
-                        set_window_status(&win_bg, "__vfSetError", &err);
+                        set_window_status(&win_bg, &ui_bg, "__vfSetError", &err);
                         return;
                     }
                 };
@@ -453,11 +712,11 @@ fn main() {
                     match url_str.parse::<tauri::Url>() {
                         Ok(parsed) => {
                             if let Err(err) = win_bg.navigate(parsed) {
-                                set_window_status(&win_bg, "__vfSetError", &format!("桌面窗口加载本地工作台失败: {err}"));
+                                set_window_status(&win_bg, &ui_bg, "__vfSetError", &format!("桌面窗口加载本地工作台失败: {err}"));
                             }
                         }
                         Err(err) => {
-                            set_window_status(&win_bg, "__vfSetError", &format!("本地服务地址无效 ({url_str}): {err}"));
+                            set_window_status(&win_bg, &ui_bg, "__vfSetError", &format!("本地服务地址无效 ({url_str}): {err}"));
                         }
                     }
                 } else {
@@ -470,7 +729,7 @@ fn main() {
                     } else {
                         format!("本地服务启动失败：\n{details}")
                     };
-                    set_window_status(&win_bg, "__vfSetError", &msg);
+                    set_window_status(&win_bg, &ui_bg, "__vfSetError", &msg);
                 }
             });
             Ok(())
@@ -478,9 +737,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build VoxFigura Tauri application");
 
+    let guard_for_exit = Arc::clone(&_instance_guard_holder);
     app.run(move |_app_handle, event| {
         if let RunEvent::Exit = event {
             stop_child(&child_for_exit);
+            if let Ok(mut g) = guard_for_exit.lock() {
+                let _ = g.take();
+            }
         }
     });
 }

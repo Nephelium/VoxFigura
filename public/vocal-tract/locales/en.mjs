@@ -799,7 +799,7 @@ export default {
   "platform.this_audio_permission_request_has_expired_click_authorize_and": "This audio-permission request has expired. Click Authorize and refresh devices again.",
   "platform.this_media_permission_request_has_expired_click_start_capture": "This media-permission request has expired. Click Start capture again.",
   "platform.no_output_folder_was_selected_managed_results_are_retained": "No output folder was selected. Managed results are retained; you can retry exporting.",
-  "platform.jing_shaozi": "Jing Shaozi",
+  "platform.jing_shaozi": "Jing Liwen",
   "platform.this_feedback_operation_is_unavailable": "This feedback operation is unavailable.",
   "platform.your_login_has_expired_log_in_again": "Your login has expired. Log in again.",
   "platform.the_account_has_changed_reopen_feedback": "The account has changed. Reopen Feedback.",

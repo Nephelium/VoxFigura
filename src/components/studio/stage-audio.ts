@@ -2,10 +2,12 @@ import { SAMPLE_RATE_HZ, type Clip, type VcProject } from '@vocalcut/core';
 import { applyPeakAudioGain, synthesisGainMode, voiceRenderLabels, voiceRenderMode, type VoiceRenderMode } from '@/data/voice-renderer';
 import { speakerReferenceAudio, speakerReferenceId } from '@/data/synthesis-speaker';
 import { defaultTractParams, tractRecordToArray19, type WorkbenchStore } from '@/stores/workbench';
+import { type AnnotationIpaPoseSource } from '@/components/research/annotation-audio';
 import { spliceAnnotationPcm, type AnnotationTractFrame } from '@/components/research/annotation-edit';
 import { absolutePianoNotes } from '@/components/research/control-pitch';
 import { getFullPoseForIpa } from '@/components/research/research-utils';
 import { ipaPoseSetRevision, loadDefaultIpaPoses } from '@/data/ipa-pose-sets';
+import { textPoseSource } from '@/data/ipa-pose-source';
 import { preloadPtbIpaPresets } from '@/data/ptb-ipa-presets';
 import { isStageAudioTrack, isStageVocalTrack, readTimeline, stageAudioSettings, type NleClip } from './nle-timeline';
 import { sessionMedia } from './studio-media';
@@ -22,6 +24,7 @@ interface StageSynthesisMotion {
   frames: AnnotationTractFrame[];
   m27RowsPa?: number[][];
   poseSetRevision: number;
+  poseSource: AnnotationIpaPoseSource;
   mode: VoiceRenderMode;
   sourceOriginSmp: number;
   sourceLengthSmp: number;
@@ -30,7 +33,11 @@ interface StageSynthesisMotion {
 const synthesizedMotion = new WeakMap<VcProject, Map<string, StageSynthesisMotion>>();
 export function getStageSynthesisMotion(project: VcProject, clipId: string): StageSynthesisMotion | undefined {
   const motion = synthesizedMotion.get(project)?.get(clipId);
-  return motion?.mode === voiceRenderMode.value && motion.poseSetRevision === ipaPoseSetRevision.value ? motion : undefined;
+  return motion?.mode === voiceRenderMode.value
+    && motion.poseSetRevision === ipaPoseSetRevision.value
+    && motion.poseSource === textPoseSource.value
+    ? motion
+    : undefined;
 }
 
 export function visualSynthesisMotion(project: VcProject, clips: readonly NleClip[], visual: NleClip, activeClipId: string) {
@@ -86,7 +93,7 @@ function captureAudioState(store: WorkbenchStore, project: VcProject, activeClip
   return {
     store, project, activeClipId, clips, mode: voiceRenderMode.value, audioGain: synthesisGainMode.value,
     device: store.computeDevice.value, speakerId: speakerReferenceId.value,
-    speakerWavBase64: speakerReferenceAudio.value,
+    speakerWavBase64: speakerReferenceAudio.value, poseSource: textPoseSource.value,
   };
 }
 
@@ -149,9 +156,19 @@ async function synthesizePhrase(state: StageAudioState, clip: NleClip, phrase: C
     }
   }
   const referenceTrack = stageControlReference(state, clip, phrase);
+  const referenceKey = referenceTrack
+    ? [
+      referenceTrack.frames?.length ?? 0,
+      referenceTrack.frames?.[0]?.u ?? 0,
+      referenceTrack.frames?.at(-1)?.u ?? 0,
+      referenceTrack.m27RowsPa?.length ?? 0,
+      referenceTrack.m27RowsPa?.[0]?.[0] ?? 0,
+      referenceTrack.m27RowsPa?.at(-1)?.[0] ?? 0,
+    ]
+    : null;
   const key = JSON.stringify([
     project.id, scoped, voice, mode, audioGain, mode === 'neural' ? [device, state.speakerId] : 'cpu',
-    referenceTrack, ipaPoseSetRevision.value,
+    referenceKey, referenceTrack ? null : state.poseSource, ipaPoseSetRevision.value,
   ]);
   const cached = renderedPhrases.get(key);
   if (cached) {
@@ -162,8 +179,10 @@ async function synthesizePhrase(state: StageAudioState, clip: NleClip, phrase: C
   const job = store.synthesizeRange({
     annotation: true, phrase: scoped, mode, audioGain, computeDevice: device, cacheWaveform: false,
     tractParams: fallbackTract, f0Hz: voice?.f0_ref_hz ?? 125, returnControlTrack: true, referenceTrack,
-    speakerWavBase64: state.speakerWavBase64,
+    ipaPoseSource: referenceTrack ? undefined : state.poseSource,
+    speakerWavBase64: state.speakerWavBase64, signal,
   }).then(audio => {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('已取消合成', 'AbortError');
     if (!audio) throw new Error(`「${clip.label}」未完成${voiceRenderLabels[mode]}。请检查引擎和音素设置。`);
     return audio;
   }).catch(error => {
@@ -205,12 +224,12 @@ async function resolveStageSound(
   if (raw && !forceRender && !notes.length) return { buffer: raw, sourceOriginSmp: 0 };
   const poseSetRevision = ipaPoseSetRevision.value;
   const buffer = await synthesizePhrase(state, clip, phrase, signal);
-  if (!raw || !notes.length) {
+  if (forceRender || !raw || !notes.length) {
     const sourceOriginSmp = committed || clip.sourceStartSmp < phrase.start_smp ? 0 : phrase.start_smp;
     const details = state.store.synthesisInfo(buffer);
     const motion = details?.tractFrames?.length ? {
       frames: details.tractFrames, m27RowsPa: details.m27RowsPa, mode: state.mode, poseSetRevision,
-      sourceOriginSmp, sourceLengthSmp: Math.round(buffer.duration * SAMPLE_RATE_HZ),
+      poseSource: state.poseSource, sourceOriginSmp, sourceLengthSmp: Math.round(buffer.duration * SAMPLE_RATE_HZ),
     } : undefined;
     if (motion) {
       const tracks = synthesizedMotion.get(state.project) ?? new Map();

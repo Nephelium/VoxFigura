@@ -1,7 +1,5 @@
 import { shallowReactive } from 'vue';
 import type { AssetRef } from '@vocalcut/core';
-import { encodeWavFromAudioBuffer } from '@/components/modals/download';
-import { applyPeakAudioGain, synthesisGainMode } from '@/data/voice-renderer';
 import type { VocalSourceKind } from './nle-timeline';
 
 export interface SessionMedia {
@@ -13,11 +11,19 @@ export interface SessionMedia {
   transferred?: { frames: { u: number; params: number[] }[]; rowsPa: number[][]; sourceKind?: VocalSourceKind };
 }
 export const sessionMedia = shallowReactive(new Map<string, SessionMedia>());
+const releaseListeners = new Set<(url: string) => void>();
+export function onSessionMediaUrlReleased(listener: (url: string) => void): () => void {
+  releaseListeners.add(listener);
+  return () => releaseListeners.delete(listener);
+}
 
 export function releaseSessionMedia(id: string): void {
   const existing = sessionMedia.get(id);
   if (!existing) return;
-  if (existing.url?.startsWith('blob:')) URL.revokeObjectURL(existing.url);
+  if (existing.url?.startsWith('blob:')) {
+    URL.revokeObjectURL(existing.url);
+    for (const listener of releaseListeners) listener(existing.url);
+  }
   sessionMedia.delete(id);
 }
 
@@ -58,12 +64,6 @@ export async function importMedia(file: File, renderedAudio?: AudioBuffer): Prom
     if (kind === 'score') media.content = await file.text();
     if (kind === 'audio') {
       media.audio = renderedAudio ?? sessionMedia.get(id)?.audio ?? await studioAudioContext().decodeAudioData(bytes);
-      if (!renderedAudio && !sessionMedia.has(id) && synthesisGainMode.value === 'peak') {
-        applyPeakAudioGain(media.audio);
-        URL.revokeObjectURL(url);
-        url = URL.createObjectURL(encodeWavFromAudioBuffer(media.audio));
-        media.url = url;
-      }
       asset.duration_smp = Math.round(media.audio.duration * 48000);
     }
     if (kind === 'video') {
@@ -87,16 +87,42 @@ export async function importMedia(file: File, renderedAudio?: AudioBuffer): Prom
       img.src = url;
       await img.decode();
       if (ext === 'jpg' || ext === 'jpeg') media.stillImage = true;
-      if (ext === 'png') {
+      if (ext === 'png' && bytes.byteLength >= 8) {
         const view = new DataView(bytes);
-        let animated = false;
-        for (let i = 8; i + 12 <= bytes.byteLength;) {
-          const type = view.getUint32(i + 4);
-          if (type === 0x6163544c) { animated = true; break; } // acTL
-          if (type === 0x49444154) break; // IDAT
-          i += 12 + view.getUint32(i);
+        const isPngSig = view.getUint32(0) === 0x89504e47 && view.getUint32(4) === 0x0d0a1a0a;
+        if (isPngSig) {
+          let animated = false;
+          for (let i = 8; i + 12 <= bytes.byteLength;) {
+            const chunkLen = view.getUint32(i);
+            const type = view.getUint32(i + 4);
+            if (type === 0x6163544c) { animated = true; break; } // acTL
+            if (type === 0x49444154) break; // IDAT
+            const next = i + 12 + chunkLen;
+            if (next <= i) break;
+            i = next;
+          }
+          media.stillImage = !animated;
         }
-        media.stillImage = !animated;
+      }
+      if (ext === 'webp' && bytes.byteLength >= 12) {
+        const view = new DataView(bytes);
+        const isRiffWebp = view.getUint32(0) === 0x52494646 && view.getUint32(8) === 0x57454250;
+        if (isRiffWebp) {
+          let animated = false;
+          for (let i = 12; i + 8 <= bytes.byteLength;) {
+            const fourcc = view.getUint32(i);
+            const chunkSize = view.getUint32(i + 4, true);
+            if (fourcc === 0x414e494d) { animated = true; break; } // ANIM
+            if (fourcc === 0x56503858 && i + 9 <= bytes.byteLength) {
+              if ((view.getUint8(i + 8) & 0x02) !== 0) { animated = true; break; } // VP8X animation flag
+            }
+            const padded = chunkSize + (chunkSize & 1);
+            const next = i + 8 + padded;
+            if (next <= i) break;
+            i = next;
+          }
+          media.stillImage = !animated;
+        }
       }
       asset.width_px = img.naturalWidth;
       asset.height_px = img.naturalHeight;

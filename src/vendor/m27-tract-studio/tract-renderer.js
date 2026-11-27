@@ -644,9 +644,16 @@ import registeredHead from './registered-head.json';
     tongueClip.appendChild(m10SvgEl("path", { d: m10Path(tongue.outline, true) }));
     defs.appendChild(tongueClip);
 
-    const headAlpha = opts.showHead === false ? 0 : Number(fromCss('head-2d'));
+    const rawHeadAlpha = Number(fromCss('head-2d'));
+    const headAlpha = opts.showHead === false
+      ? 0
+      : Number.isFinite(rawHeadAlpha) && rawHeadAlpha > 0
+        ? rawHeadAlpha
+        : (opts.showHead === true ? 0.58 : 0);
+    let headFace = null;
     if (headAlpha > 0 && c.upper_lip?.length > 4 && c.lower_lip?.length > 4 && c.upper_cover?.length && c.lower_cover?.length > 4) {
       const face = faceProfile(registeredHead.outline, HEAD_MARKS, c, st.ja ?? 0, st.jx ?? 0);
+      headFace = face;
       const maskId = `${uid}-outside-airway`;
       const maskBounds = { x: -64, y: -64, width: 128, height: 128 };
       const mask = m10SvgEl('mask', { id: maskId, maskUnits: 'userSpaceOnUse', ...maskBounds });
@@ -654,8 +661,58 @@ import registeredHead from './registered-head.json';
       mask.appendChild(m10SvgEl('path', { d: m10Path(oralSectionBoundary({ contours: c }), true), fill: 'black' }));
       mask.appendChild(m10SvgEl('path', { d: NASAL_REFERENCE_CUT, fill: 'black', 'fill-rule': 'evenodd' }));
       defs.appendChild(mask);
-      addPath(layer, face.outline, { 'data-role': 'head-outline', fill: fromCss('skin') || P.skinEdge, 'fill-opacity': headAlpha, mask: `url(#${maskId})` }, true, true);
-      for (const line of [face.below, face.above]) addPath(layer, line, { fill: 'none', stroke: P.skinEdge, 'stroke-width': 0.04, opacity: headAlpha }, false, true);
+
+      let outlinePts = face.outline;
+      let strokeLines = [face.below, face.above];
+      let baseArcPts = null;
+      if (opts.bustBase && face.below.length >= 2 && face.above.length >= 2) {
+        const belowTrim = face.below.slice(1);
+        const aboveTrim = face.above.slice(0, -1);
+        const throat = belowTrim[0];
+        const back = aboveTrim[aboveTrim.length - 1];
+        const glottisY = Math.min(c.lower_cover[0]?.[1] ?? -8.2, c.upper_cover[0]?.[1] ?? -8.2);
+        const baseY = Math.min(-9.65, glottisY - 0.85);
+        const frontFoot = [throat[0] + 0.65, baseY];
+        const backFoot = [back[0] - 1.15, baseY];
+        const sampleCubic = (p0, p1, p2, p3, n) => Array.from({ length: n }, (_, k) => {
+          const t = (k + 1) / (n + 1);
+          const u = 1 - t;
+          return [
+            u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0],
+            u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1],
+          ];
+        });
+        const backDrop = [
+          ...sampleCubic(back, [back[0], back[1] - 1.15], [back[0] - 0.42, baseY + 0.95], backFoot, 6),
+          backFoot,
+        ];
+        const bottomArc = Array.from({ length: 9 }, (_, k) => {
+          const t = (k + 1) / 10;
+          return [
+            backFoot[0] + (frontFoot[0] - backFoot[0]) * t,
+            baseY - 0.62 * Math.sin(Math.PI * t),
+          ];
+        });
+        const frontRise = [
+          frontFoot,
+          ...sampleCubic(frontFoot, [throat[0] + 0.35, baseY + 0.95], [throat[0], throat[1] - 1.15], throat, 6),
+        ];
+        outlinePts = [...frontRise, ...belowTrim, ...aboveTrim, ...backDrop, ...bottomArc];
+        strokeLines = [[...frontRise, ...belowTrim], [...aboveTrim, ...backDrop]];
+        baseArcPts = [backFoot, ...bottomArc, frontFoot];
+      }
+
+      addPath(layer, outlinePts, { 'data-role': 'head-outline', fill: fromCss('skin') || P.skinEdge, 'fill-opacity': headAlpha, mask: `url(#${maskId})` }, true, true);
+      layer.appendChild(m10SvgEl('path', {
+        d: NASAL_REFERENCE_CUT,
+        fill: 'none',
+        stroke: P.wall,
+        'stroke-opacity': (0.58 * Math.min(1, headAlpha + 0.32)).toFixed(3),
+        'stroke-width': 0.036,
+        'data-role': 'nasal-reference',
+      }));
+      for (const line of strokeLines) addPath(layer, line, { fill: 'none', stroke: P.skinEdge, 'stroke-width': 0.042, opacity: headAlpha }, false, true);
+      if (baseArcPts) addPath(layer, baseArcPts, { fill: 'none', stroke: P.skinEdge, 'stroke-width': 0.04, opacity: (headAlpha * 0.78).toFixed(3), 'data-role': 'head-bust-base' }, false, true);
     }
 
     if (showGhost && st.ghosts?.length) {
@@ -734,9 +791,17 @@ import registeredHead from './registered-head.json';
       }
     }
 
-    for (const [lname, prof] of [["upper_lip", lips.upper], ["lower_lip", lips.lower]]) {
-      if (!prof || prof.length < 4) continue;
-      const red = prof.slice(Math.max(0, lips.edge - 7), lips.edge + 11);
+    for (const [lname, rawProf, endIdx, rawLen] of [
+      ["upper_lip", lips.upper, headFace?.upperEnd, c.upper_lip?.length ?? 0],
+      ["lower_lip", lips.lower, headFace?.lowerEnd, c.lower_lip?.length ?? 0],
+    ]) {
+      if (!rawProf || rawProf.length < 4) continue;
+      let prof = rawProf;
+      if (headAlpha > 0 && Number.isFinite(endIdx) && rawLen > 2) {
+        const keep = Math.max(4, Math.min(rawProf.length, Math.round(((endIdx + 1) / rawLen) * rawProf.length)));
+        prof = rawProf.slice(0, keep);
+      }
+      const red = prof.slice(Math.max(0, lips.edge - 7), Math.min(prof.length, lips.edge + 11));
       const clipId = `${uid}-${lname}Section`;
       const lClip = m10SvgEl("clipPath", { id: clipId, clipPathUnits: "userSpaceOnUse" });
       lClip.appendChild(m10SvgEl("path", { d: m10Path(prof, true) }));
@@ -753,7 +818,9 @@ import registeredHead from './registered-head.json';
         }, false, true);
       }
       rooted(lipG, [prof[prof.length - 1], prof[0]], 0.30, `url(#${clipId})`);
-      addPath(lipG, prof, { fill: "none", stroke: P.skinEdge, "stroke-width": 0.045 }, false, true);
+      if (headAlpha <= 0) {
+        addPath(lipG, prof, { fill: "none", stroke: P.skinEdge, "stroke-width": 0.045 }, false, true);
+      }
     }
 
     if (velum) {
@@ -892,18 +959,24 @@ import registeredHead from './registered-head.json';
 
       layer.appendChild(notes);
 
+      const darkPanel = isDarkSurface(P.panel);
+      const legFill = darkPanel ? "rgba(255, 255, 255, 0.08)" : "#f4f5ee";
+      const legStroke = opts.theme?.anatomyDivider || P.line;
+      const legText = darkPanel ? (opts.theme?.laneTitle || "#e2e8f0") : P.ink;
+      const compassText = opts.theme?.anatomyMuted || P.muted;
+
       const legY = vbY + vbH - 0.52;
       layer.appendChild(m10SvgEl("rect", {
         x: (vbX + 0.25).toFixed(2), y: (legY - 0.28).toFixed(2),
         width: "3.95", height: "0.56", rx: "0.18",
-        fill: "#f4f5ee", stroke: P.line, "stroke-width": "0.03",
+        fill: legFill, stroke: legStroke, "stroke-width": "0.03",
       }));
       layer.appendChild(m10SvgEl("circle", { cx: (vbX + 0.52).toFixed(2), cy: legY.toFixed(2), r: "0.10", fill: P.tongue }));
-      const legT1 = m10SvgEl("text", { x: (vbX + 0.74).toFixed(2), y: (legY + 0.11).toFixed(2), fill: P.ink, "font-size": "0.31" });
+      const legT1 = m10SvgEl("text", { x: (vbX + 0.74).toFixed(2), y: (legY + 0.11).toFixed(2), fill: legText, "font-size": "0.31" });
       legT1.textContent = "发音器官";
       layer.appendChild(legT1);
       layer.appendChild(m10SvgEl("circle", { cx: (vbX + 2.34).toFixed(2), cy: legY.toFixed(2), r: "0.10", fill: P.handle }));
-      const legT2 = m10SvgEl("text", { x: (vbX + 2.56).toFixed(2), y: (legY + 0.11).toFixed(2), fill: P.ink, "font-size": "0.31" });
+      const legT2 = m10SvgEl("text", { x: (vbX + 2.56).toFixed(2), y: (legY + 0.11).toFixed(2), fill: legText, "font-size": "0.31" });
       legT2.textContent = "气腔参考";
       layer.appendChild(legT2);
 
@@ -911,7 +984,7 @@ import registeredHead from './registered-head.json';
       for (const [txt, dx, dy] of [["上", 0, -0.42], ["后 ── 前", 0, 0], ["下", 0, 0.42]]) {
         const tn = m10SvgEl("text", {
           x: (cmpX + dx).toFixed(2), y: (cmpY + dy).toFixed(2),
-          fill: P.muted, "font-size": "0.32", "text-anchor": "middle", "dominant-baseline": "middle",
+          fill: compassText, "font-size": "0.32", "text-anchor": "middle", "dominant-baseline": "middle",
         });
         tn.textContent = txt;
         layer.appendChild(tn);
@@ -944,6 +1017,22 @@ import registeredHead from './registered-head.json';
     return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${a})`;
   }
 
+  function isDarkSurface(color) {
+    const raw = String(color || "").trim();
+    const hex = /^#([0-9a-f]{6})$/i.exec(raw);
+    if (hex) {
+      const v = parseInt(hex[1], 16);
+      const lum = 0.299 * ((v >> 16) & 255) + 0.587 * ((v >> 8) & 255) + 0.114 * (v & 255);
+      return lum < 128;
+    }
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(raw);
+    if (rgb) {
+      const lum = 0.299 * Number(rgb[1]) + 0.587 * Number(rgb[2]) + 0.114 * Number(rgb[3]);
+      return lum < 128;
+    }
+    return typeof document !== "undefined" && document.documentElement?.dataset?.theme === "dark";
+  }
+
   function drawM27GlottisCanvas(canvas, st, phase, opts = {}) {
     const vibMode = typeof opts === "string" ? opts : (opts.vibMode || "strobe");
     const theme = typeof opts === "object" && opts.theme ? opts.theme : {};
@@ -954,9 +1043,10 @@ import registeredHead from './registered-head.json';
     const { ctx, w, h } = setupVizCanvas(canvas);
     const showLabels = opts.showLabels !== false;
     const panelBg = theme.anatomyBg || "#fffef9";
+    const darkBg = isDarkSurface(panelBg);
     const panelBgZero = hexToRgba(panelBg, 0);
-    const captionCol = theme.anatomyMuted || "#69776f";
-    const dividerCol = theme.anatomyDivider || "#dde2d6";
+    const captionCol = theme.anatomyMuted || (darkBg ? "#cbd5e1" : "#69776f");
+    const dividerCol = theme.anatomyDivider || (darkBg ? "rgba(255,255,255,0.14)" : "#dde2d6");
 
     const smoothstep = (e0, e1, x) => {
       const t = Math.min(1, Math.max(0, (x - e0) / Math.max(1e-6, e1 - e0)));
@@ -993,10 +1083,12 @@ import registeredHead from './registered-head.json';
     const xRestMem = Math.max(0, 0.5 * (st.xb + st.xt));
     const caPos = Math.max(0, st.ca);
 
-    const supH = Math.round(h * 0.54);
+    const supH = Math.round(h * 0.55);
+    const topSafe = 25;
+    const availSupH = Math.max(52, supH - 14 - topSafe);
     const cxSup = showLabels ? w * 0.41 : w * 0.50;
-    const cySup = (supH - 14) * 0.50 + 2;
-    const S = Math.min((w - (showLabels ? 86 : 18)) / 2.30, (supH - 20) / 1.90);
+    const cySup = topSafe + availSupH * 0.50;
+    const S = Math.min((w - (showLabels ? 86 : 18)) / 2.32, availSupH / 1.92);
     const X = nx => cxSup + nx * S;
     const Y = ny => cySup + ny * S;
 
@@ -1424,8 +1516,11 @@ import registeredHead from './registered-head.json';
       const drawAtlasBracket = (xStart, y0, xEnd, y1, label) => {
         const ym = 0.5 * (y0 + y1);
         const tickX = Math.min(w - 68, Math.max(bx + 6, X(0.96)));
+        const brLineCol = darkBg ? "#cbd5e1" : "#27332f";
+        const brBoxFill = darkBg ? "#1e293b" : "#ffffff";
+        const brBoxText = darkBg ? "#f1f5f9" : "#1f2926";
         ctx.save();
-        for (const [col, lw] of [[panelBg, 3.6], ["#27332f", 1.35]]) {
+        for (const [col, lw] of [[panelBg, 3.6], [brLineCol, 1.35]]) {
           ctx.strokeStyle = col;
           ctx.lineWidth = lw;
           ctx.beginPath();
@@ -1440,14 +1535,14 @@ import registeredHead from './registered-head.json';
         ctx.font = "600 9.5px Segoe UI, PingFang SC, sans-serif";
         const tw = ctx.measureText(label).width + 9;
         const th = 15.5;
-        ctx.fillStyle = "#ffffff";
-        ctx.strokeStyle = "#27332f";
+        ctx.fillStyle = brBoxFill;
+        ctx.strokeStyle = brLineCol;
         ctx.lineWidth = 1.1;
         ctx.beginPath();
         ctx.roundRect(tickX, ym - th * 0.5, tw, th, 2);
         ctx.fill();
         ctx.stroke();
-        ctx.fillStyle = "#1f2926";
+        ctx.fillStyle = brBoxText;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(label, tickX + 4.5, ym + 0.5);
@@ -1464,14 +1559,14 @@ import registeredHead from './registered-head.json';
       ctx.font = "600 9px Consolas, monospace";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      ctx.fillStyle = "#6d28d9";
+      ctx.fillStyle = darkBg ? "#c4b5fd" : "#6d28d9";
       ctx.fillText(`CA ${st.ca.toFixed(3)}`, tickXRight, Math.min(supH - 15, yP + 13));
 
       ctx.font = "600 9px Consolas, Segoe UI, sans-serif";
-      ctx.fillStyle = "#8a4b12";
-      ctx.fillText(`F0 ${Math.round(st.f0)}Hz · L ×${lenFactor.toFixed(2)}`, 7, 11);
-      ctx.fillStyle = "#8c453a";
-      ctx.fillText(`FL ${Math.round(st.fl)} · SHIM ${Math.round(st.shim)}`, 7, 22.5);
+      ctx.fillStyle = darkBg ? "#fbbf24" : "#8a4b12";
+      ctx.fillText(`F0 ${Math.round(st.f0)}Hz · L ×${lenFactor.toFixed(2)}`, 7, topSafe + 6);
+      ctx.fillStyle = darkBg ? "#fda4af" : "#8c453a";
+      ctx.fillText(`FL ${Math.round(st.fl)} · SHIM ${Math.round(st.shim)}`, 7, topSafe + 17.5);
 
       const gpLbl = "声门 Glottis";
       ctx.font = "600 9px Segoe UI, PingFang SC, sans-serif";
@@ -1483,29 +1578,29 @@ import registeredHead from './registered-head.json';
       ctx.setLineDash([2.5, 2.5]);
       ctx.moveTo(gpX + gpW, gpY);
       ctx.lineTo(X(0), Y(nyVP + 0.06));
-      ctx.strokeStyle = "rgba(45, 58, 72, 0.36)";
+      ctx.strokeStyle = darkBg ? "rgba(203, 213, 225, 0.45)" : "rgba(45, 58, 72, 0.36)";
       ctx.lineWidth = 1.0;
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle = "rgba(45, 58, 72, 0.52)";
+      ctx.fillStyle = darkBg ? "rgba(203, 213, 225, 0.65)" : "rgba(45, 58, 72, 0.52)";
       ctx.beginPath();
       ctx.arc(X(0), Y(nyVP + 0.06), 1.6, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
-      ctx.strokeStyle = "#3b4c5e";
+      ctx.fillStyle = darkBg ? "rgba(30, 41, 59, 0.94)" : "rgba(255, 255, 255, 0.94)";
+      ctx.strokeStyle = darkBg ? "#94a3b8" : "#3b4c5e";
       ctx.lineWidth = 1.0;
       ctx.beginPath();
       ctx.roundRect(gpX, gpY - gpH * 0.5, gpW, gpH, 3);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = "#1e293b";
+      ctx.fillStyle = darkBg ? "#f1f5f9" : "#1e293b";
       ctx.fillText(gpLbl, gpX + 5, gpY + 0.5);
       ctx.restore();
     }
 
     ctx.restore();
 
-    // Always render vibration mode badge at top-right even when showLabels is toggled off
+    // Always render vibration mode badge in dedicated top clearance band (never overlaps anatomy)
     ctx.save();
     ctx.font = "600 9.5px Consolas, Segoe UI, PingFang SC, sans-serif";
     ctx.textAlign = "right";
@@ -1514,14 +1609,20 @@ import registeredHead from './registered-head.json';
       ? (isRealtime ? `实频高速 ${Math.round(st.f0 || 0)} Hz · 包络残影` : `频闪慢放 ${hzVis.toFixed(1)} Hz · 单周清晰`)
       : (isRealtime ? `实频模式（发浊音观察高速包络）` : `频闪模式（发浊音观察慢放黏膜波）`);
     const bw = ctx.measureText(badgeText).width + 12;
-    ctx.fillStyle = isRealtime ? "rgba(29, 99, 184, 0.16)" : "rgba(15, 118, 110, 0.16)";
-    ctx.strokeStyle = isRealtime ? "rgba(59, 130, 246, 0.55)" : "rgba(20, 184, 166, 0.55)";
+    ctx.fillStyle = isRealtime
+      ? (darkBg ? "rgba(59, 130, 246, 0.18)" : "rgba(29, 78, 216, 0.10)")
+      : (darkBg ? "rgba(20, 184, 166, 0.18)" : "rgba(15, 118, 110, 0.10)");
+    ctx.strokeStyle = isRealtime
+      ? (darkBg ? "rgba(96, 165, 250, 0.55)" : "rgba(29, 78, 216, 0.42)")
+      : (darkBg ? "rgba(45, 212, 191, 0.55)" : "rgba(15, 118, 110, 0.42)");
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.roundRect(w - bw - 6, 4, bw, 17, 4);
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = isRealtime ? "#60a5fa" : "#2dd4bf";
+    ctx.fillStyle = isRealtime
+      ? (darkBg ? "#93c5fd" : "#1d4ed8")
+      : (darkBg ? "#5eead4" : "#0f766e");
     ctx.fillText(badgeText, w - 12, 12.5);
     ctx.restore();
 
@@ -1917,12 +2018,12 @@ import registeredHead from './registered-head.json';
       ctx.textAlign = "left";
       ctx.fillStyle = captionCol;
       ctx.fillText("室带 / 喉室", 7, yVentPocket - 2);
-      ctx.fillStyle = "#b91c4b";
+      ctx.fillStyle = darkBg ? "#fda4af" : "#b91c4b";
       ctx.fillText("Cover 黏膜层", 7, yUp + 2);
-      ctx.fillStyle = "#7f303b";
+      ctx.fillStyle = darkBg ? "#f9a8d4" : "#7f303b";
       ctx.fillText("Body 声带肌", 7, yUp + dyFold * 0.78);
       ctx.font = "600 9px Consolas, monospace";
-      ctx.fillStyle = `rgb(${rgbPrText[0]}, ${rgbPrText[1]}, ${rgbPrText[2]})`;
+      ctx.fillStyle = darkBg ? "#93c5fd" : `rgb(${rgbPrText[0]}, ${rgbPrText[1]}, ${rgbPrText[2]})`;
       ctx.fillText(`PR ${st.pr_pa.toFixed(0)} Pa`, 7, yTrachBot - 11);
       ctx.fillStyle = "rgba(148, 175, 205, 0.24)";
       ctx.beginPath();
@@ -1936,13 +2037,13 @@ import registeredHead from './registered-head.json';
       }
 
       ctx.textAlign = "right";
-      ctx.fillStyle = "#1d63b8";
+      ctx.fillStyle = darkBg ? "#60a5fa" : "#1d63b8";
       ctx.fillText(`XT ${st.xt.toFixed(3)}`, w - 7, yUp);
-      ctx.fillStyle = "#15803d";
+      ctx.fillStyle = darkBg ? "#4ade80" : "#15803d";
       ctx.fillText(`XB ${st.xb.toFixed(3)}`, w - 7, yLow);
-      ctx.fillStyle = "#7f303b";
+      ctx.fillStyle = darkBg ? "#fda4af" : "#7f303b";
       ctx.fillText(`RA ${st.ra.toFixed(2)} · PS ${st.ps.toFixed(2)}`, w - 7, yLow + (yTrachBot - yLow) * 0.48);
-      ctx.fillStyle = "#4b5b53";
+      ctx.fillStyle = darkBg ? "#cbd5e1" : "#4b5b53";
       ctx.fillText(`LAG ${st.lag.toFixed(2)}`, w - 7, yTrachBot - 6);
       ctx.restore();
     }
@@ -1964,11 +2065,13 @@ import registeredHead from './registered-head.json';
   }
 
   function getCurvesLanes(frames, curveMode = "all") {
-    let maxF0 = 320, maxPR = 1200;
+    let minF0 = 40, maxF0 = 320, maxPR = 1200;
     for (let i = 0; i < frames.length; i++) {
+      if (frames[i].f0 > 0 && frames[i].f0 < minF0) minF0 = frames[i].f0;
       if (frames[i].f0 > maxF0) maxF0 = frames[i].f0;
       if (frames[i].pr_pa > maxPR) maxPR = frames[i].pr_pa;
     }
+    minF0 = minF0 < 40 ? Math.max(0, Math.floor(minF0 / 10) * 10) : 40;
     maxF0 = Math.ceil(maxF0 / 40) * 40;
     maxPR = Math.ceil(maxPR / 200) * 200;
 
@@ -2004,7 +2107,7 @@ import registeredHead from './registered-head.json';
       {
         title: "声源激励",
         series: [
-          { k: "f0", label: "F0", col: "#b45309", min: 40, max: maxF0, unit: "Hz", dec: 0 },
+          { k: "f0", label: "F0", col: "#b45309", min: minF0, max: maxF0, unit: "Hz", dec: 0 },
           { k: "pr_pa", label: "PR", col: "#c93b4b", min: 0, max: maxPR, unit: "Pa", dec: 0, fill: "rgba(201,59,75,0.12)" },
         ],
       },

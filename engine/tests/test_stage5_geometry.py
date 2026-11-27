@@ -50,7 +50,7 @@ class GeometryExtrasTest(unittest.TestCase):
         self.assertIn("第 5 帧", res["error"]["hint"])
 
     def test_out_of_range_still_rejected_before_geometry(self):
-        res = M27Bridge().synthesize_dense_neural(payload(f0_hz=[700.0] * N, lip_width_frames=[0.9] * N))
+        res = M27Bridge().synthesize_dense_neural(payload(f0_hz=[0.0] * N, lip_width_frames=[0.9] * N))
         self.assertEqual(res["error"]["code"], "out_of_range")
         res = M27Bridge().synthesize_dense_neural(payload(pressure_pa=[1700.0] * N))
         self.assertEqual(res["error"]["code"], "out_of_range")

@@ -125,7 +125,7 @@ class KeyframeSpec:
         return cls(
             ipa=str(raw.get("ipa", "sil")).strip() or "sil",
             duration_ms=max(20.0, min(3000.0, float(raw.get("duration_ms", 160.0)))),
-            f0_hz=max(45.0, min(580.0, float(raw.get("f0_hz", 150.0)))),
+            f0_hz=max(1e-3, float(raw.get("f0_hz", 150.0))),
             phonation=str(raw.get("phonation", "auto")).strip().lower() or "auto",
             role=str(raw.get("role", "normal")).strip().lower() or "normal",
             syl_id=str(raw.get("syl_id", "")),
@@ -158,7 +158,7 @@ class F0Point:
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "F0Point":
-        return cls(t=float(raw["t"]), hz=max(45.0, min(580.0, float(raw["hz"]))))
+        return cls(t=float(raw["t"]), hz=max(1e-3, float(raw["hz"])))
 
 
 @dataclass

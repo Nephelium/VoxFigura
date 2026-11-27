@@ -38,18 +38,14 @@ import {
   supportsCorpusDirectoryPicker, type CorpusDirectoryHandle, type CorpusFile,
 } from './corpus-directory';
 import {
-  F0_LIMIT_HZ,
   PRESSURE_LIMIT_PA,
   SAMPLE_RATE_HZ,
+  isValidF0Hz,
   msToSamples,
-  hzToSt,
   parseTextGrid,
-  retime,
   samplesToMs,
   type Clip,
-  type ComputeDevice,
   type F0PinPoint,
-  type GlottisM27Params,
   type PhonationAnchor,
   type SegmentAnchor,
   type Syllable,
@@ -58,6 +54,8 @@ import {
   type TractParamName,
 } from '@vocalcut/core';
 import {
+  IPA_LONG_PAUSE_MS,
+  IPA_SPACE_PAUSE_MS,
   loadCmu,
   reviewText, japaneseReadingsFor, type KanaLexicon,
   mappingStandards,
@@ -90,21 +88,26 @@ import CustomSelect from '@/components/common/CustomSelect.vue';
 import { applyPeakAudioGain, synthesisGainMode, voiceRenderLabels, voiceRenderMode, type VoiceRenderMode } from '@/data/voice-renderer';
 import SplitPane from '@/components/common/SplitPane.vue';
 import CompactSlider from '@/components/common/CompactSlider.vue';
-import VoqsAnchorPicker from './VoqsAnchorPicker.vue';
-import { writeRecordedVoqs } from './voqs-actions';
-import { SYNTHESIS_VOQS_GROUPS, type VoqsProfile, type VoqsTake } from '@/data/voqs-library';
 import IconSvg from '@/components/common/IconSvg.vue';
 import SpeakerReferenceSelect from '@/components/common/SpeakerReferenceSelect.vue';
-import { DEFAULT_SPEAKER_REFERENCE_NAME, speakerReferenceId } from '@/data/synthesis-speaker';
+import { DEFAULT_SPEAKER_REFERENCE_NAME, effectiveSpeakerBaseF0Hz, speakerReferenceId } from '@/data/synthesis-speaker';
 import { textPoseOptions, textPoseSource } from '@/data/ipa-pose-source';
+import { resolveSyllablePoseSource } from './annotation-audio';
 import { needsKanaReading, resolveKanaPhones } from './japanese-annotation';
 import ResearchTimeline from './ResearchTimeline.vue';
-import { trackFrameAt, waveSampleRate, withImportedTractFrames, type AnnotationTractFrame } from './annotation-edit';
+import {
+  syncSyllableTextFromSegments,
+  trackFrameAt,
+  waveSampleRate,
+  withImportedTractFrames,
+  type AnnotationTractFrame,
+} from './annotation-edit';
 import {
   detectLeadingTrailingSilence,
   exciseAudioBufferRange,
   exciseClipAndControlsRange,
   exciseM27TrajectoryRange,
+  exciseTextGridRange,
 } from './audio-cut';
 import { metricsFromVtlSnapshot, readRealPeaks } from '@/data/vtl-acoustic';
 import { changedAudioSpans, currentAnnotationControls, replaceRenderedSpans } from './annotation-return';
@@ -170,6 +173,7 @@ import {
   buildSegmentsForSyllable,
   corpusDragFileRegistry,
   downloadTextFile,
+  encodeMonoWavBase64,
   estimateSyllableNaturalDurationMs,
   extractSegmentExtras,
   getFullPoseForIpa,
@@ -188,6 +192,7 @@ import {
   drawPtbSectionChart, sectionView,
   drawPtbSpectrumChart,
   drawPtbVowelSpace,
+  invalidateChartThemeCache,
   isSnapshotNasalCoupled,
   panVowelSpaceAxes,
   readPeaks,
@@ -198,13 +203,85 @@ import {
   type VowelSpaceAxes,
   type VowelTrailPoint,
 } from './ptb-physics-charts';
+import {
+  getCachedVtlPose,
+  isVtlPosePendingOrCached,
+  prefetchVtlPoseBatch,
+  resolveVtlPose,
+  type PoseRequest,
+} from '@/data/vtl-pose-client';
 
 const store = useWorkbenchStore();
 
 // Resizable layout dimensions (SplitPane persisted)
-const leftW = ref(248);
-const rightW = ref(280);
+const leftW = ref(252);
 const dockHeight = ref(382);
+const upperRightPairRef = ref<HTMLElement | null>(null);
+const upperPairWidth = ref(1200);
+const tractSplitRatio = ref(0.44);
+try {
+  const savedTractRatio = Number(localStorage.getItem('vocalcut.researchTractRatio'));
+  if (savedTractRatio >= 0.25 && savedTractRatio <= 0.72) tractSplitRatio.value = savedTractRatio;
+} catch {
+  // retain default split
+}
+const tractPaneW = computed({
+  get: () => {
+    const avail = Math.max(640, upperPairWidth.value - 6);
+    const minW = Math.min(340, Math.round(avail * 0.3));
+    const maxW = Math.max(minW, avail - Math.min(440, Math.round(avail * 0.36)));
+    return Math.max(minW, Math.min(maxW, Math.round(avail * tractSplitRatio.value)));
+  },
+  set: (px: number) => {
+    const avail = Math.max(640, upperPairWidth.value - 6);
+    const ratio = Math.max(0.25, Math.min(0.72, px / avail));
+    tractSplitRatio.value = ratio;
+    try {
+      localStorage.setItem('vocalcut.researchTractRatio', ratio.toFixed(4));
+    } catch {
+      // ignore storage errors
+    }
+  },
+});
+const corpusDrawerOpen = ref(false);
+const corpusDragging = ref(false);
+const tractParamsOpen = ref(false);
+
+// Select options replacing native select elements (AGENTS.md §5.3)
+const vowelSourceOptions: ReadonlyArray<SelectOption<VowelReferenceMode>> = [
+  { value: 'recorded', label: '原音' },
+  { value: 'transfer', label: '构型' },
+];
+const vowelScaleOptions: ReadonlyArray<SelectOption<VowelCoordinateScale>> = [
+  { value: 'logarithmic', label: '对数' },
+  { value: 'linear', label: '线性' },
+];
+const enDictModeOptions: ReadonlyArray<SelectOption<'cmudict-personal' | 'cmudict-only'>> = [
+  { value: 'cmudict-personal', label: 'CMUdict + 个人英语词典优先（支持多音节切分）' },
+  { value: 'cmudict-only', label: '仅使用内置 CMUdict' },
+];
+const jaDictModeOptions: ReadonlyArray<SelectOption<'standard-personal' | 'standard-only'>> = [
+  { value: 'standard-personal', label: '日语标准假名词典 + 个人日语词典优先' },
+  { value: 'standard-only', label: '仅使用内置日语标准词典' },
+];
+const reconstructLangOptions: ReadonlyArray<SelectOption<'auto' | 'zh' | 'en'>> = [
+  { value: 'auto', label: '自动识别语言' },
+  { value: 'zh', label: '普通话 (中文)' },
+  { value: 'en', label: '英语 (English)' },
+];
+const dialectPackOptions = computed<SelectOption<string>[]>(() => [
+  { value: '', label: '不启用独立方言包（使用中/英/日混排规则）' },
+  ...savedDialects.value.map((pack) => ({ value: pack.id, label: pack.name })),
+]);
+const userLexiconBookOptions = computed<SelectOption<string>[]>(() =>
+  userLexiconBooks.value.map((book) => ({
+    value: book.id,
+    label: `${book.name} (${Object.keys(book.entries).length})`,
+  })),
+);
+const mandarinStandardSelectOptions = computed<SelectOption<MappingStandard>[]>(() =>
+  mandarinStandardOptions.map((opt) => ({ value: opt.value as MappingStandard, label: opt.label })),
+);
 
 // Top G2P & Multi-Language Dictionary Controls (T-45)
 const g2pText = ref(store.project.value.clips[store.activeClipId.value]?.source?.lyrics ?? '');
@@ -224,7 +301,14 @@ const mandarinStandardOptions = mandarinDictionaryOptions;
 const selectedDictionary = computed(() => savedDialects.value.find(pack => pack.id === g2pStandard.value));
 const activeDictButtonLabel = computed(() => {
   if (selectedDictionary.value) return `方言 · ${selectedDictionary.value.name}`;
-  const zhLbl = g2pStandard.value === 'Standard Chinese (Beijing)' ? '北京官话宽' : g2pStandard.value === 'Standard Chinese (Beijing)严' ? '北京官话严' : g2pStandard.value;
+  const effectiveStd = mandarinStandards.some((item) => item === g2pStandard.value)
+    ? g2pStandard.value
+    : dictionaryPrefs.value.zhStandard;
+  const zhLbl = effectiveStd === 'Standard Chinese (Beijing)'
+    ? '北京官话宽'
+    : effectiveStd === 'Standard Chinese (Beijing)严'
+      ? '北京官话严'
+      : effectiveStd;
   return `词典 · ${zhLbl}`;
 });
 function selectMandarinStandard(std: MappingStandard): void {
@@ -262,8 +346,9 @@ const showTractGrid = ref(true);
 const showHead = ref(true);
 const hfMaxHz = ref<5000 | 8000>(5000);
 
-// Left Sidebar: Local Files / Directory & Global Synthesis Mode / Custom Speaker Binding (T-07, T-25)
+// Top Bar File Open + Slide-Over Corpus Directory Drawer & Global Synthesis Mode (T-07, T-25)
 const dropActive = ref(false);
+const openFileInputRef = ref<HTMLInputElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const dirInputRef = ref<HTMLInputElement | null>(null);
 const lexiconImportInputRef = ref<HTMLInputElement | null>(null);
@@ -355,12 +440,30 @@ const quickTab = ref<QuickIpaItem['category'] | 'favorites'>('vowel');
 const focusedQuickIpa = ref<QuickIpaItem>(QUICK_IPA_ITEMS[0]);
 const focusedQuickDiacritic = ref<QuickIpaItem>();
 const catalogGroups = shallowRef<QuickIpaGroup[]>([]);
+function buildFallbackQuickIpaGroups(): QuickIpaGroup[] {
+  const byCategory: Record<QuickIpaItem['category'], QuickIpaItem[]> = {
+    vowel: [],
+    consonant: [],
+    diacritic: [],
+  };
+  for (const item of QUICK_IPA_ITEMS) byCategory[item.category].push(item);
+  const groups: QuickIpaGroup[] = [
+    { label: '单元音', category: 'vowel', items: byCategory.vowel },
+    { label: '常用辅音', category: 'consonant', items: byCategory.consonant },
+    { label: '附加符号', category: 'diacritic', items: byCategory.diacritic },
+  ];
+  return groups.filter((g) => g.items.length > 0);
+}
+
 onMounted(async () => {
   try {
     const res = await fetch('/data/ipa-plus-catalog.json');
     if (!res.ok) throw new Error();
     catalogGroups.value = buildQuickIpaGroups(await res.json() as QuickIpaCatalog);
-  } catch { store.pushToast('完整音标表载入失败，可重新打开标注页重试','warning'); }
+  } catch {
+    catalogGroups.value = buildFallbackQuickIpaGroups();
+    store.pushToast('完整音标表载入失败，已切换至内置快捷音标表', 'warning');
+  }
 });
 const catalogQuickIpa = computed(() => new Map(
   catalogGroups.value.filter(group => group.category !== 'diacritic')
@@ -368,35 +471,29 @@ const catalogQuickIpa = computed(() => new Map(
 ));
 const quickGroups = computed(() => quickTab.value === 'favorites'
   ? [{ label: '常用音标', items: [...new Set(ipaFavorites.value.map(item => quickIpaKey(item.symbol)))]
-    .flatMap(key => catalogQuickIpa.value.get(key) ?? []) }]
+    .flatMap(key => {
+      const cat = catalogQuickIpa.value.get(key);
+      if (cat) return [cat];
+      const fav = ipaFavorites.value.find(item => quickIpaKey(item.symbol) === key);
+      return fav ? [fav] : [];
+    }) }]
   : catalogGroups.value.filter(group => group.category === quickTab.value));
 const filteredQuickIpa = computed(() => quickGroups.value.flatMap(group=>group.items));
 
-const corpusColumn = ref<HTMLElement | null>(null);
-const corpusRoom = ref(400);
-const corpusRatio = ref(.5);
-try {
-  const n = Number(localStorage.getItem('vocalcut.corpusRatio'));
-  if (n > 0 && n < 1) corpusRatio.value = n;
-} catch { /* retain the even split */ }
-const corpusLimit = computed(() => Math.min(95,Math.floor(corpusRoom.value / 3)));
-function setCorpusHeight(px:number) {
-  corpusRatio.value = px / corpusRoom.value;
-  try { localStorage.setItem('vocalcut.corpusRatio',String(corpusRatio.value)); } catch { /* current session */ }
-}
-let corpusObserver: ResizeObserver | undefined;
+let upperPairObserver: ResizeObserver | undefined;
 onMounted(() => {
-  if (!corpusColumn.value) return;
-  corpusObserver = new ResizeObserver(() => {
-    if (corpusColumn.value?.clientHeight) corpusRoom.value = Math.max(2,corpusColumn.value.clientHeight - 6);
+  if (!upperRightPairRef.value || typeof ResizeObserver === 'undefined') return;
+  upperPairObserver = new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width > 120) upperPairWidth.value = entry.contentRect.width;
   });
-  corpusObserver.observe(corpusColumn.value);
+  upperPairObserver.observe(upperRightPairRef.value);
 });
-onBeforeUnmount(() => corpusObserver?.disconnect());
+onBeforeUnmount(() => upperPairObserver?.disconnect());
 
 // Selected Syllable & Phoneme(s)
 const activeClip = computed(() => store.project.value.clips[store.activeClipId.value]);
 const speechRate = ref<SpeechRate>('medium');
+let suppressSpeechRateWatch = false;
 const speechRateOptions = [
   { value: 'slow', label: '语速 · 慢速' },
   { value: 'medium', label: '语速 · 中速' },
@@ -409,7 +506,7 @@ const speechRateLabelMap: Record<SpeechRate, string> = {
 };
 
 watch(speechRate, (next, prev) => {
-  if (!prev || next === prev) return;
+  if (suppressSpeechRateWatch || !prev || next === prev) return;
   const clip = activeClip.value;
   if (!clip || !clip.syllable_order.length || loadedAnnotationRecording.value) {
     store.pushToast(`已切换为${speechRateLabelMap[next]}，将在下次编译入轨时生效`, 'info', 2200);
@@ -424,14 +521,34 @@ watch(speechRate, (next, prev) => {
     },
     factor,
   );
-  const res = store.executeCommand({
-    type: 'clip.edit',
-    label: `调整${speechRateLabelMap[next]}`,
-    payload: {
-      clip: rescaled.clip,
-      retimed: rescaled.retimed,
+  const res = store.executeCommand(
+    {
+      type: 'clip.edit',
+      label: `调整${speechRateLabelMap[next]}`,
+      payload: {
+        clip: rescaled.clip,
+        retimed: rescaled.retimed,
+      },
     },
-  });
+    {
+      localEdit: {
+        undo: () => {
+          suppressSpeechRateWatch = true;
+          speechRate.value = prev;
+          void nextTick(() => {
+            suppressSpeechRateWatch = false;
+          });
+        },
+        redo: () => {
+          suppressSpeechRateWatch = true;
+          speechRate.value = next;
+          void nextTick(() => {
+            suppressSpeechRateWatch = false;
+          });
+        },
+      },
+    },
+  );
   if (res.ok) {
     store.clearAnnotationAudio();
     store.playheadSmp.value = Math.min(store.playheadSmp.value, Math.max(0, rescaled.clip.end_smp - 1));
@@ -455,7 +572,7 @@ const annotationRenderKey = computed(() => {
     ? annotationSource.value
     : null;
   const spkTag = store.customSpeakerAudioBase64.value
-    ? `custom:${speakerReferenceId.value}`
+    ? `custom:${speakerReferenceId.value}:${effectiveSpeakerBaseF0Hz.value}`
     : source?.speakerWavBase64
       ? `input:${source.speakerWavBase64.slice(0, 24)}`
       : 'default';
@@ -486,23 +603,55 @@ const synthStatusText = computed(() => {
       return '待输入';
   }
 });
-const followingSynthesis = computed(() => annotationPlaybackSource.value === 'synthesis' && hasSynthesizedRecording.value);
-const displayedTractFrames = computed(() => followingSynthesis.value
-  ? displayedAnnotationRender.value?.provenance?.tractFrames : store.annotationTractFrames.value);
+const streamingTractFrames = shallowRef<AnnotationTractFrame[] | null>(null);
+const followingSynthesis = computed(() =>
+  annotationPlaybackSource.value === 'synthesis'
+  && (hasSynthesizedRecording.value || Boolean(streamingTractFrames.value?.length)),
+);
+const displayedTractFrames = computed(() =>
+  followingSynthesis.value
+    ? (hasSynthesizedRecording.value
+        ? displayedAnnotationRender.value?.provenance?.tractFrames
+        : streamingTractFrames.value ?? undefined)
+    : store.annotationTractFrames.value,
+);
 const followImportedTract = ref(false);
-const importedTractParams = computed(() => {
+const playheadScrubActive = ref(false);
+const followingPlayheadTrajectory = computed(() =>
+  followImportedTract.value || playheadScrubActive.value || (followingSynthesis.value && store.isPlaying.value),
+);
+const activeTrajectoryIndex = computed<number>(() => {
   const clip = activeClip.value;
   const frames = displayedTractFrames.value;
-  if ((!followImportedTract.value && !(followingSynthesis.value && store.isPlaying.value)) || !clip || !frames?.length) return null;
+  if (!followingPlayheadTrajectory.value || !clip || !frames?.length) return -1;
   const duration = Math.max(1, clip.end_smp - clip.start_smp);
-  const frame = trackFrameAt(frames, (store.playheadSmp.value - clip.start_smp) / duration);
+  const u = (store.playheadSmp.value - clip.start_smp) / duration;
+  const frame = trackFrameAt(frames, u);
+  return frame ? frames.indexOf(frame) : -1;
+});
+const activeTrajectoryFrame = computed<AnnotationTractFrame | null>(() => {
+  const idx = activeTrajectoryIndex.value;
+  const frames = displayedTractFrames.value;
+  if (idx < 0 || !frames || idx >= frames.length) return null;
+  return frames[idx];
+});
+const importedTractParams = computed(() => {
+  const frame = activeTrajectoryFrame.value;
   return frame ? tractArray19ToRecord(frame.params) : null;
 });
 
+function onTimelinePlayheadScrub(): void {
+  playheadScrubActive.value = true;
+}
+
+function onTimelinePhonemeFocus(): void {
+  playheadScrubActive.value = false;
+}
+
 const selectedSyllable = computed<Syllable | null>(() => {
   const clip = activeClip.value;
-  if (!clip) return null;
-  return clip.syllables[store.selectedSyllableId.value] ?? clip.syllables[clip.syllable_order[0]] ?? null;
+  if (!clip || !store.selectedSyllableId.value) return null;
+  return clip.syllables[store.selectedSyllableId.value] ?? null;
 });
 
 const allSegmentsFlat = computed<Array<{ syl: Syllable; seg: SegmentAnchor }>>(() => {
@@ -519,6 +668,51 @@ const allSegmentsFlat = computed<Array<{ syl: Syllable; seg: SegmentAnchor }>>((
   return arr;
 });
 
+const playheadSegmentEntry = computed(() => {
+  const t = store.playheadSmp.value;
+  return allSegmentsFlat.value.find(({ seg }) => t >= seg.start_smp && t < seg.end_smp)
+    ?? allSegmentsFlat.value.find(({ seg }) => t === seg.end_smp)
+    ?? null;
+});
+
+const scrubFallbackParams = computed<Record<TractParamName, number> | null>(() => {
+  if (!playheadScrubActive.value || importedTractParams.value) return null;
+  const clip = activeClip.value;
+  const list = allSegmentsFlat.value;
+  if (!clip || !list.length) return null;
+  const spk = speakerModel.value;
+  const t = store.playheadSmp.value;
+  const schwaVec = getFullPoseForIpa('ə', undefined, spk).params19;
+  const vecFor = (seg: SegmentAnchor): number[] => {
+    if (seg.role === 'rest' || seg.ipa === 'sil') return schwaVec;
+    return seg.params && seg.params.length >= 19 && !isDefaultTractVec(seg.params)
+      ? seg.params
+      : getFullPoseForIpa(seg.ipa, undefined, spk).params19;
+  };
+  const idx = list.findIndex(({ seg }) => t >= seg.start_smp && t <= seg.end_smp);
+  if (idx < 0) return tractArray19ToRecord(schwaVec);
+  const seg = list[idx].seg;
+  const curVec = vecFor(seg);
+  if (seg.role === 'rest' || seg.ipa === 'sil') return tractArray19ToRecord(schwaVec);
+  const span = Math.max(1, seg.end_smp - seg.start_smp);
+  const u = (t - seg.start_smp) / span;
+  const prev = idx > 0 ? list[idx - 1].seg : undefined;
+  const next = idx + 1 < list.length ? list[idx + 1].seg : undefined;
+  if (u < 0.25 && prev && prev.end_smp === seg.start_smp && prev.role !== 'rest' && prev.ipa !== 'sil') {
+    const prevVec = vecFor(prev);
+    const alpha = 0.5 + 0.5 * (u / 0.25);
+    return tractArray19ToRecord(curVec.map((v, i) => prevVec[i] + (v - prevVec[i]) * alpha));
+  }
+  if (u > 0.75 && next && next.start_smp === seg.end_smp && next.role !== 'rest' && next.ipa !== 'sil') {
+    const nextVec = vecFor(next);
+    const alpha = 0.5 * ((u - 0.75) / 0.25);
+    return tractArray19ToRecord(curVec.map((v, i) => v + (nextVec[i] - v) * alpha));
+  }
+  return tractArray19ToRecord(curVec);
+});
+
+const activeScrubTractParams = computed(() => importedTractParams.value ?? scrubFallbackParams.value);
+
 const primarySelectedEntry = computed(() => {
   const firstId = store.selectedPhonemeIds.value[0];
   if (firstId) {
@@ -528,7 +722,7 @@ const primarySelectedEntry = computed(() => {
   if (selectedSyllable.value?.segments[0]) {
     return { syl: selectedSyllable.value, seg: selectedSyllable.value.segments[0] };
   }
-  return allSegmentsFlat.value[0] ?? null;
+  return null;
 });
 
 // Keep tract params & quick IPA grid highlight synced when selected phoneme changes
@@ -545,13 +739,23 @@ let quickAuditionRequest: AbortController | undefined;
 let quickReferenceList: ReturnType<typeof fetchIpaReferences> | undefined;
 
 const DEFAULT_TRACT_VEC19 = tractRecordToArray19(defaultTractParams());
-function isDefaultTractVec(arr?: number[]): boolean {
-  if (!arr || arr.length < 19) return true;
+const LEGACY_PLACEHOLDER_TRACT_VEC19: readonly number[] = [
+  0.55, -4.75, -0.1, -2.1, 0.28, 0.62, 0.5, 0.0,
+  0.55, 0.15, 3.65, 0.35, 2.15, 0.45, -0.75, -1.85,
+  0.12, 0.08, 0.05,
+];
+function matchesTractVec(arr: readonly number[], refVec: readonly number[]): boolean {
   for (let i = 0; i < 19; i++) {
-    if (Math.abs((arr[i] ?? 0) - DEFAULT_TRACT_VEC19[i]) > 1e-4) return false;
+    if (Math.abs((arr[i] ?? 0) - refVec[i]) > 1e-4) return false;
   }
   return true;
 }
+function isDefaultTractVec(arr?: number[]): boolean {
+  if (!arr || arr.length < 19) return true;
+  return matchesTractVec(arr, DEFAULT_TRACT_VEC19) || matchesTractVec(arr, LEGACY_PLACEHOLDER_TRACT_VEC19);
+}
+
+const idlePoseTouched = ref(false);
 
 watch(
   () => [
@@ -559,10 +763,19 @@ watch(
     primarySelectedEntry.value?.seg.ipa,
     ptbPresetsVersion.value,
     speakerModel.value,
+    selectedIpaPoseSetId.value,
+    ipaPoseSets.value,
+    ipaPoseSetRevision.value,
+    store.engineStatus.value,
   ] as const,
-  ([, , , spk]) => {
+  ([, , , spk, , , , eng]) => {
+    playheadScrubActive.value = false;
+    if (eng === 'python-vtl' && !Object.keys(ipaPoseSets.value[0]?.poses ?? {}).length) {
+      void loadDefaultIpaPoses();
+    }
     const seg = primarySelectedEntry.value?.seg;
     if (seg) {
+      idlePoseTouched.value = false;
       const hasCalibratedParams = Boolean(seg.params && seg.params.length >= 19 && !isDefaultTractVec(seg.params));
       let nextParams: Record<TractParamName, number>;
       let nextExtras: TractPoseExtras;
@@ -570,13 +783,19 @@ watch(
         nextParams = tractArray19ToRecord(seg.params!);
         nextExtras = extractSegmentExtras(seg, spk);
       } else {
-        const full = getFullPoseForIpa(seg.ipa, undefined, spk);
+        const poseIpa = seg.role === 'rest' || seg.ipa === 'sil' ? 'ə' : seg.ipa;
+        const full = getFullPoseForIpa(poseIpa, undefined, spk);
         nextParams = full.params;
         nextExtras = extractSegmentExtras(seg, spk);
       }
       store.currentTractParams.value = { ...nextParams };
       store.currentTractExtras.value = cloneTractExtras(nextExtras);
       void store.requestVtlPose(nextParams, spk, nextExtras);
+    } else if (!idlePoseTouched.value) {
+      const schwa = getFullPoseForIpa('ə', undefined, spk);
+      store.currentTractParams.value = { ...schwa.params };
+      store.currentTractExtras.value = cloneTractExtras(schwa.extras);
+      void store.requestVtlPose(schwa.params, spk, schwa.extras);
     }
   },
   { immediate: true },
@@ -619,9 +838,15 @@ let compileSequence = 0;
 async function applyModelIpaPoses(clip: Clip, stillCurrent: () => boolean): Promise<boolean> {
   if (textPoseSource.value === 'current') return stillCurrent();
   try {
+    const segments = clip.syllable_order.flatMap((id) => {
+      const syllable = clip.syllables[id];
+      return syllable && resolveSyllablePoseSource(textPoseSource.value, syllable) === 'model'
+        ? syllable.segments
+        : [];
+    });
+    if (!segments.length) return stillCurrent();
     if (!['JD2', 'JD2-2D'].includes(speakerModel.value))
       throw new Error('模型默认构型适用于 JD2。其他解剖请选择当前 IPA 构型。');
-    const segments = clip.syllable_order.flatMap(id => clip.syllables[id].segments);
     const phones = new Map<string, { ipa: string; closure: boolean }>();
     const keys = segments.map(segment => {
       const phone = { ipa: nasalPoseIpa(segment.ipa), closure: Boolean(segment.stop_timing) };
@@ -643,8 +868,10 @@ async function applyModelIpaPoses(clip: Clip, stillCurrent: () => boolean): Prom
     });
     return true;
   } catch (error) {
-    if (stillCurrent()) store.pushToast(error instanceof Error ? error.message : '无法读取模型默认构型', 'warning');
-    return false;
+    if (!stillCurrent()) return false;
+    const hint = error instanceof Error ? error.message : '无法读取模型默认构型';
+    store.pushToast(`${hint}，已回退至当前 IPA 构型完成编译`, 'warning', 3800);
+    return true;
   }
 }
 
@@ -770,7 +997,7 @@ async function compileG2pToTrack(): Promise<void> {
     && poseSource === textPoseSource.value && rate === speechRate.value && speaker === speakerModel.value;
   compilingText.value = true;
   try {
-    if (poseSource === 'current') await loadDefaultIpaPoses();
+    if (poseSource !== 'model') await loadDefaultIpaPoses();
     if (!stillCurrent()) return;
     if (selectedDictionary.value) {
       await compileDialectToTrack(stillCurrent);
@@ -894,7 +1121,8 @@ async function compileG2pToTrack(): Promise<void> {
           useTextProsody: textProsodyEnabled.value,
           stillCurrent,
         });
-        if (!compiled) return;
+        if (!stillCurrent()) return;
+        if (!compiled) continue;
       }
 
       compiled.skippedVoqsSymbols.forEach((sym) => skippedVoqsAll.add(sym));
@@ -1058,7 +1286,8 @@ function clampF0PinPointsToSpan(points: readonly F0PinPoint[], minSmp: number, m
 function applyDictionaryTranscription(syllables: Syllable[], sourceText?: string) {
   const activeZhStd = (mandarinStandards.some((s) => s === g2pStandard.value) ? g2pStandard.value : dictionaryPrefs.value.zhStandard) as MappingStandard;
   const personalMap = buildPersonalG2pMap(activeZhStd);
-  const activeKana = kanaText === g2pText.value.trim() ? kanaWords : undefined;
+  const plainAll = parseVoqsScopedText(g2pText.value.trim()).plainText;
+  const activeKana = kanaText === plainAll ? kanaWords : undefined;
   const rowsMatchSyllables = (candidateRows: readonly ReadingRow[]) =>
     candidateRows.length === syllables.length &&
     !syllables.some((s, i) => normalizeSyllableToken(s.text) !== normalizeSyllableToken(candidateRows[i].word));
@@ -1217,8 +1446,8 @@ async function compileDialectToTrack(stillCurrent: () => boolean) {
       const levels = [...toneLevels].map(Number);
       const hzFor = (level: number) => level ? 115 + (level - 1) / 4 * 185 : fRef;
       const tonePoints = toneLevels === row.levels && row.f0?.length ? row.f0 : levels.map((level, i) => ({ u: levels.length > 1 ? i / (levels.length - 1) : .5, hz: hzFor(level) }));
-      if (tonePoints.some(p => !Number.isFinite(p.hz) || p.hz < F0_LIMIT_HZ.min || p.hz > F0_LIMIT_HZ.max || p.u < 0 || p.u > 1)) {
-        throw new Error(`「${row.word}」的调类曲线超出允许的基频范围`);
+      if (tonePoints.some(p => !isValidF0Hz(p.hz) || p.u < 0 || p.u > 1)) {
+        throw new Error(`「${row.word}」的调类曲线包含无效基频`);
       }
       if (tonePoints.length >= 2) {
         const points = tonePoints.map(pt => ({ f0_hz: pt.hz, t_smp: cursor + Math.round(pt.u * (durSmp - 1)) }));
@@ -1229,7 +1458,17 @@ async function compileDialectToTrack(stillCurrent: () => boolean) {
         nucleus_index: Math.max(0, segments.findIndex(segment => segment.role === 'nucleus')), tone_levels: toneLevels || undefined,
         anchor: { policy: 'speech_timing', lead_ms: null, bias_ms: 0 }, segments,
         targets: buildSyllableQtaTargets(id, cursor, end, { effectiveTone: toneLevels || undefined, fRefHz: fRef, voiced: segments.some(s => isSegmentVoicedAt(s, s.end_smp - 1)) }),
-        overrides: { poses: [], pressure: [{ u: 0, pressure_pa: 640 }, { u: 1, pressure_pa: 500 }], f0_resid: [], glottis: [] },
+        overrides: {
+          poses: [],
+          pressure: [
+            { u: 0, pressure_pa: 640 },
+            { u: 0.35, pressure_pa: 840 },
+            { u: 0.85, pressure_pa: 760 },
+            { u: 1, pressure_pa: 500 },
+          ],
+          f0_resid: [],
+          glottis: [],
+        },
       };
       cursor = end + msToSamples(row.pause * rateScale);
     }
@@ -1251,7 +1490,9 @@ function completeTextCompile(clip: Clip, message: string): void {
   if (segment?.params && segment.params.length === 19) {
     store.currentTractParams.value = tractArray19ToRecord(segment.params);
   } else {
-    store.currentTractParams.value = defaultTractParams();
+    const fallback = getFullPoseForIpa(segment?.ipa ?? 'ə', undefined, speakerModel.value);
+    store.currentTractParams.value = { ...fallback.params };
+    store.currentTractExtras.value = cloneTractExtras(fallback.extras);
   }
   store.pushToast(message, 'success', 2600);
 }
@@ -1275,30 +1516,50 @@ async function compileRuleSentence(
 ): Promise<CompiledSentenceData | null> {
   const voqsParsed = parseVoqsScopedText(sentenceText);
   const scopedRows: Array<{ row: ReadingRow; voqsState: ActiveVoqsState | null }> = [];
+  let pendingIpaSpace = false;
   for (const chunk of voqsParsed.chunks) {
-    if (!chunk.text.trim()) continue;
-    const chunkRows = reviewText(chunk.text, opts.activeZhStd, cmuLexicon.value, opts.personalMap, opts.activeKana);
-    const valid = chunkRows.filter((r) => r.word.trim().length > 0);
-    if (valid.length === 0) {
-      if (/[,，、：:;；.!?。！？…]/u.test(chunk.text) && scopedRows.length > 0) {
-        const prev = scopedRows[scopedRows.length - 1].row;
-        if (!prev.linkedToNext) {
-          const pMs = /[.!?。！？…]/u.test(chunk.text) ? 350 : 180;
-          prev.pause = Math.max(prev.pause, pMs);
-          prev.phraseEnd = true;
-        }
+    if (!chunk.text.trim()) {
+      if (!chunk.syntheticSpace && /\s/u.test(chunk.text) && scopedRows.at(-1)?.row.language === 'ipa') {
+        pendingIpaSpace = true;
       }
       continue;
     }
-    if (valid[0].leadingPause && scopedRows.length > 0 && !scopedRows[scopedRows.length - 1].row.linkedToNext) {
-      scopedRows[scopedRows.length - 1].row.pause = Math.max(
-        scopedRows[scopedRows.length - 1].row.pause,
-        valid[0].leadingPause,
-      );
+    const chunkRows = reviewText(chunk.text, opts.activeZhStd, cmuLexicon.value, opts.personalMap, opts.activeKana);
+    const valid = chunkRows.filter((r) => r.word.trim().length > 0);
+    if (valid.length === 0) {
+      if (/[,，、：:;；.·!?。！？…]/u.test(chunk.text) && scopedRows.length > 0) {
+        const prev = scopedRows[scopedRows.length - 1].row;
+        if (!prev.linkedToNext) {
+          const pMs = /[.·!?。！？…]/u.test(chunk.text) ? IPA_LONG_PAUSE_MS : 180;
+          prev.pause = Math.max(prev.pause, pMs);
+          prev.phraseEnd = true;
+        }
+        pendingIpaSpace = false;
+      }
+      continue;
+    }
+    const prevRow = scopedRows.at(-1)?.row;
+    if (prevRow && !prevRow.linkedToNext) {
+      if (valid[0].leadingPause) {
+        prevRow.pause = Math.max(prevRow.pause, valid[0].leadingPause);
+        prevRow.phraseEnd = true;
+      } else if (
+        pendingIpaSpace &&
+        prevRow.language === 'ipa' &&
+        valid[0].language === 'ipa'
+      ) {
+        prevRow.pause = Math.max(prevRow.pause, IPA_SPACE_PAUSE_MS);
+      }
     }
     for (const r of valid) {
       scopedRows.push({ row: r, voqsState: chunk.state });
     }
+    const lastRow = valid[valid.length - 1];
+    pendingIpaSpace =
+      lastRow.language === 'ipa' &&
+      !lastRow.linkedToNext &&
+      !lastRow.phraseEnd &&
+      /\s[\]］]?$/u.test(chunk.text);
   }
 
   if (scopedRows.length === 0) {
@@ -1352,9 +1613,10 @@ async function compileRuleSentence(
   const predictedDurMsByRow = new Map<number, number>();
   if (opts.useTextProsody) {
     const runs = extractMixedProsodyRuns(
-      speechRows.map(({ row, voqsState, userEntry, phonemes }) => ({
+      speechRows.map(({ row, voqsState, userEntry, supraseg, phonemes }) => ({
         word: row.word,
         language: row.language,
+        ipaPhones: row.language === 'ipa' ? phonemes : undefined,
         sourceWord: row.sourceWord,
         syllableIndex: row.syllableIndex,
         syllableCount: row.syllableCount,
@@ -1362,16 +1624,21 @@ async function compileRuleSentence(
         phraseEnd: row.phraseEnd,
         linkedToNext: row.linkedToNext,
         eligible:
-          (row.language === 'zh' || row.language === 'en') &&
+          (row.language === 'zh' || row.language === 'en' || row.language === 'ipa') &&
+          supraseg.effectiveTone === undefined &&
           userEntry?.toneLevels === undefined &&
           !/[⁰¹²³⁴⁵˥˦˧˨˩꜒꜓꜔꜕꜖‿ꜛꜜ]/u.test(row.word) &&
-          !phonemes.some(usesTrialReferenceTrajectory),
+          !phonemes.some(usesTrialReferenceTrajectory) &&
+          phonemes.length > 0,
         groupKey: voqsState ? `${voqsState.phonation?.symbol ?? ''}:${voqsState.larynxHeightCm ?? ''}` : 'plain',
       })),
     );
     if (runs.length > 0) {
       const settled = await Promise.allSettled(
         runs.map((run) => {
+          if (run.text.includes('[')) {
+            return predictSpeechProsody(run.text, opts.speaker, opts.rateScale, 'auto');
+          }
           const runHasHan = /\p{Script=Han}/u.test(run.text);
           const runHasLatin = /\p{Script=Latin}/u.test(run.text);
           const runLang: 'auto' | 'zh' | 'en' =
@@ -1674,14 +1941,24 @@ function ingestCorpusFiles(files: CorpusFile[], notify = true): void {
   }
 }
 
-async function ingestFiles(fileList: FileList | File[], opts?: { fromDropOnCorpus?: boolean }): Promise<void> {
-  const files = Array.from(fileList, (file) => ({
+async function ingestFiles(
+  fileList: FileList | File[],
+  opts?: { fromDropOnCorpus?: boolean; autoLoadDirect?: boolean },
+): Promise<void> {
+  const rawList = Array.from(fileList);
+  const files = rawList.map((file) => ({
     file,
     relativePath: (file.webkitRelativePath || file.name).replace(/\\/g, '/').replace(/^\/+/, ''),
   }));
-  ingestCorpusFiles(files);
+  ingestCorpusFiles(files, !opts?.autoLoadDirect);
 
-  if (!opts?.fromDropOnCorpus) return;
+  if (opts?.autoLoadDirect) {
+    await loadFilesOntoTimeline(rawList);
+    return;
+  }
+
+  const allVcproj = rawList.length > 0 && rawList.every((f) => f.name.toLowerCase().endsWith('.vcproj'));
+  if (!opts?.fromDropOnCorpus && !allVcproj) return;
   for (const { file } of files) {
     if (!file.name.toLowerCase().endsWith('.vcproj')) continue;
     const res = store.importProjectJson(await file.text());
@@ -1815,16 +2092,51 @@ async function applyTextGridFileToTimeline(
   }
 }
 
+let timelineLoadSeq = 0;
+
+async function isVcProjectFile(file: File): Promise<{ isProject: boolean; text?: string }> {
+  if (/\.vcproj$/i.test(file.name)) {
+    return { isProject: true, text: await file.text() };
+  }
+  if (/\.json$/i.test(file.name)) {
+    const text = await file.text();
+    try {
+      const parsed = JSON.parse(text) as { schema?: unknown };
+      if (parsed && parsed.schema === 'vocalcut/project') {
+        return { isProject: true, text };
+      }
+    } catch {
+      return { isProject: false };
+    }
+  }
+  return { isProject: false };
+}
+
 async function loadFilesOntoTimeline(files: File[], corpusIds: string[] = []): Promise<void> {
   if (!files.length) return;
-  const vcproj = files.find((f) => /\.(vcproj|json)$/i.test(f.name));
-  if (vcproj) {
-    const txt = await vcproj.text();
-    const res = store.importProjectJson(txt);
-    if (res.ok) {
-      g2pText.value = store.project.value.clips[store.activeClipId.value]?.source?.lyrics ?? g2pText.value;
+  const loadSeq = ++timelineLoadSeq;
+
+  const projectCandidate = files.find((f) => /\.(vcproj|json)$/i.test(f.name));
+  if (projectCandidate) {
+    const checked = await isVcProjectFile(projectCandidate);
+    if (loadSeq !== timelineLoadSeq) return;
+    if (checked.isProject && checked.text) {
+      store.stopPlayback();
+      annotationPlaybackIntent++;
+      loadedAnnotationRecording.value = null;
+      annotationSource.value = null;
+      store.editedAnnotationAudio.value = null;
+      store.annotationTractFrames.value = [];
+      followImportedTract.value = false;
+      playheadScrubActive.value = false;
+      annotationPlaybackSource.value = 'synthesis';
+      const res = store.importProjectJson(checked.text);
+      if (res.ok) {
+        g2pText.value = store.project.value.clips[store.activeClipId.value]?.source?.lyrics ?? g2pText.value;
+        corpusDrawerOpen.value = false;
+      }
+      return;
     }
-    return;
   }
 
   const audioFile = files.find((f) => /\.(wav|mp3|ogg|flac|m4a|aac|webm)$/i.test(f.name) || f.type.startsWith('audio/'));
@@ -1850,6 +2162,15 @@ async function loadFilesOntoTimeline(files: File[], corpusIds: string[] = []): P
 
     try {
       const decoded = await decodeRecording(audioFile);
+      if (loadSeq !== timelineLoadSeq) return;
+      store.stopPlayback();
+      annotationPlaybackIntent++;
+      store.editedAnnotationAudio.value = null;
+      store.annotationTractFrames.value = [];
+      annotationSource.value = null;
+      followImportedTract.value = false;
+      playheadScrubActive.value = false;
+      store.playheadSmp.value = 0;
       loadedAnnotationRecording.value = {
         raw: audioFile,
         rawAudio: decoded,
@@ -1858,8 +2179,10 @@ async function loadFilesOntoTimeline(files: File[], corpusIds: string[] = []): P
         uploadedTextGridName: undefined,
       };
       showRecordingVersion(false);
+      corpusDrawerOpen.value = false;
       if (gridFile) {
         const parsedGrid = await applyTextGridFileToTimeline(gridFile, decoded.duration);
+        if (loadSeq !== timelineLoadSeq) return;
         if (parsedGrid) {
           store.pushToast(
             `已上轨音频 ${audioFile.name} (${decoded.duration.toFixed(2)}s)${autoPairedGrid ? `，已顺带选配同名 ${gridFile.name}` : ` 与 ${gridFile.name}`}`,
@@ -1870,19 +2193,22 @@ async function loadFilesOntoTimeline(files: File[], corpusIds: string[] = []): P
         }
       }
       store.pushToast(
-        `已上轨音频 ${audioFile.name} (${decoded.duration.toFixed(2)}s)，可点击上方「声道重建并对齐」提取轨迹`,
+        `已上轨音频 ${audioFile.name} (${decoded.duration.toFixed(2)}s)，可点击下方「声道重建并对齐」提取轨迹`,
         'success',
         3400,
       );
     } catch {
-      store.pushToast(`音频 ${audioFile.name} 解码失败`, 'danger');
+      if (loadSeq === timelineLoadSeq) {
+        store.pushToast(`音频 ${audioFile.name} 解码失败`, 'danger');
+      }
     }
     return;
   }
 
   if (gridFile) {
     const parsedGrid = await applyTextGridFileToTimeline(gridFile);
-    if (parsedGrid) {
+    if (loadSeq === timelineLoadSeq && parsedGrid) {
+      corpusDrawerOpen.value = false;
       store.pushToast(`已加载 TextGrid ${gridFile.name} 至时间轴`, 'success');
     }
   }
@@ -1905,10 +2231,24 @@ function onCorpusRowDblClick(item: LocalWorkspaceFile): void {
 
 // ===== T-03: Inline M27 Vocal-Tract Reconstruction & Alignment onto Current Timeline =====
 const reconstructModalOpen = ref(false);
+const reconstructConfirmOpen = ref(false);
 const reconstructDialogRef = ref<HTMLDialogElement | null>(null);
 const reconstructTextDraft = ref('');
 const reconstructLangDraft = ref<'auto' | 'zh' | 'en'>('auto');
 const reconstructingTimeline = ref(false);
+
+function extractValidM27F0Points(rows: readonly number[][], totalSmp: number): F0PinPoint[] {
+  const pts: F0PinPoint[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const hz = rows[i]?.[17];
+    if (typeof hz !== 'number' || !isValidF0Hz(hz)) continue;
+    pts.push({
+      t_smp: Math.min(totalSmp, Math.round((i * SAMPLE_RATE_HZ) / 50)),
+      f0_hz: Number(hz.toFixed(1)),
+    });
+  }
+  return pts.length >= 2 && pts[pts.length - 1].t_smp > pts[0].t_smp ? pts : [];
+}
 
 function m27RowToTract19(row: readonly number[], lm?: readonly number[]): number[] {
   const params = defaultTractParams();
@@ -1929,15 +2269,9 @@ function m27RowToTract19(row: readonly number[], lm?: readonly number[]): number
   return tractRecordToArray19(params);
 }
 
-async function onClickReconstructAndAlign(): Promise<void> {
+async function proceedReconstructAndAlign(): Promise<void> {
   const rec = loadedAnnotationRecording.value;
   if (!rec || reconstructingTimeline.value) return;
-  if (hasEditedReconstructedSource.value) {
-    const ok = window.confirm(
-      '当前时间轴包含手动修改过的音素时长、边界或控制参数。\n重新执行「声道重建并对齐」将按原始录音重新对齐并覆盖当前手动修改，是否继续？（如需直接试听修改后的时长，请直接点击左侧「播放」按钮。）',
-    );
-    if (!ok) return;
-  }
   if (rec.uploadedTextGrid) {
     await runInlineReconstructAndAlign({ useUploadedGrid: true });
     return;
@@ -1948,6 +2282,21 @@ async function onClickReconstructAndAlign(): Promise<void> {
   if (reconstructDialogRef.value && !reconstructDialogRef.value.open) {
     reconstructDialogRef.value.showModal();
   }
+}
+
+async function onClickReconstructAndAlign(): Promise<void> {
+  const rec = loadedAnnotationRecording.value;
+  if (!rec || reconstructingTimeline.value) return;
+  if (hasEditedReconstructedSource.value) {
+    reconstructConfirmOpen.value = true;
+    return;
+  }
+  await proceedReconstructAndAlign();
+}
+
+async function confirmOverwriteReconstruct(): Promise<void> {
+  reconstructConfirmOpen.value = false;
+  await proceedReconstructAndAlign();
 }
 
 function closeReconstructModal(): void {
@@ -1969,14 +2318,33 @@ async function runInlineReconstructAndAlign(opts: {
 }): Promise<void> {
   const rec = loadedAnnotationRecording.value;
   if (!rec || reconstructingTimeline.value) return;
+  const clipIdAtStart = store.activeClipId.value;
+  const projectIdAtStart = store.project.value.id;
   reconstructingTimeline.value = true;
   try {
-    const wavB64 = await blobToBase64(rec.raw);
+    const activeAudio = rec.denoised && rec.cleanAudio ? rec.cleanAudio : rec.rawAudio;
+    let wavB64: string;
+    if (rec.denoised && rec.cleanAudio) {
+      const nCh = rec.cleanAudio.numberOfChannels;
+      const mono = nCh <= 1
+        ? rec.cleanAudio.getChannelData(0)
+        : (() => {
+            const mixed = new Float32Array(rec.cleanAudio.length);
+            for (let c = 0; c < nCh; c++) {
+              const ch = rec.cleanAudio.getChannelData(c);
+              for (let i = 0; i < mixed.length; i++) mixed[i] += ch[i] / nCh;
+            }
+            return mixed;
+          })();
+      wavB64 = encodeMonoWavBase64(mono, rec.cleanAudio.sampleRate);
+    } else {
+      wavB64 = await blobToBase64(rec.raw);
+    }
     const guideText = !opts.useUploadedGrid && opts.text ? opts.text : undefined;
     const adapter = new M27Adapter();
     const res = await adapter.reconstruct({
       wav_base64: wavB64,
-      filename: rec.raw.name,
+      filename: rec.denoised && rec.cleanAudio ? `${rec.raw.name.replace(/\.[^.]+$/, '')}-denoised.wav` : rec.raw.name,
       text: guideText,
       lang: opts.lang ?? 'auto',
       alignment_mode: guideText ? 'guided' : 'none',
@@ -1985,6 +2353,13 @@ async function runInlineReconstructAndAlign(opts: {
       compute_device: store.computeDevice.value,
       fps: 25,
     });
+    if (
+      loadedAnnotationRecording.value?.raw !== rec.raw ||
+      store.activeClipId.value !== clipIdAtStart ||
+      store.project.value.id !== projectIdAtStart
+    ) {
+      return;
+    }
     if (!res.ok) {
       store.pushToast(res.error.hint, 'danger', 4200);
       return;
@@ -2000,7 +2375,7 @@ async function runInlineReconstructAndAlign(opts: {
       u: i / Math.max(1, rows.length - 1),
       params: m27RowToTract19(row, interpM27AnimState(data.tract_glottis_anim, i / 50)?.lm),
     }));
-    const totalSmp = Math.max(msToSamples(60), Math.round(rec.rawAudio.duration * SAMPLE_RATE_HZ));
+    const totalSmp = Math.max(msToSamples(60), Math.round(activeAudio.duration * SAMPLE_RATE_HZ));
     let resolvedGrid: TextGridDocument | null = opts.useUploadedGrid ? (rec.uploadedTextGrid ?? null) : null;
 
     if (!resolvedGrid && data.alignment?.textgrid) {
@@ -2059,18 +2434,13 @@ async function runInlineReconstructAndAlign(opts: {
     const cmds: WorkbenchCommand[] = [
       { type: 'clip.edit', payload: { clip: enrichedClip, resetAnnotation: false } },
     ];
-    if (
-      rows.length >= 2 &&
-      rows.every((r) => Number.isFinite(r[17]) && r[17] >= F0_LIMIT_HZ.min && r[17] <= F0_LIMIT_HZ.max)
-    ) {
+    const validF0Pts = extractValidM27F0Points(rows, totalSmp);
+    if (validF0Pts.length >= 2) {
       cmds.push({
         type: 'f0.draw',
         payload: {
           id: `m27-${enrichedClip.id}`,
-          points: rows.map((r, i) => ({
-            t_smp: Math.min(totalSmp, Math.round((i * SAMPLE_RATE_HZ) / 50)),
-            f0_hz: Number(r[17].toFixed(1)),
-          })),
+          points: validF0Pts,
         },
       });
     }
@@ -2109,42 +2479,52 @@ async function runInlineReconstructAndAlign(opts: {
 // ===== Compact Permanent IPA Quick-Replace Grid + Clipboard Copy (T-08) =====
 function quickIpaTitle(item: QuickIpaItem): string {
   const segment = primarySelectedEntry.value?.seg;
-  const target = segment && (item.category === 'diacritic'
-    ? `并叠加到 [${segment.ipa}]`
-    : `并替换选中 [${segment.ipa}]`);
-  return `${item.display ?? item.symbol} · ${item.nameZh}（点击复制${target || ''}）`;
+  if (segment) {
+    const action = item.category === 'diacritic' ? `叠加到 [${segment.ipa}]` : `替换选中 [${segment.ipa}]`;
+    return `${item.display ?? item.symbol} · ${item.nameZh}（点击${action}；Ctrl+点击复制符号）`;
+  }
+  return `${item.display ?? item.symbol} · ${item.nameZh}（点击复制符号）`;
 }
 
-function replaceSelectedWithIpa(item: QuickIpaItem): void {
+function replaceSelectedWithIpa(item: QuickIpaItem, e?: MouseEvent): void {
   const isMark = item.category === 'diacritic';
   if (isMark) focusedQuickDiacritic.value = item;
   else focusedQuickIpa.value = item;
-  const copy = copyTextToClipboard(item.symbol);
-  function report(message = '', tone: 'info' | 'warning' | 'success' = 'info') {
-    void copy.then(copied => {
-      const status = copied ? `已复制 [${item.display ?? item.symbol}]` : '无法写入剪贴板';
-      store.pushToast(message ? `${status} · ${message}` : status, copied ? tone : 'warning', 2000);
-    });
-  }
+
   const clip = activeClip.value;
   const selected = new Set(store.selectedPhonemeIds.value);
-  if (!clip || !selected.size) {
-    report();
+  const copyOnly = Boolean(e && (e.ctrlKey || e.metaKey)) || !clip || !selected.size;
+
+  if (copyOnly) {
+    void copyTextToClipboard(item.symbol).then((copied) => {
+      store.pushToast(
+        copied ? `已复制 [${item.display ?? item.symbol}]` : '无法写入剪贴板',
+        copied ? 'info' : 'warning',
+        2000,
+      );
+    });
     return;
   }
+
   const targets = new Map<string, string>();
   for (const { seg } of allSegmentsFlat.value) {
     if (!selected.has(seg.id) || (isMark && (seg.role === 'rest' || seg.ipa === 'sil' || !seg.ipa.trim()))) continue;
     const symbol = isMark ? combineIpaDiacritic(seg.ipa, item.symbol) : item.symbol;
     if (isMark && symbol === seg.ipa.normalize('NFC')) continue;
     if (phoneTraits(symbol).stop && seg.end_smp - seg.start_smp < msToSamples(11)) {
-      report(`当前选中段不足 11 ms 塞音下限，未${isMark ? '叠加' : '替换'}`, 'warning');
+      store.pushToast(`当前选中段不足 11 ms 塞音下限，未${isMark ? '叠加' : '替换'}`, 'warning', 2400);
       return;
     }
     targets.set(seg.id, symbol);
   }
   if (!targets.size) {
-    report();
+    void copyTextToClipboard(item.symbol).then((copied) => {
+      store.pushToast(
+        copied ? `已复制 [${item.display ?? item.symbol}]` : '无法写入剪贴板',
+        copied ? 'info' : 'warning',
+        2000,
+      );
+    });
     return;
   }
 
@@ -2152,13 +2532,30 @@ function replaceSelectedWithIpa(item: QuickIpaItem): void {
   for (const sid of cloned.syllable_order) {
     const syl = cloned.syllables[sid];
     if (!syl) continue;
+    let sylTouched = false;
+    const replacedIdx = new Set<number>();
+    const replacedIds = new Set<string>();
+    const prevIpa = syl.segments.map((s) => s.ipa);
     syl.segments.forEach((seg, idx) => {
       const symbol = targets.get(seg.id);
       if (symbol === undefined) return;
       const updated = replaceSegmentIpa(seg, symbol, speakerModel.value, isMark ? undefined : item.entryId);
       syl.segments[idx] = updated;
       syl.ipa[idx] = updated.ipa;
+      replacedIdx.add(idx);
+      replacedIds.add(seg.id);
+      sylTouched = true;
     });
+    if (sylTouched) {
+      if (syl.overrides?.poses?.length) {
+        syl.overrides.poses = syl.overrides.poses.filter(
+          (pose) => !replacedIdx.has(pose.seg_index) && (!pose.seg_id || !replacedIds.has(pose.seg_id)),
+        );
+      }
+      const nucIdx = syl.segments.findIndex((s) => s.role === 'nucleus');
+      if (nucIdx >= 0) syl.nucleus_index = nucIdx;
+      syncSyllableTextFromSegments(syl, prevIpa);
+    }
   }
 
   const res = store.executeCommand({
@@ -2168,7 +2565,15 @@ function replaceSelectedWithIpa(item: QuickIpaItem): void {
       : `替换 ${targets.size} 个音素为 [${item.symbol}]`,
     payload: { clip: cloned },
   });
-  if (res.ok) report(isMark ? `已为 ${targets.size} 个选中音素叠加附加符号` : `已替换 ${targets.size} 个选中音素`, 'success');
+  if (res.ok) {
+    store.pushToast(
+      isMark
+        ? `已为 ${targets.size} 个选中音素叠加 [${item.display ?? item.symbol}]`
+        : `已将 ${targets.size} 个选中音素替换为 [${item.display ?? item.symbol}]`,
+      'success',
+      2000,
+    );
+  }
 }
 
 async function auditionQuickIpa(item: QuickIpaItem): Promise<void> {
@@ -2178,6 +2583,7 @@ async function auditionQuickIpa(item: QuickIpaItem): Promise<void> {
   quickAuditionRequest = request;
   quickAuditionBusy.value = true;
   quickAudition.value = null;
+  annotationPlaybackIntent++;
   store.stopPlayback();
   const label = item.category === 'vowel' ? item.symbol : `a${item.symbol}a`;
   try {
@@ -2199,7 +2605,11 @@ async function auditionQuickIpa(item: QuickIpaItem): Promise<void> {
           const buffer = await decodeRecording(new File([await response.blob()], 'ipa.wav'));
           if (request.signal.aborted) return;
           if (take.end <= buffer.duration + 1 / buffer.sampleRate) {
-            await store.playAudioBuffer(buffer, { offsetSeconds: take.start, durationSeconds: take.end - take.start });
+            await store.playAudioBuffer(buffer, {
+              offsetSeconds: take.start,
+              durationSeconds: take.end - take.start,
+              voiceAutoGain: synthesisGainMode.value === 'peak',
+            });
             quickAudition.value = { key: quickIpaKey(item.symbol), source: '实录' };
             return;
           }
@@ -2221,38 +2631,63 @@ async function auditionQuickIpa(item: QuickIpaItem): Promise<void> {
       f0Hz: store.currentGlottisParams.value.f0_hz,
       mode: 'physical',
       cacheWaveform: false,
+      signal: request.signal,
     });
     if (!buffer || request.signal.aborted) return;
-    await store.playAudioBuffer(buffer);
+    await store.playAudioBuffer(buffer, { voiceAutoGain: synthesisGainMode.value === 'peak' });
     quickAudition.value = { key: quickIpaKey(item.symbol), source: 'VTL 合成' };
   } finally {
     if (quickAuditionRequest === request) quickAuditionBusy.value = false;
   }
 }
 
-// ===== Vocal Tract Direct Drag & Right Inspector Edits =====
+// ===== Vocal Tract Direct Drag & On-Demand 19-D Parameter Drawer (Plan A) =====
 const core6Meta = VTL_PARAM_META.filter((m) => m.core6);
 const extra13Meta = VTL_PARAM_META.filter((m) => !m.core6);
 
 const pendingPose = shallowRef<TractDelta>({});
 const pendingExtras = shallowRef<TractPoseExtras | null>(null);
 const inspectorParams = computed(() => ({ ...store.currentTractParams.value, ...pendingPose.value }));
+let sliderPoseFrameId = 0;
 
 function onViewportTractUpdate(delta: TractDelta): void {
+  if (playheadScrubActive.value) {
+    const cur = playheadSegmentEntry.value;
+    if (cur) {
+      store.selectedSyllableId.value = cur.syl.id;
+      store.selectedPhonemeIds.value = [cur.seg.id];
+    }
+    playheadScrubActive.value = false;
+  }
+  if (!primarySelectedEntry.value) idlePoseTouched.value = true;
   pendingPose.value = delta;
 }
 
 function onViewportExtrasUpdate(ex: TractPoseExtras): void {
+  if (!primarySelectedEntry.value) idlePoseTouched.value = true;
   pendingExtras.value = cloneTractExtras(ex);
 }
 
 function commitPose(delta: TractDelta, label: string) {
   const entry = primarySelectedEntry.value;
   const clip = activeClip.value;
-  if (!entry || !clip) return;
+  if (!entry || !clip) {
+    idlePoseTouched.value = true;
+    const merged = { ...store.currentTractParams.value, ...delta };
+    const ex = pendingExtras.value;
+    const result = store.executeCommand({
+      type: 'artic.set_pose',
+      label,
+      payload: { params: merged },
+    });
+    if (result.ok && ex) store.currentTractExtras.value = ex;
+    pendingPose.value = {};
+    pendingExtras.value = null;
+    return store.requestVtlPose(merged, speakerModel.value, ex ?? store.currentTractExtras.value);
+  }
   const index = entry.syl.segments.findIndex(s => s.id === entry.seg.id);
   const articulation = { type: 'artic.set_pose' as const, payload: {
-    clip_id: clip.id, syllable_id: entry.syl.id, seg_index: index, delta,
+    clip_id: clip.id, syllable_id: entry.syl.id, seg_index: index, params: delta,
   } };
   const ex = pendingExtras.value;
   const edited = JSON.parse(JSON.stringify(clip)) as typeof clip;
@@ -2283,56 +2718,114 @@ function onViewportDragEnd(delta: TractDelta): void {
 }
 
 function onSliderTractInput(key: TractParamName, value: number): void {
-  pendingPose.value = { [key]: value };
+  if (followImportedTract.value || store.isPlaying.value) return;
+  if (playheadScrubActive.value) {
+    const cur = playheadSegmentEntry.value;
+    if (cur) {
+      store.selectedSyllableId.value = cur.syl.id;
+      store.selectedPhonemeIds.value = [cur.seg.id];
+    }
+    playheadScrubActive.value = false;
+  }
+  if (!primarySelectedEntry.value) idlePoseTouched.value = true;
+  pendingPose.value = { ...pendingPose.value, [key]: value };
+  if (!sliderPoseFrameId) {
+    sliderPoseFrameId = window.requestAnimationFrame(() => {
+      sliderPoseFrameId = 0;
+      if (!followImportedTract.value && !playheadScrubActive.value && !store.isPlaying.value) {
+        void store.requestVtlPose(
+          inspectorParams.value,
+          speakerModel.value,
+          pendingExtras.value ?? store.currentTractExtras.value,
+          true,
+        );
+      }
+    });
+  }
 }
 
 function onSliderTractCommit(key: TractParamName, value: number): void {
-  commitPose({ [key]: value }, `调节 ${key} = ${value.toFixed(2)}`);
+  if (followImportedTract.value || store.isPlaying.value) return;
+  if (playheadScrubActive.value) {
+    const cur = playheadSegmentEntry.value;
+    if (cur) {
+      store.selectedSyllableId.value = cur.syl.id;
+      store.selectedPhonemeIds.value = [cur.seg.id];
+    }
+    playheadScrubActive.value = false;
+  }
+  if (sliderPoseFrameId) {
+    window.cancelAnimationFrame(sliderPoseFrameId);
+    sliderPoseFrameId = 0;
+  }
+  commitPose({ ...pendingPose.value, [key]: value }, `调节 ${key} = ${value.toFixed(2)}`);
 }
 
-function onGlottisCommit(key: keyof GlottisM27Params, val: number): void {
-  store.executeCommand({
-    type: 'voice.set_glottis',
-    label: `调节声门 ${key} = ${val}`,
-    payload: { [key]: val },
-  });
-}
-
-const selectedVoqsAnchor = computed(() => store.phonationAnchors.value.find(anchor => anchor.id === store.selectedPhonationAnchorId.value));
-
-function applyVoqsProfile(profile: VoqsProfile, take: VoqsTake, height?: number) {
-  writeRecordedVoqs(store, profile, take, store.playheadSmp.value, selectedVoqsAnchor.value, height);
-}
-
-// T-46: Exact syllable duration numeric input in right inspector
-const inspectorSyllableMs = computed(() => {
-  const syl = primarySelectedEntry.value?.syl ?? selectedSyllable.value;
-  return syl ? Math.round(samplesToMs(syl.end_smp - syl.start_smp)) : 0;
-});
-
-function commitInspectorSylDurationEvent(e: Event): void {
-  const input = e.target as HTMLInputElement;
-  const val = Number(input.value);
-  const syl = primarySelectedEntry.value?.syl ?? selectedSyllable.value;
-  const clip = activeClip.value;
-  if (!syl || !clip) return;
-  if (!Number.isFinite(val) || val < 20 || val > 10000) {
-    store.pushToast('音节时长须在 20–10000 ms 之间', 'warning');
-    input.value = String(inspectorSyllableMs.value);
+function resetSelectedPhonemePose(): void {
+  if (followImportedTract.value || store.isPlaying.value) {
+    store.pushToast('当前正在跟随轨迹预览，关闭轨迹跟随即可复位构型', 'info', 2400);
     return;
   }
-  const targetEndSmp = syl.start_smp + msToSamples(Math.round(val));
+  playheadScrubActive.value = false;
+  const entry = primarySelectedEntry.value;
+  const clip = activeClip.value;
+  pendingPose.value = {};
+  pendingExtras.value = null;
+  if (!entry || !clip) {
+    idlePoseTouched.value = false;
+    const schwa = getFullPoseForIpa('ə', undefined, speakerModel.value);
+    const res = store.executeCommand({
+      type: 'artic.set_pose',
+      label: '复位 [ə] 标准 IPA 构型',
+      payload: { params: schwa.params },
+    });
+    if (res.ok) {
+      store.currentTractExtras.value = cloneTractExtras(schwa.extras);
+      void store.requestVtlPose(schwa.params, speakerModel.value, schwa.extras);
+      store.pushToast('已恢复 [ə] 标准 IPA 构型', 'success', 2000);
+    }
+    return;
+  }
+  const segIndex = entry.syl.segments.findIndex((s) => s.id === entry.seg.id);
+  if (segIndex < 0) return;
+  const full = getFullPoseForIpa(nasalPoseIpa(entry.seg.ipa), undefined, speakerModel.value);
+  const edited = JSON.parse(JSON.stringify(clip)) as typeof clip;
+  const targetSyl = edited.syllables[entry.syl.id];
+  if (targetSyl) {
+    targetSyl.overrides.poses = (targetSyl.overrides.poses ?? []).filter(
+      (p) => p.seg_id !== entry.seg.id && p.seg_index !== segIndex,
+    );
+    Object.assign(targetSyl.segments[segIndex], {
+      params: [...full.params19],
+      lip_width: full.extras.lip_width,
+      larynx_height_cm: full.extras.larynx_height,
+      manual_root: full.extras.manual_root,
+      tongue_shape: [...full.extras.tongue_shape],
+      lip_shape: [...full.extras.lip_shape],
+    });
+  }
   const res = store.executeCommand({
-    type: 'textgrid.set_boundary',
-    label: `修改音节「${syl.text}」总时长至 ${Math.round(val)} ms`,
+    type: 'batch',
+    label: `复位 [${entry.seg.ipa}] 标准 IPA 构型`,
     payload: {
-      clip_id: clip.id,
-      syllable_id: syl.id,
-      end_smp: targetEndSmp,
+      commands: [
+        { type: 'clip.edit', payload: { clip: edited } },
+        {
+          type: 'artic.set_pose',
+          payload: {
+            clip_id: clip.id,
+            syllable_id: entry.syl.id,
+            seg_index: segIndex,
+            params: full.params,
+          },
+        },
+      ],
     },
   });
-  if (!res.ok) {
-    input.value = String(inspectorSyllableMs.value);
+  if (res.ok) {
+    store.currentTractExtras.value = cloneTractExtras(full.extras);
+    void store.requestVtlPose(full.params, speakerModel.value, full.extras);
+    store.pushToast(`已恢复 [${entry.seg.ipa}] 标准 IPA 构型`, 'success', 2000);
   }
 }
 
@@ -2433,46 +2926,157 @@ function handleCreateLexiconBook(): void {
   store.pushToast('已创建并切换到新个人词典簿', 'success', 2000);
 }
 
-function commitInspectorSegDuration(newMs: number): void {
-  const entry = primarySelectedEntry.value;
-  const clip = activeClip.value;
-  if (!entry || !clip) return;
-  const res = retime(
-    clip,
-    {
-      clip_id: clip.id,
-      syllable_id: entry.syl.id,
-      segment_id: entry.seg.id,
-      new_end_smp: entry.seg.start_smp + msToSamples(newMs),
-    },
-    store.project.value.phonation_anchors,
-    store.project.value.f0_pins ?? [],
-  );
-  if (!res.ok) {
-    store.pushToast(res.error.hint, 'danger', 3600);
-    return;
-  }
-  store.executeCommand({
-    type: 'clip.edit',
-    label: `修改音素 [${entry.seg.ipa}] 时长 ${Math.round(newMs)} ms`,
-    payload: { clip: res.value.clip, retimed: res.value },
-  });
+// ===== 2x2 PTB Scientific Physics & Acoustic Vowel Space Quad =====
+const importedDisplayedPose = shallowRef<Record<string, unknown> | null>(null);
+let trajectoryPrefetchAbort: AbortController | null = null;
+let trajectoryPrefetchBusy = false;
+let trajectoryDirectSeq = 0;
+
+function buildTrajectoryPoseRequest(frame: AnnotationTractFrame, spk = speakerModel.value): PoseRequest {
+  const ex = pendingExtras.value ?? store.currentTractExtras.value;
+  return {
+    speaker: spk,
+    section_count: 65,
+    params: frame.params,
+    ...cloneTractExtras(ex),
+  };
 }
 
-// ===== 2x2 PTB Scientific Physics & Acoustic Vowel Space Quad =====
-const importedDisplayedPose = shallowRef<Record<string,unknown>|null>(null);
-watch(() => Boolean(importedTractParams.value), active => { if (!active) importedDisplayedPose.value=null; });
-function acceptViewportPose(state: Record<string,unknown>) {
-  if (importedTractParams.value) importedDisplayedPose.value=state;
+function applyResolvedTrajectoryPose(state: Record<string, unknown>): void {
+  const snap = state as unknown as PtbPoseSnapshot;
+  if (snap?.centerline?.length && !userPinnedSection.value) {
+    const summary = computeAreaReadouts(snap);
+    if (summary) activeSectionIdx.value = summary.aminIdx;
+  }
+  importedDisplayedPose.value = state;
+}
+
+function triggerTrajectoryPrefetch(startIndex: number): void {
+  const frames = displayedTractFrames.value;
+  if (!frames?.length || store.engineStatus.value !== 'python-vtl') return;
+  const safeStart = Math.max(0, Math.min(frames.length - 1, startIndex));
+  const spk = speakerModel.value;
+  const winStart = store.isPlaying.value ? safeStart : Math.max(0, safeStart - 8);
+  const winEnd = Math.min(frames.length, store.isPlaying.value ? safeStart + 44 : safeStart + 16);
+  const uncached: PoseRequest[] = [];
+  for (let i = winStart; i < winEnd; i++) {
+    const req = buildTrajectoryPoseRequest(frames[i], spk);
+    if (!isVtlPosePendingOrCached(req)) uncached.push(req);
+  }
+  if (!uncached.length || trajectoryPrefetchBusy) return;
+  if (!trajectoryPrefetchAbort || trajectoryPrefetchAbort.signal.aborted) {
+    trajectoryPrefetchAbort = new AbortController();
+  }
+  const signal = trajectoryPrefetchAbort.signal;
+  const batchLimit = annotationSynthesizing.value ? 8 : 24;
+  const batch = uncached.slice(0, batchLimit);
+  trajectoryPrefetchBusy = true;
+  void prefetchVtlPoseBatch(batch, { signal, maxBatchSize: batchLimit })
+    .finally(() => {
+      trajectoryPrefetchBusy = false;
+      if (signal.aborted) return;
+      // Refresh active frame immediately if it just landed in cache
+      const curIdx = activeTrajectoryIndex.value;
+      const curFrames = displayedTractFrames.value;
+      if (curIdx >= 0 && curFrames?.[curIdx]) {
+        const curHit = getCachedVtlPose(buildTrajectoryPoseRequest(curFrames[curIdx]));
+        if (curHit) {
+          const resolved = (curHit.state as Record<string, unknown>) ?? curHit;
+          if (resolved !== importedDisplayedPose.value) {
+            applyResolvedTrajectoryPose(resolved);
+          }
+        }
+        // Keep sliding window topped up during playback
+        if (store.isPlaying.value) {
+          const nextUnfilled = curFrames.findIndex(
+            (f, idx) => idx >= curIdx && idx < Math.min(curFrames.length, curIdx + 36) && !isVtlPosePendingOrCached(buildTrajectoryPoseRequest(f)),
+          );
+          if (nextUnfilled >= 0) triggerTrajectoryPrefetch(nextUnfilled);
+        }
+      }
+    });
+}
+
+// Warm-prefetch the opening 24 frames as soon as a trajectory is available
+watch(
+  [displayedTractFrames, speakerModel, () => store.engineStatus.value],
+  ([frames, , eng], prev) => {
+    if (prev && (frames !== prev[0] || speakerModel.value !== prev[1])) {
+      trajectoryPrefetchAbort?.abort();
+      trajectoryPrefetchAbort = null;
+      trajectoryPrefetchBusy = false;
+    }
+    if (frames?.length && eng === 'python-vtl') {
+      const idx = activeTrajectoryIndex.value >= 0 ? activeTrajectoryIndex.value : 0;
+      triggerTrajectoryPrefetch(idx);
+    }
+  },
+);
+
+// Deliver cached trajectory or pre-synthesis scrub frames synchronously (0 ms cache hit)
+watch(
+  [activeTrajectoryIndex, scrubFallbackParams, displayedTractFrames, speakerModel, () => store.engineStatus.value],
+  ([idx, fallback, frames, spk, eng]) => {
+    if (idx >= 0 && frames?.[idx]) {
+      if (eng !== 'python-vtl') return;
+      const req = buildTrajectoryPoseRequest(frames[idx], spk);
+      const cached = getCachedVtlPose(req);
+      if (cached) {
+        const resolved = (cached.state as Record<string, unknown>) ?? cached;
+        if (resolved !== importedDisplayedPose.value) {
+          applyResolvedTrajectoryPose(resolved);
+        }
+        if (store.isPlaying.value) {
+          triggerTrajectoryPrefetch(idx + 1);
+        }
+        return;
+      }
+      // Cache miss (cold start or sudden scrub): fetch current frame + kick lookahead batch
+      const seq = ++trajectoryDirectSeq;
+      triggerTrajectoryPrefetch(idx);
+      void resolveVtlPose(req).then((ans) => {
+        if (!ans || seq !== trajectoryDirectSeq || activeTrajectoryIndex.value !== idx) return;
+        applyResolvedTrajectoryPose((ans.state as Record<string, unknown>) ?? ans);
+      });
+      return;
+    }
+    if (fallback && eng === 'python-vtl') {
+      const ex = pendingExtras.value ?? store.currentTractExtras.value;
+      const req: PoseRequest = {
+        speaker: spk,
+        section_count: 65,
+        params: tractRecordToArray19(fallback),
+        ...cloneTractExtras(ex),
+      };
+      const cached = getCachedVtlPose(req);
+      if (cached) {
+        const resolved = (cached.state as Record<string, unknown>) ?? cached;
+        if (resolved !== importedDisplayedPose.value) applyResolvedTrajectoryPose(resolved);
+        return;
+      }
+      const seq = ++trajectoryDirectSeq;
+      void resolveVtlPose(req).then((ans) => {
+        if (!ans || seq !== trajectoryDirectSeq || !scrubFallbackParams.value) return;
+        applyResolvedTrajectoryPose((ans.state as Record<string, unknown>) ?? ans);
+      });
+      return;
+    }
+    importedDisplayedPose.value = null;
+  },
+  { flush: 'sync' },
+);
+
+function acceptViewportPose(state: Record<string, unknown>) {
+  if (activeScrubTractParams.value) applyResolvedTrajectoryPose(state);
 }
 const metrics = computed(() => {
-  if (importedDisplayedPose.value && importedTractParams.value) {
+  if (importedDisplayedPose.value && activeScrubTractParams.value) {
     return metricsFromVtlSnapshot(importedDisplayedPose.value,store.currentMetrics.value);
   }
   return store.currentMetrics.value;
 });
 const liveSnapshot = computed<PtbPoseSnapshot | null>(() => {
-  const raw = importedTractParams.value ? importedDisplayedPose.value : store.currentTractState.value;
+  const raw = activeScrubTractParams.value ? importedDisplayedPose.value : store.currentTractState.value;
   if (raw && typeof raw === 'object') return raw as unknown as PtbPoseSnapshot;
 
   return null;
@@ -2510,7 +3114,7 @@ const spectrumReadout = ref<{ prefix: 'F' | 'P'; peaks: number[]; zeros: number[
 const sectionStatus = ref({ open: false, areaCm2: 0, midlineClosed: false, available: false });
 
 const areaSummary = computed(() => computeAreaReadouts(liveSnapshot.value, activeSectionIdx.value));
-const lipFront = computed(() => buildPtbLipFrontData(liveSnapshot.value, importedTractParams.value ?? store.currentTractParams.value));
+const lipFront = computed(() => buildPtbLipFrontData(liveSnapshot.value, activeScrubTractParams.value ?? store.currentTractParams.value));
 const crossGripDragging=ref(false);
 const keyframeModalOpen=ref(false);
 let crossPointerCleanup:(()=>void)|null=null;
@@ -2528,11 +3132,14 @@ function refreshSideHandles() {
   if(indices.length<3){sideHandles.value=[];return;}
   const ribs = (store.currentTractState.value?.tongue_side_ribs as number[]|undefined) ?? [11,21,30];
   const distances = ribs.map(r=>{
-    const k=(Math.round(r)*mesh.points+mesh.points-1)*3;
+    const clampedRib = Math.max(0, Math.min(mesh.ribs - 1, Math.round(r)));
+    const k=(clampedRib*mesh.points+mesh.points-1)*3;
+    if (k + 1 >= mesh.vertices.length) return Number.POSITIVE_INFINITY;
     return Math.hypot(mesh.vertices[k]-center[0],mesh.vertices[k+1]-center[1]);
   });
   const key = ('TS'+(1+distances.indexOf(Math.min(...distances)))) as TractParamName;
   const view=sectionView(canvas.clientWidth,canvas.clientHeight);
+  if (view.scale <= 0) { sideHandles.value = []; return; }
   sideHandles.value=[.15,.85].map(f=>{
     const i=indices[Math.round(f*(indices.length-1))];
     return { x:view.x(i), y:view.y(row.lower[i]!),key };
@@ -2550,8 +3157,9 @@ function dragCrossHandle(e:PointerEvent,key:TractParamName|'lip_width',direction
   const parameters=store.engineMeta.value?.parameters as {name:string;min:number;max:number}[]|undefined;
   const meta=parameters?.find(m=>m.name===key) ?? VTL_PARAM_META.find(m=>m.key===key);
   const min=meta?.min??.55,max=meta?.max??1.6;
-  const unit=(horizontal?Math.max(10,target.closest('svg')!.getBoundingClientRect().width*.30):
-    sectionView(sectionCanvasRef.value!.clientWidth,sectionCanvasRef.value!.clientHeight).scale*getCurrentPageScale());
+  const unit=(horizontal?Math.max(10,(target.closest('svg')?.getBoundingClientRect().width ?? 0)*.30):
+    (sectionCanvasRef.value ? sectionView(sectionCanvasRef.value.clientWidth,sectionCanvasRef.value.clientHeight).scale*getCurrentPageScale() : 0));
+  if (!Number.isFinite(unit) || unit <= 1e-4) return;
   let value=base;
   let changed=false;
   let pending=0;
@@ -2724,11 +3332,11 @@ function drawVowelCanvasOnly(): void {
   }
   const now = performance.now();
   vowelHistory.value = vowelHistory.value.filter((p) => now - p.time < 10000);
-  if (vowelHistory.value.length > 0) {
+  if (vowelHistory.value.length > 0 && !store.isPlaying.value) {
     const oldest = vowelHistory.value[0].time;
     vowelTrailTimer = window.setTimeout(
       () => drawVowelCanvasOnly(),
-      Math.min(180, Math.max(40, 10000 - (now - oldest))),
+      Math.min(180, Math.max(60, 10000 - (now - oldest))),
     );
   }
   lastVowelDrawLayout = drawPtbVowelSpace(vowelCanvasRef.value, {
@@ -2747,7 +3355,7 @@ function drawAllPhysicsQuadCharts(): void {
   const snap = liveSnapshot.value;
   if (snap?.centerline?.length && !userPinnedSection.value) {
     const summary = computeAreaReadouts(snap);
-    if (summary) activeSectionIdx.value = summary.aminIdx;
+    if (summary && activeSectionIdx.value !== summary.aminIdx) activeSectionIdx.value = summary.aminIdx;
   }
   drawSelectedSection();
   spectrumReadout.value = drawPtbSpectrumChart(
@@ -2764,7 +3372,7 @@ let sectionFrameId=0;
 function drawSelectedSection() {
   const snap=liveSnapshot.value;
   drawPtbAreaChart(areaCanvasRef.value,snap,activeSectionIdx.value,undefined,acousticFontScale.value);
-  refreshSideHandles();
+  if (!importedTractParams.value) refreshSideHandles();
   sectionStatus.value=drawPtbSectionChart(sectionCanvasRef.value,snap,activeSectionIdx.value,acousticFontScale.value);
 }
 
@@ -2820,6 +3428,7 @@ function onVowelWheel(e: WheelEvent): void {
 
 function onVowelPointerDown(e: PointerEvent): void {
   if (e.button !== 0 || !e.isPrimary || !lastVowelDrawLayout) return;
+  e.preventDefault();
   vowelDragCleanup?.();
   const { axes, plotW, plotH, scale: coordinateScale } = lastVowelDrawLayout;
   const pointerId = e.pointerId;
@@ -2920,7 +3529,16 @@ watch(
       }
     }
     lastVowelCurrent = pair ? { ...pair, time: now } : null;
-    drawVowelCanvasOnly();
+    schedulePhysicsCharts();
+  },
+);
+
+watch(
+  () => store.isPlaying.value,
+  (playing) => {
+    if (!playing && vowelHistory.value.length > 0) {
+      schedulePhysicsCharts();
+    }
   },
 );
 
@@ -2935,7 +3553,19 @@ watch(
     () => store.customAccentHex.value,
     () => store.anatomyAppearance.value,
   ],
-  schedulePhysicsCharts,
+  (_next, prev) => {
+    if (
+      prev &&
+      (prev[3] !== store.resolvedColorMode.value ||
+        prev[4] !== store.paletteId.value ||
+        prev[5] !== store.surfaceStyle.value ||
+        prev[6] !== store.customAccentHex.value ||
+        prev[7] !== store.anatomyAppearance.value)
+    ) {
+      invalidateChartThemeCache();
+    }
+    schedulePhysicsCharts();
+  },
 );
 
 watch(
@@ -3034,7 +3664,37 @@ watch(annotationRenderKey, key => {
   }
 });
 
-async function renderCurrentAnnotation(streamPlay?: { playheadStartSmp?: number; gain?: number }): Promise<AnnotationRender | null> {
+function collectEditedReferencePhoneIds(clip: Clip, baseline?: Clip): string[] {
+  if (!baseline) return [];
+  const baselinePhones = new Map(
+    baseline.syllable_order.flatMap((id) =>
+      (baseline.syllables[id]?.segments ?? []).map((phone) => [phone.id, phone] as const),
+    ),
+  );
+  const edited: string[] = [];
+  for (const sid of clip.syllable_order) {
+    const syl = clip.syllables[sid];
+    if (!syl) continue;
+    const poseOverrideIds = new Set(
+      (syl.overrides?.poses ?? []).map((p) => p.seg_id ?? syl.segments[p.seg_index]?.id).filter(Boolean),
+    );
+    for (const phone of syl.segments) {
+      if (phone.role === 'rest') continue;
+      const orig = baselinePhones.get(phone.id);
+      const isNewOrChanged =
+        !orig ||
+        orig.ipa !== phone.ipa ||
+        orig.voiced !== phone.voiced ||
+        JSON.stringify(orig.params) !== JSON.stringify(phone.params) ||
+        JSON.stringify(orig.stop_timing) !== JSON.stringify(phone.stop_timing) ||
+        poseOverrideIds.has(phone.id);
+      if (isNewOrChanged) edited.push(phone.id);
+    }
+  }
+  return edited;
+}
+
+async function renderCurrentAnnotation(streamPlay?: { playheadStartSmp?: number; gain?: number; voiceAutoGain?: boolean }): Promise<AnnotationRender | null> {
   const clip = activeClip.value, key = annotationRenderKey.value;
   if (!clip || !canSynthesizeAnnotation.value) {
     store.pushToast('请先编译文本或载入带音素的标注。', 'info');
@@ -3048,10 +3708,7 @@ async function renderCurrentAnnotation(streamPlay?: { playheadStartSmp?: number;
   pendingAnnotationKey.value = key;
   const job = (async () => {
     const source = returnSource.value;
-    const baselinePhones = new Map(source?.baseline.syllable_order.flatMap(id =>
-      source.baseline.syllables[id].segments.map(phone => [phone.id, phone] as const)));
-    const editedPhoneIds = allSegmentsFlat.value.map(({ seg }) => seg).filter(phone => phone.params && baselinePhones.has(phone.id)
-      && JSON.stringify(baselinePhones.get(phone.id)?.params) !== JSON.stringify(phone.params)).map(phone => phone.id);
+    const editedPhoneIds = collectEditedReferencePhoneIds(clip, source?.baseline);
     const effectiveSpkWav = store.customSpeakerAudioBase64.value ?? source?.speakerWavBase64 ?? undefined;
     const buffer = await synthesizeClipBySentences(
       store,
@@ -3065,6 +3722,13 @@ async function renderCurrentAnnotation(streamPlay?: { playheadStartSmp?: number;
         speakerWavBase64: effectiveSpkWav,
         ipaPoseSource: textPoseSource.value,
         streamPlay,
+        onStreamTractFrames: streamPlay
+          ? (frames) => {
+              if (annotationRenderKey.value === key) {
+                streamingTractFrames.value = frames;
+              }
+            }
+          : undefined,
         referenceTrack: source
           ? {
               frames: store.annotationTractFrames.value,
@@ -3087,28 +3751,13 @@ async function renderCurrentAnnotation(streamPlay?: { playheadStartSmp?: number;
     return result;
   })().finally(() => {
     pendingAnnotationRenders.delete(key);
-    if (pendingAnnotationKey.value === key) pendingAnnotationKey.value = '';
+    if (pendingAnnotationKey.value === key) {
+      pendingAnnotationKey.value = '';
+      streamingTractFrames.value = null;
+    }
   });
   pendingAnnotationRenders.set(key, job);
   return job;
-}
-
-async function synthesizeAnnotation(): Promise<void> {
-  const intent = ++annotationPlaybackIntent;
-  store.stopPlayback();
-  const result = await renderCurrentAnnotation();
-  if (result && intent === annotationPlaybackIntent && result.key === annotationRenderKey.value) applyAnnotationRender(result);
-}
-
-async function auditionAca(item: QuickIpaItem): Promise<void> {
-  focusedQuickIpa.value = item;
-  const full = getFullPoseForIpa(item.symbol, item.entryId, speakerModel.value);
-  store.currentTractExtras.value = cloneTractExtras(full.extras);
-  const audio = await store.synthesizeRange({
-    speaker: speakerModel.value, mode: annotationRenderMode.value, tractParams: full.params,
-    durationMs: 560, f0Hz: store.currentGlottisParams.value.f0_hz, cacheWaveform: false,
-  });
-  if (audio) await store.playAudioBuffer(audio);
 }
 
 function showSynthesizedRecording(): void {
@@ -3129,7 +3778,7 @@ async function toggleTransportPlay(): Promise<void> {
     const clip = activeClip.value;
     const playFromStart = !clip || store.playheadSmp.value <= clip.start_smp + msToSamples(40) || store.playheadSmp.value >= clip.end_smp - msToSamples(40);
     const rendered = await renderCurrentAnnotation(
-      playFromStart && clip ? { playheadStartSmp: clip.start_smp } : undefined,
+      playFromStart && clip ? { playheadStartSmp: clip.start_smp, voiceAutoGain: synthesisGainMode.value === 'peak' } : undefined,
     );
     if (!rendered || intent !== annotationPlaybackIntent || rendered.key !== annotationRenderKey.value) return;
     applyAnnotationRender(rendered);
@@ -3141,7 +3790,11 @@ async function toggleTransportPlay(): Promise<void> {
   const end = start + Math.round(buffer.duration * SAMPLE_RATE_HZ);
   const current = store.playheadSmp.value;
   const sample = current >= start && current < end - msToSamples(12) ? current : start;
-  await store.playAudioBuffer(buffer, { playheadStartSmp: sample, offsetSeconds: (sample - start) / SAMPLE_RATE_HZ });
+  await store.playAudioBuffer(buffer, {
+    playheadStartSmp: sample,
+    offsetSeconds: (sample - start) / SAMPLE_RATE_HZ,
+    voiceAutoGain: synthesisGainMode.value === 'peak',
+  });
 }
 
 const sendingAudio = ref(false);
@@ -3165,11 +3818,19 @@ function toggleSendAudioMenu(): void {
   const btn = sendMenuBtnRef.value;
   if (btn) {
     const rect = btn.getBoundingClientRect();
+    const scale = Math.max(0.5, getCurrentPageScale());
+    const vw = window.innerWidth / scale;
+    const vh = window.innerHeight / scale;
     const menuW = 196;
-    const left = Math.max(8, Math.min(window.innerWidth - menuW - 8, rect.right - menuW));
-    let top = rect.bottom + 6;
-    if (top + 170 > window.innerHeight) top = Math.max(8, rect.top - 176);
-    sendMenuStyle.value = { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, minWidth: `${menuW}px` };
+    const left = Math.max(8, Math.min(vw - menuW - 8, rect.right / scale - menuW));
+    let top = rect.bottom / scale + 6;
+    if (top + 214 > vh) top = Math.max(8, rect.top / scale - 220);
+    sendMenuStyle.value = {
+      left: `${Math.round(left)}px`,
+      top: `${Math.round(top)}px`,
+      minWidth: `${menuW}px`,
+      maxHeight: `${Math.max(140, Math.round(vh - 16))}px`,
+    };
   }
   sendMenuOpen.value = true;
 }
@@ -3183,19 +3844,29 @@ function toggleDictMenu(): void {
   const btn = dictMenuBtnRef.value;
   if (btn) {
     const rect = btn.getBoundingClientRect();
-    const menuW = 352;
-    const left = Math.max(8, Math.min(window.innerWidth - menuW - 8, rect.left));
-    let top = rect.bottom + 6;
-    if (top + 420 > window.innerHeight) {
-      top = Math.max(8, rect.top - 410);
+    const scale = Math.max(0.5, getCurrentPageScale());
+    const vw = window.innerWidth / scale;
+    const vh = window.innerHeight / scale;
+    const menuW = 360;
+    const left = Math.max(8, Math.min(vw - menuW - 8, rect.left / scale));
+    const estH = 540;
+    let top = rect.bottom / scale + 6;
+    if (top + estH > vh) {
+      top = Math.max(8, rect.top / scale - Math.min(estH, vh - 24) - 6);
     }
-    dictMenuStyle.value = { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, width: `${menuW}px` };
+    dictMenuStyle.value = {
+      left: `${Math.round(left)}px`,
+      top: `${Math.round(top)}px`,
+      width: `${menuW}px`,
+      maxHeight: `${Math.max(220, Math.round(vh - 16))}px`,
+    };
   }
   dictMenuOpen.value = true;
 }
 
 function onGlobalPopoverDown(e: PointerEvent): void {
-  const t = e.target as Node | null;
+  const t = e.target as HTMLElement | null;
+  if (t?.closest('#vcSelectMenu')) return;
   if (sendMenuOpen.value) {
     if (!sendMenuFloatingRef.value?.contains(t) && !sendMenuBtnRef.value?.contains(t)) {
       sendMenuOpen.value = false;
@@ -3208,15 +3879,61 @@ function onGlobalPopoverDown(e: PointerEvent): void {
   }
 }
 
-// T-62: Play timeline selection using full referenceTrack + original speaker timbre
+function onSynthesisPageKeyDown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  if (reconstructConfirmOpen.value) {
+    reconstructConfirmOpen.value = false;
+    e.preventDefault();
+    return;
+  }
+  if (sendMenuOpen.value || dictMenuOpen.value) {
+    sendMenuOpen.value = false;
+    dictMenuOpen.value = false;
+    e.preventDefault();
+    return;
+  }
+  if (corpusDrawerOpen.value) {
+    corpusDrawerOpen.value = false;
+    corpusDragging.value = false;
+    e.preventDefault();
+  }
+}
+
+function blurToolbarButtonOnMouseClick(e: MouseEvent): void {
+  if (e.detail <= 0) return;
+  const btn = (e.target as HTMLElement | null)?.closest('button');
+  if (btn && !btn.closest('.vc-sel, [role="dialog"], [role="menu"], dialog, .rt-phone-popover, .rt-poly-menu')) {
+    btn.blur();
+  }
+}
+
+// T-62: Play timeline selection using cached full buffer when ready, or referenceTrack + original speaker timbre
 async function playTimelineSelection(range: { startSmp?: number; endSmp?: number; gain: number }): Promise<void> {
   const clip = activeClip.value;
   if (!clip) return;
+  const intent = ++annotationPlaybackIntent;
+  store.stopPlayback();
+
+  const cachedRender = displayedAnnotationRender.value;
+  if (hasSynthesizedRecording.value && cachedRender) {
+    const startSmp = Math.max(cachedRender.start, range.startSmp ?? cachedRender.start);
+    const endSmp = range.endSmp ?? (cachedRender.start + Math.round(cachedRender.buffer.duration * SAMPLE_RATE_HZ));
+    const offsetSeconds = Math.max(0, (startSmp - cachedRender.start) / SAMPLE_RATE_HZ);
+    const durationSeconds = Math.min(cachedRender.buffer.duration, Math.max(0, (endSmp - cachedRender.start) / SAMPLE_RATE_HZ)) - offsetSeconds;
+    if (durationSeconds > 0.005) {
+      await store.playAudioBuffer(cachedRender.buffer, {
+        gain: range.gain,
+        offsetSeconds,
+        durationSeconds,
+        playheadStartSmp: startSmp,
+        voiceAutoGain: synthesisGainMode.value === 'peak',
+      });
+      return;
+    }
+  }
+
   const source = returnSource.value;
-  const baselinePhones = new Map(source?.baseline.syllable_order.flatMap(id =>
-    source.baseline.syllables[id].segments.map(phone => [phone.id, phone] as const)));
-  const editedPhoneIds = allSegmentsFlat.value.map(({ seg }) => seg).filter(phone => phone.params && baselinePhones.has(phone.id)
-    && JSON.stringify(baselinePhones.get(phone.id)?.params) !== JSON.stringify(phone.params)).map(phone => phone.id);
+  const editedPhoneIds = collectEditedReferencePhoneIds(clip, source?.baseline);
   const effectiveSpkWav = store.customSpeakerAudioBase64.value ?? source?.speakerWavBase64 ?? undefined;
   const buf = await synthesizeClipBySentences(
     store,
@@ -3229,7 +3946,12 @@ async function playTimelineSelection(range: { startSmp?: number; endSmp?: number
       cacheWaveform: false,
       speakerWavBase64: effectiveSpkWav,
       ipaPoseSource: textPoseSource.value,
-      streamPlay: { gain: range.gain, playheadStartSmp: range.startSmp ?? 0 },
+      streamPlay: {
+        gain: range.gain,
+        playheadStartSmp: range.startSmp ?? 0,
+        voiceAutoGain: synthesisGainMode.value === 'peak',
+        shouldStreamPlay: () => intent === annotationPlaybackIntent,
+      },
       referenceTrack: source
         ? {
             frames: store.annotationTractFrames.value,
@@ -3240,52 +3962,57 @@ async function playTimelineSelection(range: { startSmp?: number; endSmp?: number
           }
         : undefined,
     },
-    () => activeClip.value?.id === clip.id,
+    () => intent === annotationPlaybackIntent && activeClip.value?.id === clip.id,
   );
-  if (buf && !store.consumeStreamPlayed(buf)) {
-    await store.playAudioBuffer(buf, { gain: range.gain, playheadStartSmp: range.startSmp ?? 0 });
+  if (buf && intent === annotationPlaybackIntent && !store.consumeStreamPlayed(buf)) {
+    await store.playAudioBuffer(buf, {
+      gain: range.gain,
+      playheadStartSmp: range.startSmp ?? 0,
+      voiceAutoGain: synthesisGainMode.value === 'peak',
+    });
   }
 }
 
-// T-63: Synchronized audio/trajectory cut & leading/trailing silence trim with revision-synced Ctrl+Z undo
+// T-63: Synchronized audio/trajectory cut & leading/trailing silence trim with atomic localEdit Ctrl+Z undo/redo
 interface CutAuxSnapshot {
   recording: typeof loadedAnnotationRecording.value;
   source: typeof annotationSource.value;
   tractFrames: AnnotationTractFrame[];
   playbackSource: 'recording' | 'edited' | 'synthesis';
   audioBuffer: AudioBuffer | null;
+  editedAudio: AudioBuffer | null;
 }
-const cutAuxByRevision = new Map<number, CutAuxSnapshot>();
 
 function captureCutAuxSnapshot(): CutAuxSnapshot {
   return {
-    recording: loadedAnnotationRecording.value ? { ...loadedAnnotationRecording.value } : null,
+    recording: loadedAnnotationRecording.value
+      ? {
+          ...loadedAnnotationRecording.value,
+          uploadedTextGrid: loadedAnnotationRecording.value.uploadedTextGrid
+            ? JSON.parse(JSON.stringify(loadedAnnotationRecording.value.uploadedTextGrid))
+            : null,
+        }
+      : null,
     source: annotationSource.value ? JSON.parse(JSON.stringify(annotationSource.value)) : null,
     tractFrames: store.annotationTractFrames.value.map((f) => ({ u: f.u, params: [...f.params] })),
     playbackSource: annotationPlaybackSource.value,
     audioBuffer: store.annotationAudioBuffer.value,
+    editedAudio: store.editedAnnotationAudio.value,
   };
 }
 
 function applyCutAuxSnapshot(snap: CutAuxSnapshot): void {
+  annotationPlaybackIntent++;
+  store.stopPlayback();
   loadedAnnotationRecording.value = snap.recording;
   annotationSource.value = snap.source;
   store.annotationTractFrames.value = snap.tractFrames;
+  store.editedAnnotationAudio.value = snap.editedAudio;
   annotationPlaybackSource.value = snap.playbackSource;
   store.annotationAudioBuffer.value = snap.audioBuffer;
   store.lastAudioBuffer.value = snap.audioBuffer;
   store.annotationAudioOffsetSmp.value = 0;
 }
-
-watch(
-  () => store.project.value.revision,
-  (rev) => {
-    const snap = cutAuxByRevision.get(rev);
-    if (snap) {
-      applyCutAuxSnapshot(snap);
-    }
-  },
-);
 
 function performExciseSmpRange(cutStartSmp: number, cutEndSmp: number, label: string): boolean {
   const clip = activeClip.value;
@@ -3296,7 +4023,8 @@ function performExciseSmpRange(cutStartSmp: number, cutEndSmp: number, label: st
     store.pushToast('剪切区间至少需 15 ms', 'info');
     return false;
   }
-  const beforeRev = store.project.value.revision;
+  annotationPlaybackIntent++;
+  store.stopPlayback();
   const beforeAux = captureCutAuxSnapshot();
 
   const excised = exciseClipAndControlsRange(
@@ -3324,11 +4052,15 @@ function performExciseSmpRange(cutStartSmp: number, cutEndSmp: number, label: st
       if (nextCleanAudio) applyPeakAudioGain(nextCleanAudio);
     }
     const nextFile = audioBufferFile(nextRawAudio, nextRecording.raw.name.replace(/\.[^.]+$/, ''));
+    const nextGrid = nextRecording.uploadedTextGrid
+      ? exciseTextGridRange(nextRecording.uploadedTextGrid, cutStartSec, cutEndSec)
+      : null;
     nextRecording = {
       ...nextRecording,
       raw: nextFile,
       rawAudio: nextRawAudio,
       cleanAudio: nextCleanAudio,
+      uploadedTextGrid: nextGrid,
     };
     nextActiveAudio = nextRecording.denoised && nextCleanAudio ? nextCleanAudio : nextRawAudio;
   } else if (nextActiveAudio) {
@@ -3347,32 +4079,36 @@ function performExciseSmpRange(cutStartSmp: number, cutEndSmp: number, label: st
     };
   }
 
-  const res = store.executeCommand({
-    type: 'project.replace',
-    label,
-    payload: { project: excised.nextProject },
-  });
+  const afterAux: CutAuxSnapshot = {
+    recording: nextRecording,
+    source: nextSource,
+    tractFrames: excised.nextTractFrames,
+    playbackSource: nextRecording ? 'recording' : annotationPlaybackSource.value,
+    audioBuffer: nextActiveAudio,
+    editedAudio: null,
+  };
+
+  const res = store.executeCommand(
+    {
+      type: 'project.replace',
+      label,
+      payload: { project: excised.nextProject },
+    },
+    {
+      localEdit: {
+        undo: () => applyCutAuxSnapshot(beforeAux),
+        redo: () => applyCutAuxSnapshot(afterAux),
+      },
+    },
+  );
   if (!res.ok) return false;
 
-  const afterRev = store.project.value.revision;
-  cutAuxByRevision.set(beforeRev, beforeAux);
-
-  loadedAnnotationRecording.value = nextRecording;
-  annotationSource.value = nextSource;
-  store.annotationTractFrames.value = excised.nextTractFrames;
-  if (nextRecording) {
-    annotationPlaybackSource.value = 'recording';
-  }
-  store.annotationAudioBuffer.value = nextActiveAudio;
-  store.lastAudioBuffer.value = nextActiveAudio;
-  store.annotationAudioOffsetSmp.value = 0;
+  applyCutAuxSnapshot(afterAux);
   store.playheadSmp.value = Math.min(excised.nextClip.end_smp, c0);
   const firstSid = excised.nextClip.syllable_order[0] ?? '';
   store.selectedSyllableId.value = firstSid;
   const firstSeg = excised.nextClip.syllables[firstSid]?.segments[0];
   store.selectedPhonemeIds.value = firstSeg ? [firstSeg.id] : [];
-
-  cutAuxByRevision.set(afterRev, captureCutAuxSnapshot());
   return true;
 }
 
@@ -3390,19 +4126,24 @@ function onTimelineTrimSilence(): void {
         ? loadedAnnotationRecording.value.cleanAudio
         : loadedAnnotationRecording.value.rawAudio)
     : store.annotationAudioBuffer.value;
-  const bounds = detectLeadingTrailingSilence({ audioBuffer: audio, clip });
+  const bounds = detectLeadingTrailingSilence({
+    audioBuffer: audio,
+    clip,
+    grid: loadedAnnotationRecording.value?.uploadedTextGrid ?? null,
+  });
   if (!bounds) {
     store.pushToast('未检测到超过 45 ms 的首尾可裁剪静音段', 'info', 2400);
     return;
   }
-  // Cut trailing silence first so sample indices of leading silence stay exact, or combine in one atomic command!
-  const beforeRev = store.project.value.revision;
+  annotationPlaybackIntent++;
+  store.stopPlayback();
   const beforeAux = captureCutAuxSnapshot();
   let workingProject = store.project.value;
   let workingFrames = store.annotationTractFrames.value;
   let workingRawAudio = loadedAnnotationRecording.value?.rawAudio ?? null;
   let workingCleanAudio = loadedAnnotationRecording.value?.cleanAudio;
   let workingActiveAudio = store.annotationAudioBuffer.value;
+  let workingGrid = loadedAnnotationRecording.value?.uploadedTextGrid ?? null;
   let workingRows = annotationSource.value?.rows ?? [];
 
   if (bounds.trailRemovedMs > 0 && clip) {
@@ -3418,6 +4159,7 @@ function onTimelineTrimSilence(): void {
     if (!loadedAnnotationRecording.value && workingActiveAudio) {
       workingActiveAudio = exciseAudioBufferRange(workingActiveAudio, trailStartSec, trailEndSec);
     }
+    if (workingGrid) workingGrid = exciseTextGridRange(workingGrid, trailStartSec, trailEndSec);
     if (workingRows.length) {
       workingRows = exciseM27TrajectoryRange(workingRows, null, trailStartSec, trailEndSec).rows;
     }
@@ -3435,57 +4177,69 @@ function onTimelineTrimSilence(): void {
     if (!loadedAnnotationRecording.value && workingActiveAudio) {
       workingActiveAudio = exciseAudioBufferRange(workingActiveAudio, 0, leadEndSec);
     }
+    if (workingGrid) workingGrid = exciseTextGridRange(workingGrid, 0, leadEndSec);
     if (workingRows.length) {
       workingRows = exciseM27TrajectoryRange(workingRows, null, 0, leadEndSec).rows;
     }
   }
 
-  const label = `裁剪首尾静音 (首 ${bounds.leadRemovedMs} ms / 尾 ${bounds.trailRemovedMs} ms)`;
-  const res = store.executeCommand({
-    type: 'project.replace',
-    label,
-    payload: { project: workingProject },
-  });
-  if (!res.ok) return;
-
-  cutAuxByRevision.set(beforeRev, beforeAux);
-
-  if (loadedAnnotationRecording.value && workingRawAudio) {
+  let nextRecording = loadedAnnotationRecording.value;
+  if (nextRecording && workingRawAudio) {
     if (synthesisGainMode.value === 'peak') {
       applyPeakAudioGain(workingRawAudio);
       if (workingCleanAudio) applyPeakAudioGain(workingCleanAudio);
     }
-    const rec = loadedAnnotationRecording.value;
-    const nextFile = audioBufferFile(workingRawAudio, rec.raw.name.replace(/\.[^.]+$/, ''));
-    loadedAnnotationRecording.value = {
-      ...rec,
+    const nextFile = audioBufferFile(workingRawAudio, nextRecording.raw.name.replace(/\.[^.]+$/, ''));
+    nextRecording = {
+      ...nextRecording,
       raw: nextFile,
       rawAudio: workingRawAudio,
       cleanAudio: workingCleanAudio,
+      uploadedTextGrid: workingGrid,
     };
-    workingActiveAudio = rec.denoised && workingCleanAudio ? workingCleanAudio : workingRawAudio;
+    workingActiveAudio = nextRecording.denoised && workingCleanAudio ? workingCleanAudio : workingRawAudio;
   } else if (workingActiveAudio && synthesisGainMode.value === 'peak') {
     applyPeakAudioGain(workingActiveAudio);
   }
 
-  if (annotationSource.value && clip && annotationSource.value.projectId === store.project.value.id && annotationSource.value.baseline.id === clip.id) {
+  let nextSource = annotationSource.value;
+  if (nextSource && clip && nextSource.projectId === store.project.value.id && nextSource.baseline.id === clip.id) {
     const finalClip = workingProject.clips[clip.id];
-    annotationSource.value = {
-      ...annotationSource.value,
+    nextSource = {
+      ...nextSource,
       baseline: JSON.parse(JSON.stringify(finalClip)),
       controls: JSON.stringify(currentAnnotationControls(workingProject)),
-      rows: workingRows.length ? workingRows : annotationSource.value.rows,
+      rows: workingRows.length ? workingRows : nextSource.rows,
     };
   }
 
-  store.annotationTractFrames.value = workingFrames;
-  if (loadedAnnotationRecording.value) annotationPlaybackSource.value = 'recording';
-  store.annotationAudioBuffer.value = workingActiveAudio;
-  store.lastAudioBuffer.value = workingActiveAudio;
-  store.annotationAudioOffsetSmp.value = 0;
-  store.playheadSmp.value = 0;
+  const afterAux: CutAuxSnapshot = {
+    recording: nextRecording,
+    source: nextSource,
+    tractFrames: workingFrames,
+    playbackSource: nextRecording ? 'recording' : annotationPlaybackSource.value,
+    audioBuffer: workingActiveAudio,
+    editedAudio: null,
+  };
 
-  cutAuxByRevision.set(store.project.value.revision, captureCutAuxSnapshot());
+  const label = `裁剪首尾静音 (首 ${bounds.leadRemovedMs} ms / 尾 ${bounds.trailRemovedMs} ms)`;
+  const res = store.executeCommand(
+    {
+      type: 'project.replace',
+      label,
+      payload: { project: workingProject },
+    },
+    {
+      localEdit: {
+        undo: () => applyCutAuxSnapshot(beforeAux),
+        redo: () => applyCutAuxSnapshot(afterAux),
+      },
+    },
+  );
+  if (!res.ok) return;
+
+  applyCutAuxSnapshot(afterAux);
+  store.playheadSmp.value = 0;
   store.pushToast(
     `已裁剪首部 ${bounds.leadRemovedMs} ms、尾部 ${bounds.trailRemovedMs} ms 静音（Ctrl+Z 可撤销）`,
     'success',
@@ -3516,6 +4270,46 @@ function openAnnotationInArranger(points?: { t_smp: number; f0_hz: number }[]): 
   store.setWorkspace('studio');
 }
 
+function buildClipTextGridForHandoff(clip: Clip, durationSmp: number): TextGridDocument | undefined {
+  if (!clip.syllable_order.length) return undefined;
+  const clipStart = clip.start_smp ?? 0;
+  const xmax = Math.max(0.02, Math.max(durationSmp, clip.end_smp - clipStart) / SAMPLE_RATE_HZ);
+  const toSec = (smp: number) => Math.max(0, Math.min(xmax, (smp - clipStart) / SAMPLE_RATE_HZ));
+  const buildIntervals = (spans: Array<{ xmin: number; xmax: number; text: string }>) => {
+    const out: Array<{ xmin: number; xmax: number; text: string }> = [];
+    let cursor = 0;
+    for (const sp of spans) {
+      const a = Math.max(cursor, sp.xmin);
+      const b = Math.max(a, sp.xmax);
+      if (a > cursor + 1e-5) out.push({ xmin: cursor, xmax: a, text: '' });
+      if (b > a + 1e-5) {
+        out.push({ xmin: a, xmax: b, text: sp.text });
+        cursor = b;
+      }
+    }
+    if (xmax > cursor + 1e-5) out.push({ xmin: cursor, xmax, text: '' });
+    return out;
+  };
+  const sylSpans: Array<{ xmin: number; xmax: number; text: string }> = [];
+  const phoneSpans: Array<{ xmin: number; xmax: number; text: string }> = [];
+  for (const sid of clip.syllable_order) {
+    const syl = clip.syllables[sid];
+    if (!syl) continue;
+    sylSpans.push({ xmin: toSec(syl.start_smp), xmax: toSec(syl.end_smp), text: syl.text || syl.ipa.join('') });
+    for (const seg of syl.segments) {
+      phoneSpans.push({ xmin: toSec(seg.start_smp), xmax: toSec(seg.end_smp), text: seg.ipa === 'sil' ? '' : seg.ipa });
+    }
+  }
+  return {
+    xmin: 0,
+    xmax,
+    tiers: [
+      { kind: 'IntervalTier', name: 'syllables', xmin: 0, xmax, intervals: buildIntervals(sylSpans) },
+      { kind: 'IntervalTier', name: 'phones', xmin: 0, xmax, intervals: buildIntervals(phoneSpans) },
+    ],
+  };
+}
+
 async function sendAnnotationAudio(target: AudioDestination): Promise<void> {
   const clip = activeClip.value;
   if (!clip || sendingAudio.value) return;
@@ -3527,9 +4321,15 @@ async function sendAnnotationAudio(target: AudioDestination): Promise<void> {
     const recording = loadedAnnotationRecording.value;
     const original = recording?.denoised ? recording.cleanAudio : recording?.rawAudio;
     const changed = spans === 'whole' || spans.length > 0;
+    const chosenEdited = annotationPlaybackSource.value === 'edited' && Boolean(store.editedAnnotationAudio.value);
+    const chosenRecording = annotationPlaybackSource.value === 'recording' && Boolean(original);
     const chosenSynthesis = annotationPlaybackSource.value === 'synthesis';
-    const preserveRecording = original && source && !changed && !chosenSynthesis;
-    let buffer = preserveRecording ? (store.editedAnnotationAudio.value ?? original) : null;
+    const preserveRecording = (chosenEdited || chosenRecording) && Boolean(source) && !changed;
+    let buffer: AudioBuffer | null = chosenEdited
+      ? store.editedAnnotationAudio.value
+      : chosenRecording
+        ? (original ?? null)
+        : null;
     let synthesis: SynthesisInfo | undefined;
     if (!buffer && original && !source && !chosenSynthesis) buffer = store.editedAnnotationAudio.value ?? original;
     if (!buffer) {
@@ -3549,19 +4349,29 @@ async function sendAnnotationAudio(target: AudioDestination): Promise<void> {
     const phones = allSegmentsFlat.value.map(({ seg }) => seg);
     const renderedFrames = phones.filter(seg => seg.params?.length === 19)
       .map(seg => ({ u: (seg.start_smp - clip.start_smp) / duration, params: [...seg.params!] }));
-    const baselinePhones = new Map(source?.baseline.syllable_order.flatMap(id =>
-      source.baseline.syllables[id].segments.map(phone => [phone.id, phone] as const)));
-    const changedPhones = phones.filter(phone => phone.params && baselinePhones.has(phone.id)
-      && JSON.stringify(baselinePhones.get(phone.id)?.params) !== JSON.stringify(phone.params));
+    const editedIds = new Set(collectEditedReferencePhoneIds(clip, source?.baseline));
+    const changedPhones = phones.filter(phone => phone.params && editedIds.has(phone.id));
     const frames = synthesis?.tractFrames ?? (sourceFrames.length ? sourceFrames.map(frame => {
       const sample = clip.start_smp + Math.floor(frame.u * duration);
       const phone = changedPhones.find(seg => sample >= seg.start_smp && sample < seg.end_smp);
       return phone?.params ? { ...frame, params: [...phone.params] } : frame;
     }) : renderedFrames);
     const label = clip.source?.lyrics?.slice(0, 25) || recording?.raw.name.replace(/\.wav$/i,'') || '标注音频';
+    const textGridForTarget = target === 'mixer'
+      ? (recording?.uploadedTextGrid ?? buildClipTextGridForHandoff(clip, duration))
+      : undefined;
+    const alignmentTextForTarget = target === 'mixer'
+      ? (g2pText.value.trim() || clip.source?.lyrics?.trim() || undefined)
+      : undefined;
     sendWorkspaceAudio(target, {
-      file: audioBufferFile(buffer, label), label, clip: { ...clip, annotation_controls: controls }, frames,
+      file: audioBufferFile(buffer, label),
+      label,
+      clip: { ...clip, annotation_controls: controls },
+      frames,
+      textGrid: textGridForTarget,
+      alignmentText: alignmentTextForTarget,
       m27RowsPa: synthesis?.m27RowsPa ?? (preserveRecording ? source?.rows : undefined),
+      sourceKind: chosenSynthesis ? 'ipa-synth' : 'audio-reconstruct',
       stageOrigin: target === 'studio' ? source?.origin : undefined,
       stageAudioTrack: target === 'studio' ? source?.target : undefined,
     });
@@ -3617,23 +4427,18 @@ async function receiveAnnotationAudio(): Promise<void> {
         payload: { clip: next, resetAnnotation: !incoming.stageOrigin, switchAnnotation: !!incoming.stageOrigin },
       },
     ];
-    if (
-      !incoming.stageOrigin &&
-      incoming.m27RowsPa &&
-      incoming.m27RowsPa.length >= 2 &&
-      incoming.m27RowsPa.every((r) => Number.isFinite(r[17]) && r[17] >= F0_LIMIT_HZ.min && r[17] <= F0_LIMIT_HZ.max)
-    ) {
+    if (!incoming.stageOrigin && incoming.m27RowsPa && incoming.m27RowsPa.length >= 2) {
       const maxSmp = Math.max(msToSamples(60), next.end_smp);
-      cmds.push({
-        type: 'f0.draw',
-        payload: {
-          id: `m27-${next.id}`,
-          points: incoming.m27RowsPa.map((r, i) => ({
-            t_smp: Math.min(maxSmp, Math.round((i * SAMPLE_RATE_HZ) / 50)),
-            f0_hz: Number(r[17].toFixed(1)),
-          })),
-        },
-      });
+      const validF0Pts = extractValidM27F0Points(incoming.m27RowsPa, maxSmp);
+      if (validF0Pts.length >= 2) {
+        cmds.push({
+          type: 'f0.draw',
+          payload: {
+            id: `m27-${next.id}`,
+            points: validF0Pts,
+          },
+        });
+      }
     }
     const result = store.executeCommand(
       cmds.length === 1
@@ -3694,9 +4499,24 @@ let mainTourUnmounted = false;
 
 async function handleMainTourAction(e: Event): Promise<void> {
   const detail = (e as CustomEvent<{ actionId?: string; done?: (ok?: boolean) => void }>).detail;
+  if (detail?.actionId === 'main-toggle-corpus-drawer') {
+    corpusDrawerOpen.value = !corpusDrawerOpen.value;
+    if (!corpusDrawerOpen.value) corpusDragging.value = false;
+    detail?.done?.(true);
+    return;
+  }
+  if (detail?.actionId === 'main-toggle-tract-params') {
+    corpusDrawerOpen.value = false;
+    tractParamsOpen.value = !tractParamsOpen.value;
+    detail?.done?.(true);
+    return;
+  }
   if (detail?.actionId !== 'main-compile-voqs-demo') return;
   try {
     if (store.isPlaying.value) store.stopPlayback();
+    if (selectedDictionary.value) {
+      g2pStandard.value = dictionaryPrefs.value.zhStandard;
+    }
     g2pText.value = MAIN_TOUR_VOQS_DEMO;
     annotationPlaybackSource.value = 'synthesis';
     await nextTick();
@@ -3721,6 +4541,7 @@ async function handleMainTourAction(e: Event): Promise<void> {
 onMounted(() => {
   mainTourUnmounted = false;
   document.addEventListener('pointerdown', onGlobalPopoverDown, true);
+  window.addEventListener('keydown', onSynthesisPageKeyDown);
   window.addEventListener('vocalcut:annotation-play', toggleTransportPlay);
   window.addEventListener('vocalcut:tour-action', handleMainTourAction);
   void loadCorpusDirectory('restore');
@@ -3733,6 +4554,8 @@ onMounted(() => {
     .catch(() => {
       runG2pReview();
     });
+  void preloadPtbIpaPresets(speakerModel.value);
+  void loadDefaultIpaPoses();
   void loadSpeakerVowelReferences(speakerModel.value);
   if (!store.currentTractState.value) {
     void store.requestVtlPose();
@@ -3761,12 +4584,15 @@ watchEffect(() => {
 onBeforeUnmount(() => {
   mainTourUnmounted = true;
   document.removeEventListener('pointerdown', onGlobalPopoverDown, true);
+  window.removeEventListener('keydown', onSynthesisPageKeyDown);
   corpusDirectoryTask?.abort();
   quickAuditionRequest?.abort();
   vowelRequest?.abort();
+  trajectoryPrefetchAbort?.abort();
   vowelDragCleanup?.();
   crossPointerCleanup?.();
   window.cancelAnimationFrame(sectionFrameId);
+  window.cancelAnimationFrame(sliderPoseFrameId);
   window.removeEventListener('vocalcut:annotation-play', toggleTransportPlay);
   window.removeEventListener('vocalcut:tour-action', handleMainTourAction);
   window.cancelAnimationFrame(quadFrameId);
@@ -3775,13 +4601,77 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="rm-shell">
-    <!-- Compact Global Workstation Subbar (G2P & Sandhi Input moved directly above Timeline per spec) -->
+  <div class="rm-shell" @click="blurToolbarButtonOnMouseClick">
+    <!-- Always-mounted hidden file pickers for top-bar Open File & Corpus Drawer -->
+    <input
+      ref="openFileInputRef"
+      type="file"
+      multiple
+      accept=".wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.TextGrid,.textgrid,.vcproj,.json"
+      class="hidden"
+      @change="(e) => { const el = e.target as HTMLInputElement; if (el.files) void ingestFiles(el.files, { autoLoadDirect: true }); el.value = ''; }"
+    />
+    <input
+      ref="fileInputRef"
+      type="file"
+      multiple
+      accept=".wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.TextGrid,.textgrid,.vcproj,.json"
+      class="hidden"
+      @change="(e) => { const el = e.target as HTMLInputElement; if (el.files) void ingestFiles(el.files); el.value = ''; }"
+    />
+    <input
+      ref="dirInputRef"
+      type="file"
+      webkitdirectory
+      multiple
+      class="hidden"
+      @change="(e) => { const el = e.target as HTMLInputElement; if (el.files) void ingestFiles(el.files); el.value = ''; }"
+    />
+
+    <!-- Compact Global Workstation Subbar -->
     <div class="subbar rm-global-bar" data-tour="main-topbar">
       <div class="subbar-group rm-proj-summary">
+        <div class="rm-file-tools" data-tour="main-file-tools">
+          <button
+            type="button"
+            class="btn sm"
+            title="选择本地音频、TextGrid 或 .vcproj 工程并直接载入时间轴"
+            @click="openFileInputRef?.click()"
+          >
+            <IconSvg name="upload" :size="12" />
+            <span>打开文件</span>
+          </button>
+
+          <button
+            type="button"
+            class="btn sm"
+            data-tour="main-files"
+            :class="{ active: corpusDrawerOpen }"
+            :aria-expanded="corpusDrawerOpen"
+            aria-controls="rm-corpus-drawer"
+            title="展开或收起左侧语料目录抽屉（支持多级文件夹、检索、双击或拖拽上轨）"
+            @click="corpusDrawerOpen = !corpusDrawerOpen"
+          >
+            <IconSvg name="folder-open" :size="12" />
+            <span>语料目录</span>
+            <span v-if="localFiles.length" class="mono rm-corpus-badge">{{ localFiles.length }}</span>
+            <i
+              v-if="corpusDirectoryNeedsPermission"
+              class="rm-corpus-perm-dot"
+              title="上次语料目录待授权恢复"
+              aria-hidden="true"
+            />
+          </button>
+        </div>
+
         <span class="tree-tag mono">{{ speakerModel }}</span>
         <span class="muted">{{ activeClip?.syllable_order.length ?? 0 }} 个音节</span>
-        <span v-if="primarySelectedEntry" class="metric-chip">
+        <span v-if="playheadScrubActive && activeClip" class="metric-chip" title="正在按时间轴播放头实时显示该帧舌位与声学特征（点击音素块或直接拖动声道控制点可切回编辑模式）">
+          播放头 <strong class="mono">{{ (store.playheadSmp.value / SAMPLE_RATE_HZ).toFixed(2) }}s</strong>
+          <strong v-if="playheadSegmentEntry && playheadSegmentEntry.seg.role !== 'rest' && playheadSegmentEntry.seg.ipa !== 'sil'" class="ipa notranslate" translate="no">[{{ playheadSegmentEntry.seg.ipa }}]</strong>
+          <span v-else class="muted">静音</span>
+        </span>
+        <span v-else-if="primarySelectedEntry" class="metric-chip">
           当前音素 <strong class="ipa notranslate" translate="no">[{{ primarySelectedEntry.seg.ipa }}]</strong>
         </span>
       </div>
@@ -3810,7 +4700,7 @@ onBeforeUnmount(() => {
 
         <button
           type="button"
-          class="btn sm primary"
+          class="btn sm"
           title="查看导出格式与说明"
           @click="store.openExportModal('research')"
         >
@@ -3818,144 +4708,134 @@ onBeforeUnmount(() => {
           <span>导出</span>
         </button>
 
-        <ModuleGuideButton module-id="main" size="sm" />
+        <ModuleGuideButton module-id="main" size="sm" data-tour="main-guide-btn" />
       </div>
     </div>
 
-    <!-- Main 3-Column Resizable Workspace -->
-    <div class="rm-main-row">
-      <!-- LEFT SIDEBAR: Multi-Level Corpus Directory Tree + Permanent Compact IPA Quick-Replace Grid -->
-      <aside ref="corpusColumn" class="rm-left-col" data-tour="main-left" :style="{ width: `${leftW}px`, gridTemplateRows:`minmax(0,${corpusRatio}fr) 6px minmax(0,${1-corpusRatio}fr)` }">
-        <!-- Local Corpus Tree & Dropzone (T-01, T-02) -->
-        <div
-          class="panel rm-files-panel"
-          data-tour="main-files"
-          :class="{ 'drop-active': dropActive }"
-          @dragover="onCorpusDragOver"
-          @dragleave="onCorpusDragLeave"
-          @drop.prevent="onFileDrop"
-        >
-          <div class="p-head">
-            <span>语料库 <small v-if="localFiles.length" class="muted mono">({{ localFiles.length }})</small></span>
-            <div class="rm-head-acts">
-              <button type="button" class="btn xs" title="添加本地音频 / TextGrid / .vcproj 至语料库" @click="fileInputRef?.click()">
-                <IconSvg name="upload" :size="11" />
-                <span>文件</span>
-              </button>
-              <button type="button" class="btn xs" title="添加多级语料文件夹至目录树"
-                :disabled="corpusDirectoryLoading" @click="loadCorpusDirectory('pick')">
-                <IconSvg name="folder" :size="11" />
-                <span>目录</span>
-              </button>
-              <button v-if="localFiles.length || savedCorpusDirectory" type="button" class="btn xs"
-                aria-label="清空语料库" title="清空语料列表并忘记上次目录" @click="clearCorpusList">
-                <IconSvg name="trash" :size="11" />
-              </button>
-            </div>
-          </div>
-          <input
-            ref="fileInputRef"
-            type="file"
-            multiple
-            accept=".wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.TextGrid,.textgrid,.vcproj,.json"
-            class="hidden"
-            @change="(e) => { const el = e.target as HTMLInputElement; if (el.files) void ingestFiles(el.files); el.value = ''; }"
-          />
-          <input
-            ref="dirInputRef"
-            type="file"
-            webkitdirectory
-            multiple
-            class="hidden"
-            @change="(e) => { const el = e.target as HTMLInputElement; if (el.files) void ingestFiles(el.files); el.value = ''; }"
-          />
-          <div v-if="localFiles.length > 0" class="rm-corpus-search">
-            <IconSvg name="search" :size="11" class="muted" />
-            <input
-              v-model="corpusSearch"
-              type="text"
-              class="inp rm-corpus-search-inp"
-              placeholder="搜索文件名或子目录…"
-              aria-label="搜索语料库文件"
-            />
-            <button v-if="corpusSearch" type="button" class="btn xs" @click="corpusSearch = ''">
-              <IconSvg name="close" :size="10" />
+    <!-- Main Workspace: 3-Column Bottom-Aligned Upper Deck + 100% Full-Width Lower Timeline -->
+    <div class="rm-workspace-body">
+      <!-- On-Demand Slide-Over Corpus Directory Drawer -->
+      <div
+        v-if="corpusDrawerOpen"
+        class="rm-corpus-drawer-mask"
+        :class="{ dragging: corpusDragging }"
+        aria-hidden="true"
+        @click="corpusDrawerOpen = false; corpusDragging = false"
+      />
+      <aside
+        v-if="corpusDrawerOpen"
+        id="rm-corpus-drawer"
+        class="panel rm-corpus-drawer"
+        :class="{ 'drop-active': dropActive }"
+        role="region"
+        aria-label="语料目录"
+        @dragover="onCorpusDragOver"
+        @dragleave="onCorpusDragLeave"
+        @drop.prevent="onFileDrop"
+      >
+        <div class="p-head">
+          <span>语料目录 <small v-if="localFiles.length" class="muted mono">({{ localFiles.length }})</small></span>
+          <div class="rm-head-acts">
+            <button type="button" class="btn xs" title="添加本地音频 / TextGrid / .vcproj 至语料目录" @click="fileInputRef?.click()">
+              <IconSvg name="upload" :size="11" />
+              <span>文件</span>
             </button>
-          </div>
-          <div class="p-body rm-file-list">
-            <div v-if="corpusDirectoryLoading" class="rm-drop-hint muted" role="status">正在读取语料目录…</div>
-            <div v-else-if="corpusDirectoryNeedsPermission" class="rm-drop-hint">
-              <p class="muted">允许访问「{{ savedCorpusDirectory?.name }}」后即可恢复上次的语料目录。</p>
-              <button type="button" class="btn xs" @click="loadCorpusDirectory('authorize')">恢复上次目录</button>
-            </div>
-            <div v-else-if="!localFiles.length" class="rm-corpus-empty">
-              <IconSvg name="folder-open" :size="28" />
-              <strong>{{ dropActive ? '松开即可导入' : '拖放文件到这里' }}</strong>
-              <p class="muted">音频、TextGrid 或 .vcproj 工程</p>
-              <button type="button" class="btn sm" @click="fileInputRef?.click()">
-                <IconSvg name="upload" :size="12" />选择文件
-              </button>
-            </div>
-            <div v-else class="rm-drop-hint muted">
-              拖到时间轴或双击文件即可载入
-            </div>
-            <template v-for="row in visibleCorpusRows" :key="row.key">
-              <button
-                v-if="row.kind === 'folder'"
-                type="button"
-                class="rm-tree-folder"
-                :style="{ paddingLeft: `${6 + row.depth * 13}px` }"
-                @click="toggleCorpusFolder(row.path)"
-              >
-                <IconSvg :name="row.expanded ? 'chevron-down' : 'chevron-right'" :size="11" />
-                <IconSvg name="folder" :size="13" />
-                <span class="rm-file-name">{{ row.name }}</span>
-                <span class="mono tree-tag">{{ row.childCount }}</span>
-              </button>
-              <div
-                v-else-if="row.item"
-                class="rm-file-row"
-                :class="{ active: selectedCorpusId === row.item.id }"
-                :style="{ paddingLeft: `${8 + row.depth * 13}px` }"
-                draggable="true"
-                role="button"
-                tabindex="0"
-                :title="`${row.item.relativePath} (${row.item.sizeKb} KB) · 拖拽至右侧时间轴解码上轨（双击也可直接上轨）`"
-                @dragstart="onCorpusItemDragStart(row.item, $event)"
-                @click="onCorpusRowClick(row.item)"
-                @dblclick="onCorpusRowDblClick(row.item)"
-                @keydown.enter="onCorpusRowDblClick(row.item)"
-              >
-                <IconSvg :name="row.item.ext === 'textgrid' ? 'layers' : row.item.ext === 'vcproj' ? 'file' : 'waveform'" :size="13" />
-                <span class="rm-file-name">{{ row.item.name }}</span>
-                <span class="mono tree-tag">{{ row.item.ext || 'file' }}</span>
-              </div>
-            </template>
-          </div>
-          <div v-if="loadedAnnotationRecording" class="rm-recording-actions">
-            <button type="button" class="btn xs" :class="{ active: annotationPlaybackSource === 'recording' && !loadedAnnotationRecording.denoised }"
-              :aria-pressed="annotationPlaybackSource === 'recording' && !loadedAnnotationRecording.denoised"
-              @click="showRecordingVersion(false)">原音</button>
-            <button type="button" class="btn xs" :class="{ active: annotationPlaybackSource === 'recording' && loadedAnnotationRecording.denoised }"
-              :disabled="isDenoising" @click="denoiseAnnotationRecording">
-              {{ isDenoising ? '降噪中…' : 'DPDFNet 降噪' }}
+            <button type="button" class="btn xs" title="添加多级语料文件夹至目录树"
+              :disabled="corpusDirectoryLoading" @click="loadCorpusDirectory('pick')">
+              <IconSvg name="folder" :size="11" />
+              <span>目录</span>
             </button>
-            <button v-if="store.editedAnnotationAudio.value" type="button" class="btn xs"
-              :class="{ active: isEditedRecordingActive }" @click="showEditedRecording">编辑音频</button>
-            <button v-if="hasSynthesizedRecording" type="button" class="btn xs" :class="{ active: annotationPlaybackSource === 'synthesis' }"
-              :aria-pressed="annotationPlaybackSource === 'synthesis'" @click="showSynthesizedRecording">合成音</button>
+            <button v-if="localFiles.length || savedCorpusDirectory" type="button" class="btn xs icon-only"
+              aria-label="清空语料目录" title="清空语料列表并忘记上次目录" @click="clearCorpusList">
+              <IconSvg name="trash" :size="11" />
+            </button>
+            <button type="button" class="btn xs icon-only" aria-label="收起语料目录" title="收起语料目录 (Esc)"
+              @click="corpusDrawerOpen = false; corpusDragging = false">
+              <IconSvg name="close" :size="11" />
+            </button>
           </div>
         </div>
+        <div v-if="localFiles.length > 0" class="rm-corpus-search">
+          <IconSvg name="search" :size="11" class="muted" />
+          <input
+            v-model="corpusSearch"
+            type="text"
+            class="inp rm-corpus-search-inp"
+            placeholder="搜索文件名或子目录…"
+            aria-label="搜索语料目录文件"
+          />
+          <button v-if="corpusSearch" type="button" class="btn xs icon-only" aria-label="清除搜索" @click="corpusSearch = ''">
+            <IconSvg name="close" :size="10" />
+          </button>
+        </div>
+        <div class="p-body rm-file-list">
+          <div v-if="corpusDirectoryLoading" class="rm-drop-hint muted" role="status">正在读取语料目录…</div>
+          <div v-else-if="corpusDirectoryNeedsPermission" class="rm-drop-hint">
+            <p class="muted">允许访问「{{ savedCorpusDirectory?.name }}」后即可恢复上次的语料目录。</p>
+            <button type="button" class="btn xs" @click="loadCorpusDirectory('authorize')">恢复上次目录</button>
+          </div>
+          <div v-else-if="!localFiles.length" class="rm-corpus-empty">
+            <IconSvg name="folder-open" :size="28" />
+            <strong>{{ dropActive ? '松开即可导入' : '拖放文件或文件夹到这里' }}</strong>
+            <p class="muted">音频、TextGrid 或 .vcproj 工程</p>
+            <div class="rm-corpus-empty-acts">
+              <button type="button" class="btn sm" @click="fileInputRef?.click()">
+                <IconSvg name="upload" :size="12" />添加文件
+              </button>
+              <button type="button" class="btn sm" :disabled="corpusDirectoryLoading" @click="loadCorpusDirectory('pick')">
+                <IconSvg name="folder" :size="12" />打开目录
+              </button>
+            </div>
+          </div>
+          <div v-else class="rm-drop-hint muted">
+            拖到下方时间轴或双击文件即可载入
+          </div>
+          <template v-for="row in visibleCorpusRows" :key="row.key">
+            <button
+              v-if="row.kind === 'folder'"
+              type="button"
+              class="rm-tree-folder"
+              :style="{ paddingLeft: `${6 + row.depth * 13}px` }"
+              @click="toggleCorpusFolder(row.path)"
+            >
+              <IconSvg :name="row.expanded ? 'chevron-down' : 'chevron-right'" :size="11" />
+              <IconSvg name="folder" :size="13" />
+              <span class="rm-file-name">{{ row.name }}</span>
+              <span class="mono tree-tag">{{ row.childCount }}</span>
+            </button>
+            <div
+              v-else-if="row.item"
+              class="rm-file-row"
+              :class="{ active: selectedCorpusId === row.item.id }"
+              :style="{ paddingLeft: `${8 + row.depth * 13}px` }"
+              draggable="true"
+              role="button"
+              tabindex="0"
+              :title="`${row.item.relativePath} (${row.item.sizeKb} KB) · 拖拽至下方时间轴解码上轨（双击也可直接上轨）`"
+              @dragstart="corpusDragging = true; onCorpusItemDragStart(row.item, $event)"
+              @dragend="corpusDragging = false"
+              @click="onCorpusRowClick(row.item)"
+              @dblclick="onCorpusRowDblClick(row.item)"
+              @keydown.enter="onCorpusRowDblClick(row.item)"
+            >
+              <IconSvg :name="row.item.ext === 'textgrid' ? 'layers' : row.item.ext === 'vcproj' ? 'file' : 'waveform'" :size="13" />
+              <span class="rm-file-name">{{ row.item.name }}</span>
+              <span class="mono tree-tag">{{ row.item.ext || 'file' }}</span>
+            </div>
+          </template>
+        </div>
+      </aside>
 
-        <!-- Permanent Compact IPA Quick-Replace Grid -->
-        <SplitPane direction="horizontal" :model-value="Math.round(corpusRoom*corpusRatio)" :min="corpusLimit" :max="corpusRoom-corpusLimit" :default-value="corpusRoom/2" title="拖动调整语料库高度，双击恢复均分" @update:model-value="setCorpusHeight" />
-        <div class="panel rm-ipa-quick" data-tour="main-ipa-quick">
+      <!-- Upper 3-Column Row (Strictly Bottom-Aligned: IPA Quick-Replace | Vocal Tract | 4-Panel Acoustics) -->
+      <div class="rm-upper-row">
+        <!-- Column 1: Full-Height IPA Quick-Replace Panel -->
+        <aside class="panel rm-ipa-quick" data-tour="main-ipa-quick" :style="{ width: `${leftW}px` }">
           <div class="p-head">
             <span>音素替换</span>
             <button
               type="button"
-              class="btn xs primary"
-              title="展开 655 入口国际音标表 Plus"
+              class="btn xs"
+              title="展开 655 条目国际音标表 Plus"
               @click="store.researchTab.value = 'ipa'"
             >
               <span>完整音标表</span>
@@ -4000,25 +4880,25 @@ onBeforeUnmount(() => {
           <div class="rm-ipa-grid" @mouseleave="hoveredQuickIpa = null">
             <span v-if="quickTab === 'favorites' && !filteredQuickIpa.length" class="rm-ipa-empty muted">可在完整音标表收藏此处支持的音标</span>
             <template v-for="group in quickGroups" :key="group.label">
-            <div v-if="quickTab === 'consonant'" class="rm-manner">{{ group.label }}</div>
-            <button
-              v-for="it in group.items"
-              :key="it.entryId ?? it.symbol"
-              type="button"
-              class="rm-ipa-cell ipa notranslate"
-              translate="no"
-              :class="{
-                active: quickSelectedKey === quickIpaKey(it.symbol),
-                preview: hoveredQuickIpa?.symbol === it.symbol && quickSelectedKey !== quickIpaKey(it.symbol),
-              }"
-              :title="quickIpaTitle(it)"
-              @mouseenter="hoveredQuickIpa = it"
-              @focus="hoveredQuickIpa = it"
-              @blur="hoveredQuickIpa = null"
-              @click="replaceSelectedWithIpa(it)"
-            >
-              {{ it.display ?? it.symbol }}
-            </button>
+              <div v-if="quickTab === 'consonant'" class="rm-manner">{{ group.label }}</div>
+              <button
+                v-for="it in group.items"
+                :key="it.entryId ?? it.symbol"
+                type="button"
+                class="rm-ipa-cell ipa notranslate"
+                translate="no"
+                :class="{
+                  active: quickSelectedKey === quickIpaKey(it.symbol),
+                  preview: hoveredQuickIpa?.symbol === it.symbol && quickSelectedKey !== quickIpaKey(it.symbol),
+                }"
+                :title="quickIpaTitle(it)"
+                @mouseenter="hoveredQuickIpa = it"
+                @focus="hoveredQuickIpa = it"
+                @blur="hoveredQuickIpa = null"
+                @click="replaceSelectedWithIpa(it, $event)"
+              >
+                {{ it.display ?? it.symbol }}
+              </button>
             </template>
           </div>
           <div class="rm-ipa-foot">
@@ -4031,12 +4911,12 @@ onBeforeUnmount(() => {
             >
               {{
                 displayQuickIpa.category === 'diacritic'
-                  ? (primarySelectedEntry ? '复制/叠加' : '复制符号')
+                  ? (primarySelectedEntry ? '叠加符号' : '复制符号')
                   : hoveredQuickIpa
-                  ? '复制/替换'
-                  : quickSelectedKey === quickIpaKey(displayQuickIpa.symbol)
-                    ? '当前音素'
-                    : '快速预览'
+                    ? (primarySelectedEntry ? '点击替换' : '复制符号')
+                    : quickSelectedKey === quickIpaKey(displayQuickIpa.symbol)
+                      ? '当前音素'
+                      : '快速预览'
               }}
             </span>
             <span
@@ -4062,25 +4942,21 @@ onBeforeUnmount(() => {
             </button>
             <span v-if="displayedQuickSource" class="rm-ipa-source muted" role="status">{{ displayedQuickSource }}</span>
           </div>
-        </div>
-      </aside>
+        </aside>
 
-      <SplitPane
-        v-model="leftW"
-        direction="vertical"
-        :min="200"
-        :max="360"
-        :default-value="248"
-        storage-key="research-left"
-      />
+        <SplitPane
+          v-model="leftW"
+          direction="vertical"
+          :min="200"
+          :max="360"
+          :default-value="248"
+          storage-key="research-left"
+        />
 
-      <div class="rm-editor-col">
-      <div class="rm-editor-upper">
-      <div class="rm-center-col">
-        <!-- Upper Deck: STRICTLY NO duplicate long waveform or long F0 -->
-        <div class="rm-upper-deck">
-          <!-- Left: 2D/3D Interactive Vocal Tract Viewport -->
-          <div class="panel rm-tract-panel" data-tour="main-tract">
+        <!-- Columns 2 & 3 Pair: Vocal Tract Viewport (+ Plan A 19-D Side Drawer) | 4-Panel Acoustics -->
+        <div ref="upperRightPairRef" class="rm-upper-right-pair">
+          <!-- Column 2: 2D/3D Interactive Vocal Tract Viewport + On-Demand 19-D Parameters Drawer -->
+          <div class="panel rm-tract-panel" data-tour="main-tract" :style="{ width: `${tractPaneW}px` }">
             <div class="p-head">
               <span>声道剖面</span>
               <div class="rm-head-acts">
@@ -4088,7 +4964,11 @@ onBeforeUnmount(() => {
                   :class="{ active: followImportedTract }" :aria-pressed="followImportedTract"
                   title="按播放头查看当前音源的声道轨迹"
                   @click="followImportedTract = !followImportedTract">{{ followingSynthesis ? '合成轨迹' : '录音轨迹' }}</button>
+                <span v-if="SPEAKER_OPTIONS.length <= 1" class="tree-tag mono" title="VTL 说话人解剖模型">
+                  {{ speakerModel }}
+                </span>
                 <CustomSelect
+                  v-else
                   v-model="speakerModel"
                   :options="SPEAKER_OPTIONS"
                   size="xs"
@@ -4104,29 +4984,137 @@ onBeforeUnmount(() => {
                 <button type="button" class="btn xs" :disabled="!store.currentTractState.value" :class="{ active: showHead && store.currentTractState.value }" @click="showHead = !showHead">
                   头部
                 </button>
+                <button
+                  type="button"
+                  class="btn xs"
+                  data-tour="main-inspector"
+                  :class="{ active: tractParamsOpen }"
+                  :aria-expanded="tractParamsOpen"
+                  title="展开或收起 19 维声道解剖精调滑杆（支持实时预览）"
+                  @click="tractParamsOpen = !tractParamsOpen"
+                >
+                  <IconSvg name="sliders" :size="11" />
+                  <span>精调参数</span>
+                </button>
+                <button
+                  type="button"
+                  class="btn xs"
+                  :disabled="followImportedTract || store.isPlaying.value"
+                  :title="primarySelectedEntry ? `恢复 [${primarySelectedEntry.seg.ipa}] 的标准 IPA 声道构型` : '恢复默认 [ə] 标准 IPA 声道构型'"
+                  @click="playheadScrubActive = false; resetSelectedPhonemePose()"
+                >
+                  复位
+                </button>
               </div>
             </div>
-            <div class="rm-tract-wrap">
-              <VocalTractViewport
-                :key="importedTractParams ? 'recorded-trajectory' : 'annotation-pose'"
-                :section-index="activeSectionIdx"
-                :pose-preview="crossGripDragging"
-                :pause-updates="keyframeModalOpen"
-                :params="importedTractParams ?? store.currentTractParams.value"
-                :extras="store.currentTractExtras.value"
-                :interactive="!importedTractParams"
-                :show-labels="showLabels"
-                :show-grid="showTractGrid"
-                :show-head="showHead"
-                @update:params="onViewportTractUpdate"
-                @update:extras="onViewportExtrasUpdate"
-                @drag-end="onViewportDragEnd"
-                @pose-resolved="acceptViewportPose"
-              />
+
+            <div class="rm-tract-stage">
+              <div class="rm-tract-wrap">
+                <VocalTractViewport
+                  :section-index="activeSectionIdx"
+                  :pose-preview="crossGripDragging"
+                  :playing="store.isPlaying.value"
+                  :pause-updates="keyframeModalOpen"
+                  :params="activeScrubTractParams ?? inspectorParams"
+                  :state="activeScrubTractParams ? importedDisplayedPose : null"
+                  :extras="pendingExtras ?? store.currentTractExtras.value"
+                  :interactive="!followImportedTract && !store.isPlaying.value"
+                  :show-labels="showLabels"
+                  :show-grid="showTractGrid"
+                  :show-head="showHead"
+                  @update:params="onViewportTractUpdate"
+                  @update:extras="onViewportExtrasUpdate"
+                  @drag-end="onViewportDragEnd"
+                  @pose-resolved="acceptViewportPose"
+                />
+              </div>
+
+              <!-- Plan A: On-Demand 19-D Articulatory Parameter Drawer inside Vocal Tract Card -->
+              <aside v-if="tractParamsOpen" class="rm-tract-params-drawer" aria-label="声道 19 维精调参数">
+                <div class="rm-tract-params-head">
+                  <span class="rm-tract-params-title">
+                    构型精调
+                    <small v-if="primarySelectedEntry" class="mono ipa notranslate" translate="no">
+                      [{{ primarySelectedEntry.seg.ipa }}]
+                    </small>
+                  </span>
+                  <button
+                    type="button"
+                    class="btn xs icon-only"
+                    aria-label="收起精调参数"
+                    title="收起精调参数"
+                    @click="tractParamsOpen = false"
+                  >
+                    <IconSvg name="close" :size="11" />
+                  </button>
+                </div>
+
+                <div class="rm-tract-params-body">
+                  <div v-if="followImportedTract" class="rm-tract-readonly-note">
+                    当前正在跟随轨迹预览，关闭上方「{{ followingSynthesis ? '合成轨迹' : '录音轨迹' }}」后可手动微调构型。
+                  </div>
+                  <fieldset class="rm-tract-fieldset" :disabled="followImportedTract || store.isPlaying.value">
+                    <div class="param-grid-2">
+                      <CompactSlider
+                        v-for="meta in core6Meta"
+                        :key="meta.key"
+                        :label="meta.label"
+                        :model-value="inspectorParams[meta.key]"
+                        :min="meta.min"
+                        :max="meta.max"
+                        :step="meta.step"
+                        :default-value="meta.defaultVal"
+                        @update:model-value="(v) => onSliderTractInput(meta.key, v)"
+                        @change="(v) => onSliderTractCommit(meta.key, v)"
+                      />
+                    </div>
+
+                    <details class="adv-box">
+                      <summary>其余 13 维精细解剖参数 (HX–TS3)</summary>
+                      <div class="param-grid-2" style="margin-top: 6px">
+                        <CompactSlider
+                          v-for="meta in extra13Meta"
+                          :key="meta.key"
+                          :label="meta.label"
+                          :model-value="inspectorParams[meta.key]"
+                          :min="meta.min"
+                          :max="meta.max"
+                          :step="meta.step"
+                          :default-value="meta.defaultVal"
+                          @update:model-value="(v) => onSliderTractInput(meta.key, v)"
+                          @change="(v) => onSliderTractCommit(meta.key, v)"
+                        />
+                      </div>
+                    </details>
+                  </fieldset>
+                </div>
+
+                <div class="rm-tract-params-foot">
+                  <button
+                    type="button"
+                    class="btn xs"
+                    style="width: 100%"
+                    :disabled="Boolean(importedTractParams)"
+                    @click="resetSelectedPhonemePose"
+                  >
+                    <IconSvg name="refresh" :size="11" />
+                    <span>{{ primarySelectedEntry ? `恢复 [${primarySelectedEntry.seg.ipa}] 标准构型` : '恢复默认 [ə] 标准构型' }}</span>
+                  </button>
+                </div>
+              </aside>
             </div>
           </div>
 
-          <!-- Right: 2x2 PTB Scientific Physics & Acoustic Vowel Space Quad -->
+          <SplitPane
+            v-model="tractPaneW"
+            direction="vertical"
+            :min="Math.min(340, Math.round(Math.max(640, upperPairWidth - 6) * 0.3))"
+            :max="Math.max(340, Math.max(640, upperPairWidth - 6) - Math.min(440, Math.round(Math.max(640, upperPairWidth - 6) * 0.36)))"
+            :default-value="Math.round(Math.max(640, upperPairWidth - 6) * 0.44)"
+            title="拖动调整声道剖面与声学分析宽度，双击恢复默认比例"
+          />
+
+          <!-- Column 3: 2x2 PTB Scientific Physics & Acoustic Vowel Space Quad (All 4 Expanded by Default) -->
           <div class="panel rm-trio-panel" data-tour="main-trio">
             <div class="p-head">
               <span>声学分析 <small class="rm-source">{{ liveSnapshot ? importedTractParams ? followingSynthesis ? '合成构型' : '反演构型' : store.currentTractState.value ? '实时构型' : 'W02 参考样本' : '等待构型' }}</small></span>
@@ -4166,7 +5154,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="rm-trio-grid" :data-open-count="openAcousticCards.size" :style="{ '--acoustic-font-scale': acousticFontScale }">
               <p v-if="!openAcousticCards.size" class="acoustic-empty muted">从上方选择要展开的卡片</p>
-              <!-- Quad 1 (Top-Left): PTB A(x) Vocal Tract Area Function (click/drag section scan) -->
+              <!-- Quad 1 (Top-Left): PTB A(x) Vocal Tract Area Function -->
               <div v-if="openAcousticCards.has('area')" id="acoustic-area" class="trio-card sci-plane acoustic-plot">
                 <div class="trio-hdr">
                   <span class="trio-lbl">A(x) 声道面积函数</span>
@@ -4189,7 +5177,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <!-- Quad 2 (Top-Right): PTB H(f) Model Transfer Function (F1-F3 / P1-P3) -->
+              <!-- Quad 2 (Top-Right): PTB H(f) Model Transfer Function -->
               <div v-if="openAcousticCards.has('transfer')" id="acoustic-transfer" class="trio-card sci-plane acoustic-plot">
                 <div class="trio-hdr">
                   <span class="trio-lbl">H(f) 声道传递函数</span>
@@ -4207,7 +5195,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <!-- Quad 3 (Bottom-Left): PTB Transverse Cross-Section (96-pt + 1 cm) & Real Frontal Lip Contour -->
+              <!-- Quad 3 (Bottom-Left): PTB Transverse Cross-Section & Real Frontal Lip Contour -->
               <div v-if="openAcousticCards.has('section')" id="acoustic-section" class="trio-card sci-plane acoustic-plot">
                 <div class="trio-hdr">
                   <span class="trio-lbl">横截面 &amp; 正面唇形</span>
@@ -4221,8 +5209,8 @@ onBeforeUnmount(() => {
                     <template v-if="!importedTractParams">
                       <button v-for="(handle,n) in sideHandles" :key="n" type="button" class="side-grip" :style="{left:handle.x+'px',top:handle.y+'px'}" :aria-label="'拖动舌侧缘 '+handle.key" :title="handle.key+' · 上下拖动舌侧缘'" @pointerdown="dragCrossHandle($event,handle.key)" />
                     </template>
-                    <span v-if="sectionStatus.available" class="quad-mini-tag mono">
-                      {{ sectionStatus.open ? `${sectionStatus.areaCm2.toFixed(2)} cm²` : '闭塞 0 cm²' }}
+                    <span v-if="sectionStatus.available && sectionStatus.open" class="quad-mini-tag mono">
+                      {{ sectionStatus.areaCm2.toFixed(2) }} cm²
                     </span>
                   </div>
                   <div class="quad-lip-box">
@@ -4256,25 +5244,31 @@ onBeforeUnmount(() => {
                 <div v-else class="rm-no-section">暂无横截面或正面唇形数据</div>
               </div>
 
-              <!-- Quad 4 (Bottom-Right): PTB Acoustic Vowel Space (F1-F2, Inverted F2, Wheel Zoom / Drag Pan / 10s Trail) -->
+              <!-- Quad 4 (Bottom-Right): PTB Acoustic Vowel Space -->
               <div v-if="openAcousticCards.has('vowel')" id="acoustic-vowel" class="trio-card sci-plane acoustic-plot">
                 <div class="trio-hdr vowel-card-header">
                   <span class="trio-lbl">声学元音图</span>
                   <div class="rm-head-acts vowel-card-controls">
-                    <select v-model="vowelReferenceMode" class="inp vowel-source-select" aria-label="元音图参考来源"
-                      title="原音实测使用 Praat Burg，构型 H(f) 使用 TextGrid 核心区逐帧声道传递函数">
-                      <option value="recorded">原音</option>
-                      <option value="transfer">构型</option>
-                    </select>
-                    <select v-model="vowelCoordinateScale" class="inp vowel-scale-select" aria-label="元音图坐标刻度"
-                      title="F1 与 F2 的间距，可在线性和对数之间切换">
-                      <option value="logarithmic">对数</option>
-                      <option value="linear">线性</option>
-                    </select>
+                    <CustomSelect
+                      v-model="vowelReferenceMode"
+                      :options="vowelSourceOptions"
+                      size="xs"
+                      aria-label="元音图参考来源"
+                      title="原音实测使用 Praat Burg，构型 H(f) 使用 TextGrid 核心区逐帧声道传递函数"
+                      class="vowel-source-sel"
+                    />
+                    <CustomSelect
+                      v-model="vowelCoordinateScale"
+                      :options="vowelScaleOptions"
+                      size="xs"
+                      aria-label="元音图坐标刻度"
+                      title="F1 与 F2 的间距，可在线性和对数之间切换"
+                      class="vowel-scale-sel"
+                    />
                     <button
                       v-if="manualVowelAxes"
                       type="button"
-                      class="btn xs quad-reset-btn"
+                      class="btn xs icon-only quad-reset"
                       aria-label="复位声学元音图坐标范围"
                       title="复位声学元音图坐标范围"
                       @click="resetVowelView"
@@ -4302,7 +5296,7 @@ onBeforeUnmount(() => {
                         {{ isRoundedVowelSymbol(vowelHover.symbol) ? '圆唇' : '非圆唇' }}
                       </small>
                     </strong>
-                     <span v-if="vowelHover" class="mono">F1 · F2 {{ Math.round(vowelHover.f1) }} / {{ Math.round(vowelHover.f2) }} Hz</span>
+                    <span class="mono">F1 · F2 {{ Math.round(vowelHover.f1) }} / {{ Math.round(vowelHover.f2) }} Hz</span>
                     <span>{{ vowelHover.source === 'recorded' ? 'Praat Burg 实测' : vowelHover.source === 'transfer'
                       ? 'VTL H(f) 核心区中位数' : '套装单帧构型 H(f)' }} · {{ vowelHover.name }}</span>
                   </div>
@@ -4333,276 +5327,22 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-
       </div>
 
       <SplitPane
-        v-model="rightW"
-        direction="vertical"
+        v-model="dockHeight"
+        direction="horizontal"
         invert
         :min="225"
-        :max="390"
-        :default-value="280"
-        storage-key="research-right"
+        :max="550"
+        :default-value="382"
+        storage-key="research-timeline-height"
       />
 
-      <!-- RIGHT INSPECTOR: Full Segment / Syllable Parameters (VTL 6 Core + 13 Extra + m27 Glottis in Pa) -->
-      <aside class="panel rm-right-col" data-tour="main-inspector" :style="{ width: `${rightW}px` }">
-        <div class="p-head">
-          <span>音段属性</span>
-          <span v-if="primarySelectedEntry" class="mono tree-tag ipa notranslate" translate="no">
-            [{{ primarySelectedEntry.seg.ipa }}]
-            {{ store.selectedPhonemeIds.value.length > 1 ? `+${store.selectedPhonemeIds.value.length - 1}` : '' }}
-          </span>
-        </div>
-
-        <div class="p-body rm-inspector-body">
-          <!-- Selected Segment Summary & Timing -->
-          <div v-if="primarySelectedEntry" class="param-sec">
-            <div class="param-sec-title">
-              <span class="notranslate" translate="no">当前音段 · {{ primarySelectedEntry.syl.text }}</span>
-              <span class="mono muted">{{ primarySelectedEntry.seg.role }}</span>
-            </div>
-            <div class="rm-seg-meta-grid">
-              <div class="rm-meta-pill">
-                <span class="muted">音标</span>
-                <strong class="ipa notranslate" translate="no">[{{ primarySelectedEntry.seg.ipa }}]</strong>
-              </div>
-              <div class="rm-meta-pill">
-                <span class="muted">清浊</span>
-                <strong>{{ primarySelectedEntry.seg.voiced ? '浊音 Voiced' : '清音 Voiceless' }}</strong>
-              </div>
-            </div>
-            <CompactSlider
-              label="音段时长"
-              :model-value="Math.round(samplesToMs(primarySelectedEntry.seg.end_smp - primarySelectedEntry.seg.start_smp))"
-              :min="12"
-              :max="700"
-              :step="5"
-              :decimals="0"
-              unit="ms"
-              @change="commitInspectorSegDuration"
-            />
-            <!-- T-46: Exact Syllable Duration Numeric Input -->
-            <label class="rm-syl-ms-row">
-              <span>当前音节时长 (ms)</span>
-              <input
-                :value="inspectorSyllableMs"
-                type="number"
-                min="20"
-                max="10000"
-                step="5"
-                class="inp mono rm-syl-ms-inp"
-                title="精确输入整音节总毫秒数，回车立即弹性缩放内部音素并更新总长"
-                @change="commitInspectorSylDurationEvent"
-                @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
-              />
-            </label>
-            <!-- T-33: Save Current Syllable to Personal Lexicon -->
-            <div v-if="currentLexiconSelection" class="rm-lexicon-save-preview">
-              <span class="ipa notranslate" translate="no">[{{ currentLexiconSelection.ipa }}]</span>
-              <span>{{ currentLexiconDictionaryLabel }} · {{ activeUserLexiconBook.name }}</span>
-            </div>
-            <div class="rm-lexicon-save-row">
-              <button
-                type="button"
-                class="btn xs primary"
-                style="flex: 1"
-                :disabled="!currentLexiconSelection"
-                title="保存时间轴上当前音节的 IPA、音素时长比例与声道构型"
-                @click="saveCurrentSyllableToPersonalLexicon"
-              >
-                <IconSvg name="book" :size="11" />
-                <span>将当前字/音节存入个人词典</span>
-              </button>
-              <button
-                type="button"
-                class="btn xs"
-                title="导出个人词典 JSON"
-                @click="handleExportPersonalLexicon"
-              >
-                <IconSvg name="download" :size="11" />
-              </button>
-            </div>
-            <div v-if="primarySelectedEntry.seg.stop_timing" class="rm-stop-box mono">
-              <span>塞音保护：闭塞 {{ Math.round(primarySelectedEntry.seg.stop_timing.closure_ms) }}ms (≥10)</span>
-              <span>释放 {{ Math.round(primarySelectedEntry.seg.stop_timing.release_ms) }}ms (≥1) · VOT {{ Math.round(primarySelectedEntry.seg.stop_timing.vot_ms) }}ms</span>
-            </div>
-          </div>
-
-          <!-- VTL Core 6 Articulatory Parameters -->
-          <div class="param-sec">
-            <div class="param-sec-title">
-              <span>声道构型</span>
-              <button
-                type="button"
-                class="btn xs"
-                @click="store.executeCommand({ type: 'artic.set_pose', label: '复位中性构型', payload: { delta: defaultTractParams() } })"
-              >
-                复位
-              </button>
-            </div>
-            <div class="param-grid-2">
-              <CompactSlider
-                v-for="meta in core6Meta"
-                :key="meta.key"
-                :label="meta.label"
-                :model-value="inspectorParams[meta.key]"
-                :min="meta.min"
-                :max="meta.max"
-                :step="meta.step"
-                :default-value="meta.defaultVal"
-                @update:model-value="(v) => onSliderTractInput(meta.key, v)"
-                @change="(v) => onSliderTractCommit(meta.key, v)"
-              />
-            </div>
-
-            <!-- Collapsible Remaining 13 VTL Dimensions -->
-            <details class="adv-box">
-              <summary>展开其余 13 维精细解剖参数 (HX–TS3)</summary>
-              <div class="param-grid-2" style="margin-top: 6px">
-                <CompactSlider
-                  v-for="meta in extra13Meta"
-                  :key="meta.key"
-                  :label="meta.label"
-                  :model-value="inspectorParams[meta.key]"
-                  :min="meta.min"
-                  :max="meta.max"
-                  :step="meta.step"
-                  :default-value="meta.defaultVal"
-                  @update:model-value="(v) => onSliderTractInput(meta.key, v)"
-                  @change="(v) => onSliderTractCommit(meta.key, v)"
-                />
-              </div>
-            </details>
-          </div>
-
-          <!-- m27 Glottis Parameters (strictly Pa unit 0..1600 Pa) -->
-          <div class="param-sec">
-            <div class="param-sec-title">
-              <span>声门参数</span>
-              <span class="mono muted">10-D</span>
-            </div>
-            <VoqsAnchorPicker :groups="SYNTHESIS_VOQS_GROUPS" :anchor="selectedVoqsAnchor" @apply="applyVoqsProfile" />
-            <div class="param-grid-2">
-              <CompactSlider
-                label="基频 F0"
-                :model-value="store.currentGlottisParams.value.f0_hz"
-                :min="F0_LIMIT_HZ.min"
-                :max="F0_LIMIT_HZ.max"
-                :step="1"
-                :decimals="0"
-                unit="Hz"
-                :default-value="125"
-                @change="(v) => onGlottisCommit('f0_hz', v)"
-              />
-              <CompactSlider
-                label="声门下压 PR"
-                :model-value="store.currentGlottisParams.value.pr_pa"
-                :min="PRESSURE_LIMIT_PA.min"
-                :max="PRESSURE_LIMIT_PA.max"
-                :step="10"
-                :decimals="0"
-                unit="Pa"
-                :default-value="800"
-                @change="(v) => onGlottisCommit('pr_pa', v)"
-              />
-              <CompactSlider
-                label="下缘位移 XB"
-                :model-value="store.currentGlottisParams.value.xb_cm"
-                :min="-0.05"
-                :max="0.3"
-                :step="0.005"
-                :decimals="3"
-                unit="cm"
-                :default-value="0.04"
-                @change="(v) => onGlottisCommit('xb_cm', v)"
-              />
-              <CompactSlider
-                label="上缘位移 XT"
-                :model-value="store.currentGlottisParams.value.xt_cm"
-                :min="-0.05"
-                :max="0.3"
-                :step="0.005"
-                :decimals="3"
-                unit="cm"
-                :default-value="0.04"
-                @change="(v) => onGlottisCommit('xt_cm', v)"
-              />
-              <CompactSlider
-                label="后裂隙 CA"
-                :model-value="store.currentGlottisParams.value.ca_cm2"
-                :min="-0.25"
-                :max="0.25"
-                :step="0.005"
-                :decimals="3"
-                unit="cm²"
-                :default-value="0.02"
-                @change="(v) => onGlottisCommit('ca_cm2', v)"
-              />
-              <CompactSlider
-                label="相位差 LAG"
-                :model-value="store.currentGlottisParams.value.lag_rad"
-                :min="0"
-                :max="3.14"
-                :step="0.02"
-                :decimals="2"
-                unit="rad"
-                :default-value="1.22"
-                @change="(v) => onGlottisCommit('lag_rad', v)"
-              />
-              <CompactSlider
-                label="相对振幅 RA"
-                :model-value="store.currentGlottisParams.value.ra"
-                :min="-1"
-                :max="1"
-                :step="0.02"
-                :decimals="2"
-                :default-value="1"
-                @change="(v) => onGlottisCommit('ra', v)"
-              />
-              <CompactSlider
-                label="脉冲形态 PS"
-                :model-value="store.currentGlottisParams.value.ps"
-                :min="-1"
-                :max="1"
-                :step="0.02"
-                :decimals="2"
-                :default-value="0.5"
-                @change="(v) => onGlottisCommit('ps', v)"
-              />
-              <CompactSlider
-                label="微颤 FL"
-                :model-value="store.currentGlottisParams.value.fl"
-                :min="0"
-                :max="100"
-                :step="1"
-                :decimals="0"
-                unit="%"
-                :default-value="20"
-                @change="(v) => onGlottisCommit('fl', v)"
-              />
-              <CompactSlider
-                label="振幅微扰 SHIM"
-                :model-value="store.currentGlottisParams.value.shim"
-                :min="0"
-                :max="100"
-                :step="1"
-                :decimals="0"
-                unit="%"
-                :default-value="0"
-                @change="(v) => onGlottisCommit('shim', v)"
-              />
-            </div>
-          </div>
-        </div>
-      </aside>
-      </div>
-      <SplitPane v-model="dockHeight" direction="horizontal" invert :min="225" :max="550" :default-value="382" storage-key="research-timeline-height" />
-      <section class="rm-dock" data-tour="main-timeline" :style="{ height: dockHeight + 'px' }" aria-label="多轨标注">
+      <!-- Lower Deck: 100% Full-Width G2P Compile Bar & Multi-Track Timeline -->
+      <section class="rm-dock" data-tour="main-timeline" :style="{ height: `${dockHeight}px` }" aria-label="多轨标注">
         <div class="panel rm-timeline-g2p-bar" data-tour="main-g2p-bar">
           <div class="rm-timeline-transport" role="group" aria-label="时间轴状态与播放">
-            <!-- T-06: Non-interactive synthesis status badge replacing old clickable Synthesize button -->
             <span
               class="rm-synth-status-badge"
               :class="synthStatusState"
@@ -4621,33 +5361,54 @@ onBeforeUnmount(() => {
               <span>{{ store.isPlaying.value ? '停止' : '播放' }}</span>
             </button>
 
-            <!-- T-62: Explicit Raw vs Time-Warped Resynthesis switcher right on the timeline bar -->
+            <!-- Consolidated Recording Source Switcher (raw / denoised / edited / resynthesis) -->
             <div
               v-if="loadedAnnotationRecording"
               class="seg rm-playback-src-seg"
-              title="切换播放原始录音，或播放按当前音素时长/基频修改分段规整重合成后的语音"
+              role="group"
+              aria-label="录音与重合成音源切换"
+              title="切换原始录音、DPDFNet 降噪录音、编辑音频或分段规整重合成语音"
             >
               <button
                 type="button"
-                :class="{ active: annotationPlaybackSource !== 'synthesis' }"
-                @click="showRecordingVersion(loadedAnnotationRecording.denoised)"
+                :class="{ active: annotationPlaybackSource === 'recording' && !loadedAnnotationRecording.denoised }"
+                :aria-pressed="annotationPlaybackSource === 'recording' && !loadedAnnotationRecording.denoised"
+                @click="showRecordingVersion(false)"
               >
                 原音
               </button>
               <button
                 type="button"
+                :class="{ active: annotationPlaybackSource === 'recording' && loadedAnnotationRecording.denoised }"
+                :aria-pressed="annotationPlaybackSource === 'recording' && loadedAnnotationRecording.denoised"
+                :disabled="isDenoising"
+                @click="denoiseAnnotationRecording"
+              >
+                {{ isDenoising ? '降噪中…' : 'DPDFNet 降噪' }}
+              </button>
+              <button
+                v-if="store.editedAnnotationAudio.value"
+                type="button"
+                :class="{ active: isEditedRecordingActive }"
+                :aria-pressed="isEditedRecordingActive"
+                @click="showEditedRecording"
+              >
+                编辑音频
+              </button>
+              <button
+                type="button"
                 :class="{ active: annotationPlaybackSource === 'synthesis' }"
+                :aria-pressed="annotationPlaybackSource === 'synthesis'"
                 @click="showSynthesizedRecording"
               >
                 重合成{{ hasEditedReconstructedSource && !hasSynthesizedRecording ? ' *' : '' }}
               </button>
             </div>
 
-            <!-- T-03: Prominent M27 Reconstruct & Align button shown once audio is loaded onto timeline -->
             <button
               v-if="loadedAnnotationRecording"
               type="button"
-              class="btn xs accent rm-reconstruct-btn"
+              class="btn xs rm-reconstruct-action"
               :disabled="reconstructingTimeline"
               :title="loadedAnnotationRecording.uploadedTextGrid
                 ? `沿用已上传的 ${loadedAnnotationRecording.uploadedTextGridName ?? 'TextGrid'} 边界直接提取 50Hz 声道重建轨迹`
@@ -4660,7 +5421,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="rm-g2p-input-wrap">
-            <IconSvg name="search" :size="12" class="muted" />
+            <IconSvg name="type" :size="12" class="muted" />
             <input
               v-model="g2pText"
               type="text"
@@ -4672,11 +5433,11 @@ onBeforeUnmount(() => {
             />
           </div>
 
-          <!-- T-45: Multi-Language Dictionary & Transcription Rules Popover Trigger -->
           <button
             ref="dictMenuBtnRef"
             type="button"
             class="btn xs rm-dict-trigger"
+            data-tour="main-dict-btn"
             :class="{ active: dictMenuOpen }"
             aria-haspopup="dialog"
             :aria-expanded="dictMenuOpen"
@@ -4690,7 +5451,7 @@ onBeforeUnmount(() => {
           </button>
 
           <CustomSelect v-model="textPoseSource" :options="textPoseOptions" size="xs"
-            aria-label="文本合成构型" title="当前 IPA 构型使用时间轴保存的目标，模型默认构型使用引擎相位目标" />
+            aria-label="文本合成构型" title="自动切换（推荐）：中英日等文本使用模型默认构型，[IPA] 使用当前 IPA 构型，混排自动按段切换；也可手动固定为模型默认构型或当前 IPA 构型" />
           <CustomSelect v-model="speechRate" :options="speechRateOptions" size="xs"
             aria-label="合成语速" title="切换语速后立即缩放当前合成轨时长，并在编译入轨时作用于中英文韵律与规则合成" />
           <button v-if="hasKanaPlaceholders" type="button" class="btn xs" @click="convertLegacyKana">假名转 IPA</button>
@@ -4699,18 +5460,24 @@ onBeforeUnmount(() => {
             <span>{{ compilingText ? '编译中…' : '编译入轨' }}</span>
           </button>
         </div>
+
         <div v-if="selectedDictionary && dialectTokens.some(token => token.readings.length !== 1)" class="rm-dialect-review">
           <template v-for="token in dialectTokens" :key="token.key">
-            <label v-if="token.readings.length > 1">{{ token.text }}
-              <select class="inp notranslate" translate="no" :value="dialectChoices[token.key] ?? 0" @change="dialectChoices[token.key] = Number(($event.target as HTMLSelectElement).value)">
-                <option v-for="(reading, i) in token.readings" :key="i" :value="i">{{ reading.ipa }}{{ reading.tone ? ` · ${reading.tone}` : '' }}</option>
-              </select>
+            <label v-if="token.readings.length > 1" class="rm-dialect-token">
+              <span>{{ token.text }}</span>
+              <CustomSelect
+                size="xs"
+                class="notranslate rm-dialect-sel"
+                translate="no"
+                :model-value="dialectChoices[token.key] ?? 0"
+                :options="token.readings.map((r, i) => ({ value: i, label: r.ipa + (r.tone ? ' · ' + r.tone : '') }))"
+                @update:model-value="(v) => { dialectChoices[token.key] = Number(v); }"
+              />
             </label>
             <span v-else-if="!token.readings.length" class="muted">未收录 {{ token.text }}</span>
           </template>
         </div>
 
-        <!-- Lower Deck: Multi-Track Synchronized Timeline -->
         <div class="rm-lower-timeline">
           <ResearchTimeline
             :recording-active="annotationPlaybackSource !== 'synthesis' && Boolean(loadedAnnotationRecording)"
@@ -4720,15 +5487,17 @@ onBeforeUnmount(() => {
             @play-selection="playTimelineSelection"
             @cut-range="onTimelineCutRange"
             @trim-silence="onTimelineTrimSilence"
+            @save-dictionary="saveCurrentSyllableToPersonalLexicon"
+            @playhead-scrub="onTimelinePlayheadScrub"
+            @phoneme-focus="onTimelinePhonemeFocus"
           />
         </div>
       </section>
-      </div>
     </div>
 
-    <!-- Teleported Floating Menus & Modals (Prevents .subbar / .panel overflow clipping!) -->
+    <!-- Teleported Floating Menus & Modals -->
     <Teleport to="body">
-      <!-- T-05: Send Audio Floating Menu -->
+      <!-- Send Audio Floating Menu -->
       <div
         v-if="sendMenuOpen"
         ref="sendMenuFloatingRef"
@@ -4745,6 +5514,15 @@ onBeforeUnmount(() => {
         >
           <IconSvg name="stage" :size="13" />
           <span>{{ returnSource?.origin ? '送回剪辑原片段' : '发送到剪辑' }}</span>
+        </button>
+        <button
+          type="button"
+          class="rm-menu-item"
+          :disabled="sendingAudio || compilingText"
+          @click="sendMenuOpen = false; void sendAnnotationAudio('mixer')"
+        >
+          <IconSvg name="sliders" :size="13" />
+          <span>发送到发声调音台</span>
         </button>
         <button
           type="button"
@@ -4775,7 +5553,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- T-45 & T-33: Multi-Language Dictionary & Personal Lexicon Popover -->
+      <!-- Multi-Language Dictionary & Personal Lexicon Popover -->
       <div
         v-if="dictMenuOpen"
         ref="dictMenuFloatingRef"
@@ -4786,9 +5564,46 @@ onBeforeUnmount(() => {
       >
         <div class="rm-dict-pop-head">
           <strong>词典与多语转写规则</strong>
-          <button type="button" class="btn xs" @click="dictMenuOpen = false">
+          <button type="button" class="btn xs icon-only" aria-label="关闭词典设置" @click="dictMenuOpen = false">
             <IconSvg name="close" :size="11" />
           </button>
+        </div>
+
+        <!-- Relocated Personal Lexicon Save Section -->
+        <div class="rm-dict-sec rm-dict-save-box">
+          <div class="rm-dict-sec-title">
+            <span>存入当前选中音节</span>
+            <span v-if="currentLexiconSelection" class="muted">
+              {{ currentLexiconDictionaryLabel }} · {{ activeUserLexiconBook.name }}
+            </span>
+          </div>
+          <div v-if="currentLexiconSelection" class="rm-lexicon-save-preview">
+            <strong class="notranslate" translate="no">{{ primarySelectedEntry?.syl.text }}</strong>
+            <span class="ipa notranslate" translate="no">[{{ currentLexiconSelection.ipa }}]</span>
+          </div>
+          <div v-else class="muted">请先在时间轴选中一个音节</div>
+          <div class="rm-lexicon-save-row">
+            <button
+              type="button"
+              class="btn xs primary"
+              style="flex: 1"
+              :disabled="!currentLexiconSelection"
+              title="保存时间轴上当前音节的 IPA、音素时长比例与声道构型"
+              @click="saveCurrentSyllableToPersonalLexicon"
+            >
+              <IconSvg name="book" :size="11" />
+              <span>将当前字/音节存入个人词典</span>
+            </button>
+            <button
+              type="button"
+              class="btn xs icon-only"
+              aria-label="导出个人词典 JSON"
+              title="导出个人词典 JSON"
+              @click="handleExportPersonalLexicon"
+            >
+              <IconSvg name="download" :size="11" />
+            </button>
+          </div>
         </div>
 
         <div class="rm-dict-sec">
@@ -4803,54 +5618,47 @@ onBeforeUnmount(() => {
               <span>个人汉字词典优先</span>
             </label>
           </div>
-          <select
-            class="inp"
-            :value="dictionaryPrefs.zhStandard"
+          <CustomSelect
+            size="xs"
+            :model-value="dictionaryPrefs.zhStandard"
+            :options="mandarinStandardSelectOptions"
             :disabled="Boolean(selectedDictionary)"
-            @change="selectMandarinStandard(($event.target as HTMLSelectElement).value as MappingStandard)"
-          >
-            <option v-for="opt in mandarinStandardOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
+            aria-label="汉字转写词典"
+            @update:model-value="(v) => selectMandarinStandard(v as MappingStandard)"
+          />
         </div>
 
         <div class="rm-dict-sec">
           <div class="rm-dict-sec-title"><span>2. 英语词典</span></div>
-          <select
-            class="inp"
-            :value="dictionaryPrefs.enMode"
-            @change="updateDictionaryPrefs({ enMode: ($event.target as HTMLSelectElement).value as 'cmudict-personal' | 'cmudict-only' })"
-          >
-            <option value="cmudict-personal">CMUdict + 个人英语词典优先（支持多音节切分）</option>
-            <option value="cmudict-only">仅使用内置 CMUdict</option>
-          </select>
+          <CustomSelect
+            size="xs"
+            :model-value="dictionaryPrefs.enMode"
+            :options="enDictModeOptions"
+            aria-label="英语词典"
+            @update:model-value="(v) => updateDictionaryPrefs({ enMode: v as 'cmudict-personal' | 'cmudict-only' })"
+          />
         </div>
 
         <div class="rm-dict-sec">
           <div class="rm-dict-sec-title"><span>3. 日语词典</span></div>
-          <select
-            class="inp"
-            :value="dictionaryPrefs.jaMode"
-            @change="updateDictionaryPrefs({ jaMode: ($event.target as HTMLSelectElement).value as 'standard-personal' | 'standard-only' })"
-          >
-            <option value="standard-personal">日语标准假名词典 + 个人日语词典优先</option>
-            <option value="standard-only">仅使用内置日语标准词典</option>
-          </select>
+          <CustomSelect
+            size="xs"
+            :model-value="dictionaryPrefs.jaMode"
+            :options="jaDictModeOptions"
+            aria-label="日语词典"
+            @update:model-value="(v) => updateDictionaryPrefs({ jaMode: v as 'standard-personal' | 'standard-only' })"
+          />
         </div>
 
         <div class="rm-dict-sec">
           <div class="rm-dict-sec-title"><span>4. 方言包选择</span></div>
-          <select
-            class="inp"
-            :value="selectedDictionary ? selectedDictionary.id : ''"
-            @change="selectDialectPack(($event.target as HTMLSelectElement).value)"
-          >
-            <option value="">不启用独立方言包（使用上方中/英/日混排规则）</option>
-            <option v-for="pack in savedDialects" :key="pack.id" :value="pack.id">
-              {{ pack.name }}
-            </option>
-          </select>
+          <CustomSelect
+            size="xs"
+            :model-value="selectedDictionary ? selectedDictionary.id : ''"
+            :options="dialectPackOptions"
+            aria-label="方言包选择"
+            @update:model-value="(v) => selectDialectPack(String(v))"
+          />
         </div>
 
         <div class="rm-dict-sec">
@@ -4859,16 +5667,14 @@ onBeforeUnmount(() => {
             <span class="mono muted">{{ activeUserEntryCount }} 词条</span>
           </div>
           <div class="rm-dict-row">
-            <select
-              class="inp"
+            <CustomSelect
+              size="xs"
               style="flex: 1"
-              :value="activeUserLexiconBook.id"
-              @change="updateDictionaryPrefs({ activeBookId: ($event.target as HTMLSelectElement).value })"
-            >
-              <option v-for="book in userLexiconBooks" :key="book.id" :value="book.id">
-                {{ book.name }} ({{ Object.keys(book.entries).length }})
-              </option>
-            </select>
+              :model-value="activeUserLexiconBook.id"
+              :options="userLexiconBookOptions"
+              aria-label="个人发音词典簿"
+              @update:model-value="(v) => updateDictionaryPrefs({ activeBookId: String(v) })"
+            />
             <button type="button" class="btn xs" title="导出个人词典 JSON" @click="handleExportPersonalLexicon">
               导出
             </button>
@@ -4903,7 +5709,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- T-03: Lightweight Reference Text Modal for Inline M27 Reconstruction & Alignment -->
+      <!-- Lightweight Reference Text Modal for Inline M27 Reconstruction & Alignment -->
       <dialog
         v-if="reconstructModalOpen"
         ref="reconstructDialogRef"
@@ -4929,14 +5735,15 @@ onBeforeUnmount(() => {
               autofocus
             />
           </label>
-          <label class="rm-recon-field rm-recon-lang">
+          <div class="rm-recon-field rm-recon-lang">
             <span>文本语言</span>
-            <select v-model="reconstructLangDraft" class="inp">
-              <option value="auto">自动识别语言</option>
-              <option value="zh">普通话 (中文)</option>
-              <option value="en">英语 (English)</option>
-            </select>
-          </label>
+            <CustomSelect
+              v-model="reconstructLangDraft"
+              :options="reconstructLangOptions"
+              size="sm"
+              aria-label="文本语言"
+            />
+          </div>
           <div class="rm-recon-actions">
             <button type="button" class="btn sm" @click="closeReconstructModal">取消</button>
             <button type="submit" class="btn sm primary">
@@ -4946,12 +5753,46 @@ onBeforeUnmount(() => {
           </div>
         </form>
       </dialog>
+
+      <!-- In-App Overwrite Confirmation Modal (Replaces blocking window.confirm) -->
+      <div
+        v-if="reconstructConfirmOpen"
+        class="export-modal-mask"
+        role="presentation"
+        @click.self="reconstructConfirmOpen = false"
+      >
+        <div
+          class="export-modal-card rm-confirm-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rm-recon-confirm-title"
+        >
+          <div class="p-head">
+            <strong id="rm-recon-confirm-title">确认重新声道重建</strong>
+            <button type="button" class="btn xs icon-only" aria-label="关闭确认框" @click="reconstructConfirmOpen = false">
+              <IconSvg name="close" :size="11" />
+            </button>
+          </div>
+          <div class="p-body rm-confirm-body">
+            <p>重新执行声道重建并对齐会覆盖当前时间轴上已修改的音素边界、构型与基频曲线。确认继续吗？</p>
+            <div class="rm-recon-actions">
+              <button type="button" class="btn sm" @click="reconstructConfirmOpen = false">取消</button>
+              <button type="button" class="btn sm danger" @click="confirmOverwriteReconstruct">确认覆盖并重建</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </Teleport>
   </div>
 </template>
 
 <style scoped>
-.trio-card.acoustic-plot { background: var(--chart-panel); border-color: var(--chart-outline); border-radius: var(--chart-corner); }
+.trio-card.acoustic-plot {
+  background: var(--chart-panel);
+  border-color: var(--chart-outline);
+  border-radius: var(--chart-corner);
+}
+
 .rm-shell {
   flex: 1;
   min-width: 0;
@@ -4964,20 +5805,6 @@ onBeforeUnmount(() => {
 .rm-global-bar {
   gap: 8px;
 }
-.rm-audio-send { position: relative; z-index: 21; }
-.rm-audio-send summary { list-style: none; }
-.rm-audio-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  display: grid;
-  gap: 4px;
-  padding: 6px;
-  min-width: max-content;
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: var(--r-ctrl);
-}
 
 .rm-proj-summary {
   display: inline-flex;
@@ -4986,6 +5813,235 @@ onBeforeUnmount(() => {
   font-size: 0.916667rem;
   white-space: nowrap;
   min-width: 0;
+}
+
+.rm-file-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.rm-corpus-badge {
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--selected);
+  color: var(--accent);
+  font-size: 0.791667rem;
+  line-height: 1.4;
+}
+
+.rm-corpus-perm-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  flex: none;
+}
+
+.rm-workspace-body {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--pad-shell);
+  gap: 2px;
+  overflow: hidden;
+}
+
+/* On-Demand Left Slide-Over Corpus Directory Drawer */
+.rm-corpus-drawer-mask {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-drawer);
+  background: var(--overlay);
+  transition: opacity var(--dur-fast) var(--ease-out-expo);
+}
+
+.rm-corpus-drawer-mask.dragging {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.rm-corpus-drawer {
+  position: absolute;
+  top: var(--pad-shell);
+  bottom: var(--pad-shell);
+  left: var(--pad-shell);
+  width: min(324px, calc(100% - 20px));
+  z-index: var(--z-drawer);
+  background: var(--popover-bg);
+  box-shadow: var(--popover-shadow);
+  backdrop-filter: var(--glass-backdrop);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rm-corpus-drawer.drop-active {
+  border-color: var(--accent);
+  box-shadow: var(--popover-shadow), 0 0 0 2px var(--selection);
+}
+
+.rm-corpus-empty-acts {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* Upper 3-Column Strictly Bottom-Aligned Row */
+.rm-upper-row {
+  flex: 1;
+  min-width: 0;
+  min-height: 220px;
+  display: flex;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.rm-upper-right-pair {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.rm-ipa-quick {
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rm-tract-panel {
+  flex: none;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rm-trio-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Vocal Tract Viewport + Plan A 19-D Side Parameter Drawer */
+.rm-tract-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.rm-tract-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  background: var(--panel);
+}
+
+.rm-tract-params-drawer {
+  width: min(256px, 50%);
+  flex: none;
+  min-width: 196px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: var(--border-w) solid var(--panel-border);
+  background: color-mix(in srgb, var(--panel) 88%, var(--app));
+  overflow: hidden;
+}
+
+.rm-tract-params-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 0.916667rem;
+  font-weight: 600;
+}
+
+.rm-tract-params-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rm-tract-params-title small {
+  color: var(--teal);
+  font-weight: 700;
+}
+
+.rm-tract-params-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+}
+
+.rm-tract-readonly-note {
+  padding: 6px 8px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, var(--panel));
+  color: var(--warning);
+  font-size: 0.833333rem;
+  line-height: 1.4;
+}
+
+.rm-tract-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rm-tract-fieldset:disabled {
+  opacity: 0.56;
+  pointer-events: none;
+}
+
+.rm-tract-params-foot {
+  flex: none;
+  padding: 6px 8px;
+  border-top: 1px solid var(--panel-border);
+}
+
+/* Timeline Bar & Full-Width Lower Dock */
+.rm-dock {
+  flex: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 0;
+  max-height: 58%;
 }
 
 .rm-timeline-g2p-bar {
@@ -4997,10 +6053,39 @@ onBeforeUnmount(() => {
   min-height: 36px;
   overflow: visible;
 }
-.rm-timeline-transport { display: inline-flex; flex: none; gap: 5px; align-items: center; padding-inline-end: 7px; border-inline-end: 1px solid var(--panel-border); }
-.rm-timeline-transport .btn { min-height: 25px; white-space: nowrap; }
-.rm-dialect-review { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:4px 8px; font-size:0.916667rem; }
-.rm-dialect-review label { display:flex; align-items:center; gap:5px; }
+
+.rm-timeline-transport {
+  display: inline-flex;
+  flex: none;
+  gap: 5px;
+  align-items: center;
+  padding-inline-end: 7px;
+  border-inline-end: 1px solid var(--panel-border);
+}
+
+.rm-timeline-transport .btn {
+  min-height: 25px;
+  white-space: nowrap;
+}
+
+.rm-dialect-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  font-size: 0.916667rem;
+}
+
+.rm-dialect-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rm-dialect-sel {
+  min-width: 84px;
+}
 
 .rm-g2p-input-wrap {
   flex: 1 1 220px;
@@ -5015,61 +6100,18 @@ onBeforeUnmount(() => {
   height: 24px;
 }
 
-.rm-std-sel {
-  width: 164px;
+.rm-synth-sel {
   flex: none;
+  min-width: 134px;
 }
-
-.rm-dev-sel {
-  min-width: 116px;
-  width: auto;
-  flex: none;
-}
-.rm-synth-sel { flex:none; min-width:134px; }
 
 .rm-spk-sel {
   width: 118px;
   flex: none;
 }
 
-.rm-main-row {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  padding: var(--pad-shell);
-  gap: 2px;
-  overflow: hidden;
-}
-
-.rm-left-col {
-  flex: none;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-layout);
-}
-
-.rm-editor-col,
-.rm-editor-upper {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-}
-
-.rm-editor-col { flex-direction: column; }
-.rm-ipa-empty { grid-column: 1 / -1; padding: 7px 0; font-size: 0.916667rem; }
-
-.rm-files-panel {
-  flex: 0 1 42%;
-  min-height: 132px;
-}
-
-.rm-files-panel.drop-active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--selection);
+.rm-speaker-reference {
+  width: 132px;
 }
 
 .rm-head-acts {
@@ -5082,9 +6124,11 @@ onBeforeUnmount(() => {
 .rm-file-list {
   display: flex;
   flex-direction: column;
+  justify-content: flex-start;
   gap: 4px;
   padding: 7px 8px;
 }
+
 .rm-corpus-empty {
   display: flex;
   flex-direction: column;
@@ -5095,14 +6139,15 @@ onBeforeUnmount(() => {
   padding: 10px 4px;
   text-align: center;
 }
-.rm-corpus-empty > .vc-icon { color: var(--accent); margin-bottom: 3px; }
-.rm-corpus-empty > p { margin: 0; font-size: 0.916667rem; }
-.rm-corpus-empty > .btn { margin-top: 4px; }
-.rm-recording-actions {
-  flex: none;
-  padding: 4px 8px 7px;
-  display: flex;
-  gap: 5px;
+
+.rm-corpus-empty > .vc-icon {
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+
+.rm-corpus-empty > p {
+  margin: 0;
+  font-size: 0.916667rem;
 }
 
 .rm-drop-hint {
@@ -5114,24 +6159,75 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+.rm-corpus-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 2px;
+  flex: none;
+}
+
+.rm-corpus-search-inp {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  font-size: 0.875rem;
+}
+
+.rm-tree-folder {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 25px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.rm-tree-folder:hover {
+  background: color-mix(in srgb, var(--selected) 68%, transparent);
+}
+
+.rm-tree-folder > .tree-tag {
+  margin-left: auto;
+}
+
 .rm-file-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 6px;
   width: 100%;
+  min-height: 30px;
   padding: 4px 7px;
   border: 1px solid transparent;
   border-radius: var(--r-ctrl);
   background: color-mix(in srgb, var(--app) 50%, transparent);
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
   font-size: 0.9rem;
   text-align: left;
 }
 
-.rm-file-row:hover {
+.rm-file-row:active {
+  cursor: grabbing;
+}
+
+.rm-file-row:hover,
+.rm-file-row.active {
   border-color: var(--accent);
   background: var(--selected);
+}
+
+.rm-file-row > .tree-tag {
+  margin-left: auto;
 }
 
 .rm-file-name {
@@ -5141,9 +6237,11 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.rm-ipa-quick {
-  flex: 1;
-  min-height: 185px;
+/* Quick IPA Panel */
+.rm-ipa-empty {
+  grid-column: 1 / -1;
+  padding: 7px 0;
+  font-size: 0.916667rem;
 }
 
 .rm-ipa-tabs {
@@ -5156,7 +6254,9 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(max-content, 1.3fr) minmax(0, 1fr);
 }
 
-.rm-ipa-tabs .seg button { padding-inline: 4px; }
+.rm-ipa-tabs .seg button {
+  padding-inline: 4px;
+}
 
 .rm-ipa-grid {
   flex: 1;
@@ -5164,15 +6264,22 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 2px 8px 6px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
   gap: 4px;
   align-content: start;
   scrollbar-width: thin;
 }
 
+.rm-manner {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.916667rem;
+  padding: 6px 0 2px;
+}
+
 .rm-ipa-cell {
   height: 27px;
-  border: 1px solid var(--ctrl-border, var(--panel-border));
+  border: 1px solid var(--ctrl-border);
   border-radius: max(3px, calc(var(--r-ctrl) - 2px));
   background: var(--ctrl-bg);
   color: var(--text);
@@ -5181,7 +6288,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   padding: 0 2px;
-  transition: border-color 0.12s, background-color 0.12s;
+  transition: border-color var(--dur-fast) var(--ease-out-expo), background-color var(--dur-fast) var(--ease-out-expo);
 }
 
 .rm-ipa-cell:hover,
@@ -5220,7 +6327,7 @@ onBeforeUnmount(() => {
   font-size: 0.75rem;
   font-weight: 700;
   padding: 1px 5px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--muted) 16%, transparent);
   color: var(--muted);
   white-space: nowrap;
@@ -5244,36 +6351,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.rm-center-col {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.rm-upper-deck {
-  flex: none;
-  min-height: 220px;
-  display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.18fr);
-  gap: var(--gap-layout);
-}
-
-.rm-tract-panel,
-.rm-trio-panel {
-  min-width: 0;
-  min-height: 0;
-}
-
-.rm-tract-wrap {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  padding: 6px;
-}
-
+/* 2x2 Acoustic Analysis Quad */
 .acoustic-card-switches {
   display: flex;
   flex: none;
@@ -5365,72 +6443,147 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.quad-legend { display:flex; flex:0 0 auto; flex-wrap:wrap; gap:2px 9px; align-items:center; font-size:calc(0.75rem * var(--acoustic-font-scale)); line-height:1.25; color:var(--muted); }
-.quad-legend span { display:inline-flex; gap:4px; align-items:center; white-space:nowrap; }
-.quad-legend i { display:inline-block; flex:none; color:var(--chart-series); }
-.key-line { width:11px; border-top:2px solid currentColor; }
-.key-line.dashed { border-top-style:dashed; color:var(--anatomy-wall); }
-.quad-legend .key-line.key-formant { color:var(--chart-peer); }
-.quad-legend .key-line.key-nasal-peak { color:var(--warning); }
-.quad-legend .key-line.key-zero { color:var(--danger); }
-.quad-legend .key-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
-.quad-legend .key-diamond { width:5px; height:5px; border:1px solid var(--chart-peer); transform:rotate(45deg); }
-.quad-legend .key-live { width:7px; height:7px; border-radius:50%; border:1px solid var(--chart-peer); box-shadow:inset 0 0 0 1.5px var(--chart-panel); background:var(--chart-peer); }
-.vowel-card-header { justify-content: space-between; gap: 6px; }
-.vowel-card-header .trio-lbl { flex: none; }
-.vowel-card-controls { gap: 4px; flex: none; margin-inline-start: auto; }
-.vowel-source-select, .vowel-scale-select {
-  width: auto;
-  min-width: 58px;
-  height: 21px;
-  min-height: 21px;
-  padding: 0 4px 0 6px;
-  line-height: 19px;
-  font-size: calc(0.76rem * var(--acoustic-font-scale));
-  flex: none;
-  cursor: pointer;
+.quad-legend {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  align-items: center;
+  font-size: calc(0.75rem * var(--acoustic-font-scale));
+  line-height: 1.25;
+  color: var(--muted);
 }
-.vowel-legend { gap: 3px 7px; }
-.vowel-nasal-label { color: var(--warning); }
-.quad-legend .key-square { width: 5px; height: 5px; border: 1px solid var(--chart-peer); }
+
+.quad-legend span {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.quad-legend i {
+  display: inline-block;
+  flex: none;
+  color: var(--chart-series);
+}
+
+.key-line {
+  width: 11px;
+  border-top: 2px solid currentColor;
+}
+
+.key-line.dashed {
+  border-top-style: dashed;
+  color: var(--anatomy-wall);
+}
+
+.quad-legend .key-line.key-formant {
+  color: var(--chart-peer);
+}
+
+.quad-legend .key-line.key-nasal-peak {
+  color: var(--warning);
+}
+
+.quad-legend .key-line.key-zero {
+  color: var(--danger);
+}
+
+.quad-legend .key-live {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--chart-peer);
+  box-shadow: inset 0 0 0 1.5px var(--chart-panel);
+  background: var(--chart-peer);
+}
+
+.vowel-card-header {
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.vowel-card-header .trio-lbl {
+  flex: none;
+}
+
+.vowel-card-controls {
+  gap: 4px;
+  flex: none;
+  margin-inline-start: auto;
+}
+
+.vowel-source-sel,
+.vowel-scale-sel {
+  min-width: 58px;
+  flex: none;
+}
+
+.vowel-legend {
+  gap: 3px 7px;
+}
+
 .quad-legend .key-gauss {
   width: 10px;
   height: 10px;
   border-radius: 50%;
 }
+
 .quad-legend .key-gauss.unrounded {
-  background: radial-gradient(circle, var(--vowel-unrounded, #0ea5e9) 0%, color-mix(in srgb, var(--vowel-unrounded, #0ea5e9) 38%, transparent) 55%, transparent 100%);
+  background: radial-gradient(circle, var(--vowel-unrounded) 0%, color-mix(in srgb, var(--vowel-unrounded) 38%, transparent) 55%, transparent 100%);
 }
+
 .quad-legend .key-gauss.rounded {
-  background: radial-gradient(circle, var(--vowel-rounded, #9333ea) 0%, color-mix(in srgb, var(--vowel-rounded, #9333ea) 38%, transparent) 55%, transparent 100%);
+  background: radial-gradient(circle, var(--vowel-rounded) 0%, color-mix(in srgb, var(--vowel-rounded) 38%, transparent) 55%, transparent 100%);
 }
+
 .vowel-lip-tag {
   margin-left: 4px;
   padding: 0 4px;
-  border-radius: 999px;
-  font-family: var(--font-sans, sans-serif);
+  border-radius: var(--r-pill);
+  font-family: var(--font-ui);
   font-size: calc(0.68rem * var(--acoustic-font-scale));
   font-weight: 600;
   vertical-align: middle;
 }
+
 .vowel-lip-tag.unrounded {
-  color: var(--vowel-unrounded-text, #075985);
-  background: color-mix(in srgb, var(--vowel-unrounded, #0ea5e9) 16%, transparent);
+  color: var(--vowel-unrounded-text);
+  background: color-mix(in srgb, var(--vowel-unrounded) 16%, transparent);
 }
+
 .vowel-lip-tag.rounded {
-  color: var(--vowel-rounded-text, #6b21a8);
-  background: color-mix(in srgb, var(--vowel-rounded, #9333ea) 16%, transparent);
+  color: var(--vowel-rounded-text);
+  background: color-mix(in srgb, var(--vowel-rounded) 16%, transparent);
 }
-.vowel-point-info { position:absolute; inset:auto 4px 3px auto; z-index:2; max-width:100%; display:grid; gap:2px; padding:4px 6px;
-  border:1px solid var(--chart-outline); border-radius:var(--r-ctrl); background:var(--panel); color:var(--text);
-  font-size:calc(0.75rem * var(--acoustic-font-scale)); line-height:1.3; box-shadow:var(--surface-shadow); pointer-events:none; }
-.vowel-point-info strong { font-size:calc(1.083333rem * var(--acoustic-font-scale)); }
+
+.vowel-point-info {
+  position: absolute;
+  inset: auto 4px 3px auto;
+  z-index: var(--z-base);
+  max-width: 100%;
+  display: grid;
+  gap: 2px;
+  padding: 4px 6px;
+  border: 1px solid var(--chart-outline);
+  border-radius: var(--r-ctrl);
+  background: var(--panel);
+  color: var(--text);
+  font-size: calc(0.75rem * var(--acoustic-font-scale));
+  line-height: 1.3;
+  box-shadow: var(--popover-shadow);
+  pointer-events: none;
+}
+
+.vowel-point-info strong {
+  font-size: calc(1.083333rem * var(--acoustic-font-scale));
+}
 
 .trio-legend-tag {
   flex: none;
   font-size: calc(0.75rem * var(--acoustic-font-scale));
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--selected);
   color: var(--accent);
   font-weight: 600;
@@ -5518,7 +6671,7 @@ onBeforeUnmount(() => {
   font-size: calc(0.733333rem * var(--acoustic-font-scale));
   line-height: 1.25;
   padding: 0 5px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--muted) 15%, transparent);
   color: var(--muted);
   font-weight: 600;
@@ -5530,13 +6683,7 @@ onBeforeUnmount(() => {
   color: var(--teal);
 }
 
-.quad-reset-btn {
-  height: 21px;
-  min-height: 21px;
-  width: 21px;
-  min-width: 21px;
-  justify-content: center;
-  padding: 0;
+.quad-reset {
   flex: none;
 }
 
@@ -5546,163 +6693,47 @@ onBeforeUnmount(() => {
   min-height: 165px;
 }
 
-.rm-right-col {
-  flex: none;
-  min-width: 0;
-  min-height: 0;
+.rm-source {
+  margin-left: 6px;
+  font-size: 0.833333rem;
+  color: var(--muted);
+  font-weight: 400;
 }
 
-.rm-inspector-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.rm-no-section {
+  margin: auto;
+  padding: 14px;
+  font-size: 0.916667rem;
+  color: var(--muted);
 }
 
-.rm-seg-meta-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-bottom: 6px;
+.side-grip {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--teal);
+  background: var(--panel);
+  cursor: ns-resize;
+  padding: 0;
+  touch-action: none;
 }
 
-.rm-meta-pill {
-  padding: 4px 7px;
-  border-radius: var(--r-ctrl);
-  background: color-mix(in srgb, var(--app) 62%, transparent);
-  border: 1px solid var(--panel-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.875rem;
+.lip-grip {
+  cursor: ew-resize;
+  touch-action: none;
+  stroke-width: 0.09;
 }
 
-.rm-stop-box {
-  margin-top: 5px;
-  padding: 5px 7px;
-  border-radius: var(--r-ctrl);
-  background: color-mix(in srgb, var(--warning) 14%, var(--panel));
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
-  font-size: 0.791667rem;
-  color: var(--warning);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-@container desktop (max-width: 1400px) {
-  .rm-std-sel {
-    width: 144px;
-  }
-
-  .rm-dev-sel {
-    min-width: 107px;
-    width: auto;
-  }
-}
-
-.rm-upper-deck { flex: 1; min-height: 0; }
-.rm-tract-wrap { padding: 0; background: var(--panel); }
-.rm-dock { flex: none; display: flex; flex-direction: column; gap: 5px; min-height: 0; max-height: 57%; }
-.rm-file-list { justify-content: flex-start; }
-.rm-file-row { justify-content: flex-start; min-height: 30px; }
-.rm-file-row > .tree-tag { margin-left: auto; }
-.rm-source { margin-left: 6px; font-size: 0.833333rem; color: var(--muted); font-weight: 400; }
-.rm-no-section { margin: auto; padding: 14px; font-size: 0.916667rem; color: var(--muted); }
-.rm-inspector-body { align-content: flex-start; }
-.rm-files-panel { flex: 0 1 auto; max-height: 45%; }
-.rm-ipa-grid { align-content: start; }
-.side-grip{position:absolute;transform:translate(-50%,-50%);width:12px;height:12px;border-radius:50%;border:2px solid var(--teal);background:var(--panel);cursor:ns-resize;padding:0;touch-action:none}.lip-grip{cursor:ew-resize;touch-action:none;stroke-width:.09}.quad-sec-box{position:relative}
-.rm-left-col { display:grid; gap:0; }
-.rm-left-col > .panel { min-height:0; max-height:none; overflow:hidden; }
-.rm-left-col > .split-h { margin:0; }
-.rm-manner { grid-column:1/-1; color:var(--muted); font-size:0.916667rem; padding:6px 0 2px; }
-
-.rm-speaker-reference { width: 132px; }
-
-.rm-corpus-search {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px 2px;
-  flex: none;
-}
-.rm-corpus-search-inp {
-  flex: 1;
-  min-width: 0;
-  height: 22px;
-  font-size: 0.875rem;
-}
-
-.rm-tree-folder {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  min-height: 25px;
-  padding: 3px 7px;
-  border: 0;
-  border-radius: var(--r-ctrl);
-  background: transparent;
-  color: var(--text);
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
-.rm-tree-folder:hover {
-  background: color-mix(in srgb, var(--selected) 68%, transparent);
-}
-.rm-tree-folder > .tree-tag {
-  margin-left: auto;
-}
-.rm-file-row {
-  cursor: grab;
-  user-select: none;
-}
-.rm-file-row:active {
-  cursor: grabbing;
-}
-.rm-file-row.active {
-  border-color: var(--accent);
-  background: var(--selected);
-}
-
-.rm-syl-ms-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  margin-top: 5px;
-  font-size: 0.9rem;
-}
-.rm-syl-ms-inp {
-  width: 78px;
-  height: 23px;
-  text-align: right;
-  padding: 0 6px;
-}
-.rm-lexicon-save-preview {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
-  margin-top: 4px;
-  font-size: 0.9em;
-}
-.rm-lexicon-save-row {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 6px;
-}
-
+/* Status & Transport Actions */
 .rm-synth-status-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   height: 24px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: 0.875rem;
   font-weight: 600;
   background: color-mix(in srgb, var(--app) 68%, var(--panel));
@@ -5711,6 +6742,7 @@ onBeforeUnmount(() => {
   user-select: none;
   white-space: nowrap;
 }
+
 .rm-synth-status-badge .rm-status-dot {
   width: 6.5px;
   height: 6.5px;
@@ -5718,26 +6750,32 @@ onBeforeUnmount(() => {
   background: var(--muted);
   flex: none;
 }
+
 .rm-synth-status-badge.pending {
   color: var(--warning);
   border-color: color-mix(in srgb, var(--warning) 42%, var(--panel-border));
   background: color-mix(in srgb, var(--warning) 10%, var(--panel));
 }
+
 .rm-synth-status-badge.pending .rm-status-dot {
   background: var(--warning);
 }
+
 .rm-synth-status-badge.ready {
   color: var(--teal);
   border-color: color-mix(in srgb, var(--teal) 42%, var(--panel-border));
   background: color-mix(in srgb, var(--teal) 10%, var(--panel));
 }
+
 .rm-synth-status-badge.ready .rm-status-dot {
   background: var(--teal);
 }
+
 .rm-synth-status-badge.synthesizing {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 45%, var(--panel-border));
 }
+
 .rm-spin-ring {
   width: 10px;
   height: 10px;
@@ -5747,17 +6785,21 @@ onBeforeUnmount(() => {
   animation: rm-spin 0.75s linear infinite;
   flex: none;
 }
+
 @keyframes rm-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-.rm-reconstruct-btn {
+.rm-reconstruct-action {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, var(--panel));
   font-weight: 600;
 }
-.rm-reconstruct-btn:hover {
+
+.rm-reconstruct-action:hover:not(:disabled) {
   background: var(--accent);
   color: var(--on-accent);
 }
@@ -5767,30 +6809,36 @@ onBeforeUnmount(() => {
   max-width: 190px;
   gap: 4px;
 }
+
 .rm-dict-lbl {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .rm-dict-cnt {
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--selected);
   color: var(--accent);
   font-size: 0.791667rem;
 }
 
+/* Teleported Floating Menus & Popovers */
 .rm-teleport-menu {
   position: fixed;
-  z-index: 1250;
+  z-index: var(--z-popover);
+  zoom: var(--page-scale);
+  overflow-y: auto;
   padding: 6px;
   display: grid;
   gap: 3px;
-  background: var(--panel);
+  background: var(--popover-bg);
   border: 1px solid var(--panel-border);
   border-radius: var(--r-ctrl);
   box-shadow: var(--popover-shadow);
 }
+
 .rm-menu-item {
   display: flex;
   align-items: center;
@@ -5806,10 +6854,12 @@ onBeforeUnmount(() => {
   text-align: left;
   white-space: nowrap;
 }
+
 .rm-menu-item:hover:not(:disabled) {
   background: var(--selected);
   color: var(--accent);
 }
+
 .rm-menu-item:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -5817,17 +6867,21 @@ onBeforeUnmount(() => {
 
 .rm-dict-popover {
   position: fixed;
-  z-index: 1250;
+  z-index: var(--z-popover);
+  zoom: var(--page-scale);
+  overflow-y: auto;
   padding: 11px 12px;
   display: flex;
   flex-direction: column;
   gap: 9px;
-  background: var(--panel);
+  background: var(--popover-bg);
   border: 1px solid var(--panel-border);
   border-radius: var(--r-panel);
   box-shadow: var(--popover-shadow);
   font-size: 0.916667rem;
+  scrollbar-width: thin;
 }
+
 .rm-dict-pop-head {
   display: flex;
   align-items: center;
@@ -5835,18 +6889,44 @@ onBeforeUnmount(() => {
   padding-bottom: 6px;
   border-bottom: 1px solid var(--panel-border);
 }
+
+.rm-dict-save-box {
+  padding: 8px;
+  border-radius: var(--r-ctrl);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--panel-border));
+  background: color-mix(in srgb, var(--selected) 45%, var(--panel));
+}
+
+.rm-lexicon-save-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 0.92em;
+}
+
+.rm-lexicon-save-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+}
+
 .rm-dict-sec {
   display: grid;
   gap: 4px;
 }
+
 .rm-dict-sec-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--text);
 }
+
 .rm-dict-chk {
   display: inline-flex;
   align-items: center;
@@ -5855,15 +6935,18 @@ onBeforeUnmount(() => {
   color: var(--muted);
   cursor: pointer;
 }
+
 .rm-dict-row {
   display: flex;
   align-items: center;
   gap: 5px;
 }
+
 .rm-dict-row .inp {
   min-width: 0;
   height: 25px;
 }
+
 .rm-dict-note {
   display: flex;
   align-items: center;
@@ -5882,42 +6965,66 @@ onBeforeUnmount(() => {
   margin: auto;
   border: 1px solid var(--panel-border);
   border-radius: var(--r-panel);
-  background: var(--panel);
+  background: var(--popover-bg);
   color: var(--text);
   box-shadow: var(--popover-shadow);
 }
+
 .rm-reconstruct-dialog::backdrop {
-  background: rgb(0 0 0 / 34%);
+  background: var(--overlay);
 }
+
 .rm-recon-form {
   display: grid;
   gap: 11px;
 }
+
 .rm-recon-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
+
 .rm-recon-hint {
   margin: 0;
   font-size: 0.958333rem;
   line-height: 1.5;
   color: var(--muted);
 }
+
 .rm-recon-field {
   display: grid;
   gap: 4px;
   font-size: 0.916667rem;
 }
+
 .rm-recon-field textarea {
   width: 100%;
   resize: vertical;
 }
+
 .rm-recon-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   padding-top: 4px;
+}
+
+.rm-confirm-card {
+  width: min(420px, 94vw);
+}
+
+.rm-confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.rm-confirm-body p {
+  margin: 0;
+  line-height: 1.55;
+  color: var(--text);
 }
 </style>

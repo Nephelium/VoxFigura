@@ -729,30 +729,60 @@ export function drawTransferFnBlock(b: AcousticBlockContext): void {
   const peaks = (metricsA.peaks_hz?.length ? metricsA.peaks_hz : [metricsA.f1_hz, metricsA.f2_hz, metricsA.f3_hz])
     .filter((f) => Number.isFinite(f) && f > 50 && f <= xmax)
     .slice(0, 5);
+  const pillScale = u * Math.min(1.08, textScale * 0.68);
+  const pillFs = Math.max(8, 11.5 * pillScale);
+  const pillH = Math.max(14, pillFs * 1.56);
+  const row0Y = plot.y + pillH * 0.62 + 3 * u;
+  const row1Y = row0Y + pillH + 3 * u;
+  let row0Right = plot.x - 4 * u;
+  let row1Right = plot.x - 4 * u;
+  const rightLimit = compare && metricsB && plot.w > 130 * u ? plot.x + plot.w - 72 * u : plot.x + plot.w - 3 * u;
+
   peaks.forEach((freq, i) => {
     const px = fx(freq);
+    const label = `F${i + 1}`;
+    ctx.save();
+    ctx.font = `600 ${pillFs}px ${MONO_TYPEFACE}`;
+    const estW = ctx.measureText(label).width + 15 * pillScale;
+    ctx.restore();
+
+    const clampedCx = Math.max(plot.x + estW / 2 + 2 * u, Math.min(rightLimit - estW / 2, px));
+    const leftEdge = clampedCx - estW / 2;
+    const rightEdge = clampedCx + estW / 2;
+
+    let badgeY: number | null = null;
+    if (leftEdge >= row0Right + 3 * u && rightEdge <= rightLimit) {
+      badgeY = row0Y;
+      row0Right = rightEdge;
+    } else if (plot.h > pillH * 4.5 && leftEdge >= row1Right + 3 * u && rightEdge <= rightLimit) {
+      badgeY = row1Y;
+      row1Right = rightEdge;
+    }
+
     ctx.save();
     ctx.strokeStyle = theme.primaryInk;
     ctx.globalAlpha = 0.35;
     ctx.lineWidth = Math.max(0.8, 0.9 * u);
     ctx.setLineDash([2.5 * u, 3 * u]);
     ctx.beginPath();
-    ctx.moveTo(px, plot.y + 18 * u);
+    ctx.moveTo(px, badgeY !== null ? badgeY + pillH * 0.55 : plot.y + 6 * u);
     ctx.lineTo(px, plot.y + plot.h);
     ctx.stroke();
     ctx.restore();
 
-    drawPillBadge(
-      ctx,
-      `F${i + 1}`,
-      px,
-      plot.y + 11 * u,
-      u * textScale * 0.72,
-      theme.badgeBg,
-      theme.badgeText,
-      null,
-      'center',
-    );
+    if (badgeY !== null) {
+      drawPillBadge(
+        ctx,
+        label,
+        clampedCx,
+        badgeY,
+        pillScale,
+        theme.badgeBg,
+        theme.badgeText,
+        null,
+        'center',
+      );
+    }
   });
   ctx.restore();
 }
@@ -1052,18 +1082,24 @@ export function drawArticMetricsBlock(b: AcousticBlockContext): void {
     const normA = Math.max(0, Math.min(1, (valA - meta.min) / (meta.max - meta.min)));
 
     const fs = Math.max(8.5, 9.8 * u * textScale);
+    const valFs = Math.max(8.5, 9.6 * u * textScale);
+    const valText = compare ? `${valA.toFixed(2)} / ${(paramsB[meta.key] ?? 0).toFixed(2)}` : valA.toFixed(2);
+    const textY = ry + rowH * 0.34;
+
+    ctx.font = `600 ${valFs}px ${MONO_TYPEFACE}`;
+    const maxValW = colW * (compare ? 0.56 : 0.44);
+    const drawnVal = fitTextEllipsis(ctx, valText, maxValW);
+    const valW = ctx.measureText(drawnVal).width;
+    ctx.fillStyle = theme.primaryInk;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(drawnVal, rx + colW, textY);
+
     ctx.font = `500 ${fs}px ${fontFamily}`;
     ctx.fillStyle = theme.text;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    const textY = ry + rowH * 0.34;
-    ctx.fillText(meta.label, rx, textY);
-
-    ctx.font = `600 ${Math.max(8.5, 9.6 * u * textScale)}px ${MONO_TYPEFACE}`;
-    ctx.fillStyle = theme.primaryInk;
-    ctx.textAlign = 'right';
-    const valText = compare ? `${valA.toFixed(2)} / ${(paramsB[meta.key] ?? 0).toFixed(2)}` : valA.toFixed(2);
-    ctx.fillText(valText, rx + colW, textY);
+    const maxLblW = Math.max(18 * u, colW - valW - 6 * u);
+    ctx.fillText(fitTextEllipsis(ctx, meta.label, maxLblW), rx, textY);
 
     const barY = ry + rowH * 0.7;
     const barH = Math.max(3.5, 5 * u);

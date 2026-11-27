@@ -26,8 +26,9 @@ def edit_limits(bridge):
     for index, name in enumerate(M27_NAMES):
         low, high = float(M27_MIN[index]), float(M27_MAX[index])
         if name == "F0":
-            low = 60.0
-        elif name == "PR":
+            fields.append({"key": name, "index": index, "min": 0.0, "exclusiveMin": True, "max": None})
+            continue
+        if name == "PR":
             low, high = 0.0, 1600.0
         high = min(high, _APP_MAX.get(name, high))
         fields.append({"key": name, "index": index, "min": low, "max": high})
@@ -70,8 +71,13 @@ def apply_keyframes(baseline, keyframes, limits):
             field = fields[name]
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise FrameEditError(name, f"{name} 必须是有限数值")
-            low, high = field["min"], field["max"]
-            if not low <= value <= high:
+            low, high = field["min"], field.get("max")
+            excl = bool(field.get("exclusiveMin"))
+            below = (value <= low) if excl else (value < low)
+            above = (high is not None) and (value > high)
+            if below or above:
+                if high is None:
+                    raise FrameEditError(name, f"{name} 必须大于 {low:g}", {"min": low, "exclusiveMin": excl}, value)
                 raise FrameEditError(name, f"{name} 必须在 {low:g}–{high:g} 之间",
                                      {"min": low, "max": high}, value)
             index = field["index"]

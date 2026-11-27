@@ -1,4 +1,5 @@
 import { SAMPLE_RATE_HZ, type TractParamName } from '@vocalcut/core';
+import { defaultVtlTransport, type VtlBatchContoursResponse } from '@vocalcut/model-adapters';
 import {
   DEFAULT_TRACT_EXTRAS,
   cloneTractExtras,
@@ -424,39 +425,22 @@ async function fetchBatchContoursCached(
   const key = JSON.stringify(payload);
   let p = batchContourCache.get(key);
   if (!p) {
-    p = fetch('/api/vtl/batch-contours', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(30_000),
-      body: key,
-    })
-      .then(async (resp) => {
-        if (!resp.ok) return null;
-        const data = (await resp.json()) as {
-          ok?: boolean;
-          parts?: string[];
-          part_sizes?: number[];
-          items?: Array<{
-            pts: number[];
-            nasal: number;
-            lm: number[];
-            amin_cm2: number;
-            f1_hz: number;
-            f2_hz: number;
-            f3_hz: number;
-          }>;
-        };
-        if (!data.ok || !Array.isArray(data.parts) || !Array.isArray(data.part_sizes) || !Array.isArray(data.items)) {
+    p = defaultVtlTransport
+      .requestBatchContours<VtlBatchContoursResponse>(payload, { timeoutMs: 30_000 })
+      .then((res) => {
+        if (!res.ok) return null;
+        const data = res.value;
+        if (!Array.isArray(data.parts) || !Array.isArray(data.part_sizes) || !Array.isArray(data.items)) {
           return null;
         }
         return data.items.map((item) => ({
-          parts: splitM27TractParts(item.pts, data.parts!, data.part_sizes!),
+          parts: splitM27TractParts(item.pts, data.parts, data.part_sizes),
           lm: item.lm ?? [],
           nasal: item.nasal ?? 0,
-          f1_hz: Math.round(item.f1_hz),
-          f2_hz: Math.round(item.f2_hz),
-          f3_hz: Math.round(item.f3_hz),
-          amin_cm2: item.amin_cm2,
+          f1_hz: Math.round(item.f1_hz ?? 0),
+          f2_hz: Math.round(item.f2_hz ?? 0),
+          f3_hz: Math.round(item.f3_hz ?? 0),
+          amin_cm2: item.amin_cm2 ?? 0,
         }));
       })
       .catch(() => null);

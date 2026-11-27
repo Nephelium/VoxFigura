@@ -1,5 +1,6 @@
 """Read the user's local IPA exports and precomputed trajectories by indexed ID."""
 
+import copy
 import json
 from pathlib import Path
 import re
@@ -10,6 +11,33 @@ LIBRARY = Path(__file__).resolve().parent / "reference_library"
 NEURAL_CACHE = Path(__file__).resolve().parents[1] / ".cache" / "ipa-neural-lite"
 REFERENCE_ROUTE = re.compile(r"/models/ipa-references/([A-Za-z0-9_-]+)/(audio|animation|reconstruction|bundle|bundle-video)$")
 _NEURAL_CACHE_LOCK = threading.Lock()
+_PLAYBACK_INDEX_LOCK = threading.Lock()
+_PLAYBACK_INDEX_CACHE: tuple[object, list[dict]] | None = None
+
+
+def _path_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _playback_index_fingerprint() -> tuple:
+    return (
+        str(LIBRARY),
+        _path_stamp(LIBRARY / "index.json"),
+        _path_stamp(LIBRARY / "trill-demos" / "index.json"),
+        _path_stamp(LIBRARY / "textgrids"),
+        _path_stamp(LIBRARY / "recordings"),
+        _path_stamp(LIBRARY / "microphone"),
+    )
+
+
+def _clear_playback_index_cache() -> None:
+    global _PLAYBACK_INDEX_CACHE
+    with _PLAYBACK_INDEX_LOCK:
+        _PLAYBACK_INDEX_CACHE = None
 
 
 def index():
@@ -51,6 +79,12 @@ def _trill_fallback_meta(track_path):
 
 
 def playback_index():
+    global _PLAYBACK_INDEX_CACHE
+    fingerprint = _playback_index_fingerprint()
+    with _PLAYBACK_INDEX_LOCK:
+        if _PLAYBACK_INDEX_CACHE is not None and _PLAYBACK_INDEX_CACHE[0] == fingerprint:
+            return copy.deepcopy(_PLAYBACK_INDEX_CACHE[1])
+
     from ipa_materials import material_times
 
     items = []
@@ -71,6 +105,9 @@ def playback_index():
             )
         else:
             items.append(dict(entry))
+
+    with _PLAYBACK_INDEX_LOCK:
+        _PLAYBACK_INDEX_CACHE = (fingerprint, copy.deepcopy(items))
     return items
 
 def poses():

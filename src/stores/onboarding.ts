@@ -13,6 +13,12 @@ import {
   type TourStep,
 } from '@/data/onboarding-tours';
 import { selectWorkbenchNav, WORKBENCH_NAV_ITEMS } from '@/data/workbench-nav';
+import {
+  cardDemoNoticeOpen,
+  cardStudioOpen,
+  closeCardStudio,
+  openCardStudio,
+} from '@/components/phonetic-card/session';
 import type { WorkbenchStore } from '@/stores/workbench';
 
 const STORAGE_KEY = 'vc.onboarding.v1';
@@ -133,10 +139,16 @@ function createOnboardingStore(): OnboardingStore {
     if (
       store.activeOverlay.value !== 'none' ||
       store.activeModuleGuide.value !== null ||
-      store.exportModalWorkspace.value !== null ||
       store.referencesModalOpen.value ||
-      store.styleLabOpen.value
+      store.styleLabOpen.value ||
+      cardDemoNoticeOpen.value
     ) {
+      return null;
+    }
+    if (cardStudioOpen.value || store.exportModalWorkspace.value === 'explore') {
+      return 'card';
+    }
+    if (store.exportModalWorkspace.value !== null) {
       return null;
     }
     return resolveCurrentWorkspacePageId(store);
@@ -172,24 +184,36 @@ function createOnboardingStore(): OnboardingStore {
     store.closeOverlay();
     store.referencesModalOpen.value = false;
     store.styleLabOpen.value = false;
-    if (store.exportModalWorkspace.value) {
-      store.closeExportModal();
-    }
 
-    const navItem = WORKBENCH_NAV_ITEMS.find((item) => item.id === pageId);
-    if (navItem) {
-      selectWorkbenchNav(store, navItem);
+    if (pageId === 'card') {
+      cardDemoNoticeOpen.value = false;
+      if (store.exportModalWorkspace.value && store.exportModalWorkspace.value !== 'explore') {
+        store.closeExportModal();
+      }
+      if (!cardStudioOpen.value && store.exportModalWorkspace.value !== 'explore') {
+        openCardStudio(resolveCurrentWorkspacePageId(store), { suppressDemoNotice: true });
+      }
+    } else {
+      closeCardStudio();
+      if (store.exportModalWorkspace.value) {
+        store.closeExportModal();
+      }
+      const navItem = WORKBENCH_NAV_ITEMS.find((item) => item.id === pageId);
+      if (navItem) {
+        selectWorkbenchNav(store, navItem);
+      }
     }
 
     if (typeof window === 'undefined') {
       startTour(pageId);
       return;
     }
+    const delayMs = pageId === 'card' ? 240 : 180;
     window.requestAnimationFrame(() => {
       navTimer = window.setTimeout(() => {
         navTimer = undefined;
         startTour(pageId);
-      }, 180);
+      }, delayMs);
     });
   }
 

@@ -1,4 +1,4 @@
-import { F0_LIMIT_HZ, PRESSURE_LIMIT_PA } from '../../../packages/core-ts/src/types';
+import { PRESSURE_LIMIT_PA } from '../../../packages/core-ts/src/types';
 import { tonicMidi } from '@vocalcut/g2p';
 import { VTL_PARAM_META, type WorkbenchCommand } from '@/stores/workbench';
 import { readTimeline } from '@/components/studio/nle-timeline';
@@ -11,6 +11,7 @@ import {
 interface Field {
   type: 'number' | 'string' | 'boolean';
   minimum?: number;
+  exclusiveMinimum?: number;
   maximum?: number;
   enum?: readonly string[];
   maxLength?: number;
@@ -74,20 +75,28 @@ const tools: Record<string, EditorTool> = {
   compile_score: {
     description:
       '把生成的简谱 score 或已导入简谱的 asset_id 编译到指定合成片段，二选一（省略 clip_id 时在编曲页默认使用当前编曲片段，否则使用当前活动片段）。' +
-      '若当前片段歌词为空或需修改歌词，可通过 lyrics 传入普通话、辞书英语、假名或方括号 IPA；简谱音组数须严格等于歌词音节数（英语多音节词按拆分后的音节数计，请先用 project_summary 确认 syllable_count 与音节列表）。' +
-      '采用通用简谱语法：1–7 基本音级，0 休止符，- 增时线（每条加一拍）；后置下划线 _ 减半时值（八分音符 5_，十六分音符 5__ 或 5=），. 附点延长半拍；' +
-      "后置单引号 ' 升八度（1'），后置逗号 , 降八度（5,），前置 # / b 升降半音；" +
-      '圆括号 (1 2) 一字多音连音线（括号算作 1 个歌词音节对位组），小节线 | 可选，支持力度标记 p, mp, mf, f, ff；' +
-      "同时兼容旧式 / 减半与 +/- 八度写法，推荐优先输出标准通用简谱（如 5_ 6_ 1' 6 | 5 3 (2_ 1_) -）。",
+      '支持五种记谱法（通过 notation 指定，默认 je）：' +
+      '1) je（JE 谱，默认）：() 低八度、[1] 高八度、[[1]] 倍高、#4/b7 升降，/ 减半拍、. 附点、- 增时、:N 精确拍；' +
+      "2) sparks-nmn（Sparks NMN DSL）：1'/6, 八度、(1 2) 减时分组；" +
+      "3) jianpu-ly（LilyPond 简谱）：q/s/d/h 时值前缀、1'/6, 八度、~ 延音、3[...] 三连音；" +
+      "4) jianpu-player：前置 '/. 八度、(1 2)_ 减时、[1 3 5] 和弦、{a;b} 多声部；" +
+      "5) fanqie（番茄简谱 .jps）：1'/6, 八度、/ 减时、- 延拍、&f 力度。旧版自定义语法已彻底废除。" +
+      '所有记谱法统一用书名号《...》包裹每个歌词字/音节对应的音符（一字多音拖腔写在同一组《...》内，{}、[]、() 留给各记谱法原生语法，括号外为休止或器乐音符）。' +
+      '强烈建议直接采用带字内联写法（如 JE 谱：汉《[3]/ [2]/》 皇《[1]/ 6/》 重《[1]/ [2]/》），也可分开传入 lyrics 与纯《...》简谱；音节组数须与歌词音节数一致（可先调 project_summary 确认 active_clip_notation 与 syllable_count）。',
     fields: {
       clip_id: { ...identifier, description: '目标合成乐句片段 ID；省略时在编曲页优先取当前编曲片段' },
-      score: { type: 'string', maxLength: 3000, description: "通用简谱文本，如 5_ 6_ 1' 6 | 5 3 (2_ 1_) -" },
+      notation: {
+        type: 'string',
+        enum: ['je', 'sparks-nmn', 'jianpu-ly', 'jianpu-player', 'fanqie'],
+        description: '简谱记谱法，默认 je（JE 谱）',
+      },
+      score: { type: 'string', maxLength: 3000, description: '简谱文本，每字音高用《...》包裹，推荐带字写法如 汉《[3]/ [2]/》 皇《[1]/ 6/》' },
       asset_id: { ...identifier, description: '已导入简谱素材 ID（与 score 二选一）' },
-      lyrics: { type: 'string', maxLength: 1200, description: '歌词文本；当前片段无歌词或需替换歌词时传入' },
-      tonic: { type: 'string', enum: Object.keys(tonicMidi), description: '主音，如 C3、D3、G3、C4' },
+      lyrics: { type: 'string', maxLength: 1200, description: '歌词文本；若 score 未写带字内联歌词且当前片段无歌词时传入' },
+      tonic: { type: 'string', enum: Object.keys(tonicMidi), description: '主音，如 C3、D3、G3、B2' },
       auto_audition: { type: 'boolean', description: '当用户明确要求编曲后直接合成人声试听时设为 true' },
     },
-    optional: ['clip_id', 'score', 'asset_id', 'lyrics', 'tonic', 'auto_audition'],
+    optional: ['clip_id', 'notation', 'score', 'asset_id', 'lyrics', 'tonic', 'auto_audition'],
     command: compileScore,
   },
   stage_timeline: {
@@ -107,8 +116,8 @@ const tools: Record<string, EditorTool> = {
     fields: { asset_id: identifier, at_ms: milliseconds }, optional: ['at_ms'], command: placeMedia,
   },
   set_control_f0: {
-    description: '修改当前声门控制基频，单位 Hz。',
-    fields: { f0_hz: { type: 'number', minimum: F0_LIMIT_HZ.min, maximum: F0_LIMIT_HZ.max } },
+    description: '修改当前声门控制基频，单位 Hz（须大于 0）。',
+    fields: { f0_hz: { type: 'number', exclusiveMinimum: 0 } },
     command: ({ f0_hz }) => ({ type: 'f0.set_targets', payload: { f0_hz } }),
   },
   set_pressure: {
@@ -123,7 +132,7 @@ const tools: Record<string, EditorTool> = {
       const clip = project.clips[resolveActiveClipId(store, project)];
       const syllable_id = store.selectedSyllableId.value;
       if (!clip?.syllables[syllable_id]) throw new Error('请先在声道工作台选中音节');
-      return { type: 'artic.set_pose', payload: { clip_id: clip.id, syllable_id, delta: { [String(parameter)]: value } } };
+      return { type: 'artic.set_pose', payload: { clip_id: clip.id, syllable_id, params: { [String(parameter)]: value } } };
     },
   },
   set_tempo: {
@@ -185,6 +194,7 @@ async function readProjectSummary({ store, project: p, playheadSmp }: ToolContex
     active_clip_kind: activeClip?.kind,
     active_clip_variant: activeClip?.active_variant,
     active_clip_lyrics: activeClipLyrics,
+    active_clip_notation: activeClip?.source?.score_notation ?? 'je',
     active_clip_tonic: activeClip?.source?.score_tonic,
     active_clip_score: activeClip?.source?.score?.slice(0, 600),
     syllable_count: syllableCount,
@@ -216,7 +226,9 @@ export async function prepareToolCall(name: string, json: string, context: ToolC
     const invalidString = typeof value === 'string' &&
       ((field.enum && !field.enum.includes(value)) || (field.maxLength !== undefined && value.length > field.maxLength));
     const invalidNumber = typeof value === 'number' && (!Number.isFinite(value) || (field.integer && !Number.isInteger(value)) ||
-      (field.minimum !== undefined && value < field.minimum) || (field.maximum !== undefined && value > field.maximum));
+      (field.minimum !== undefined && value < field.minimum) ||
+      (field.exclusiveMinimum !== undefined && value <= field.exclusiveMinimum) ||
+      (field.maximum !== undefined && value > field.maximum));
     if (typeof value !== field.type || invalidString || invalidNumber) throw new Error('工具参数无效：' + key);
   }
   return tool.command ? { command: await tool.command(args, context) } : { data: await tool.read?.(args, context) };

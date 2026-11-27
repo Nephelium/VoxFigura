@@ -179,10 +179,39 @@ interface ChartTheme {
   danger: string;
   warning: string;
   lineWidth: number;
+  vowelUnroundedRgb: string;
+  vowelUnroundedText: string;
+  vowelRoundedRgb: string;
+  vowelRoundedText: string;
+}
+
+function cssColorToRgbTriplet(color: string, fallbackRgb: string): string {
+  const s = color.trim();
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  if (hex) {
+    const h = hex[1].length === 3 ? [...hex[1]].map((c) => c + c).join('') : hex[1];
+    return `${parseInt(h.slice(0, 2), 16)}, ${parseInt(h.slice(2, 4), 16)}, ${parseInt(h.slice(4, 6), 16)}`;
+  }
+  const nums = s.match(/[\d.]+/g);
+  if (nums && nums.length >= 3) {
+    return `${Math.round(Number(nums[0]))}, ${Math.round(Number(nums[1]))}, ${Math.round(Number(nums[2]))}`;
+  }
+  return fallbackRgb;
+}
+
+let cachedChartTheme: ChartTheme | null = null;
+let cachedChartThemeAt = 0;
+let cachedChartThemeSig = '';
+
+export function invalidateChartThemeCache(): void {
+  cachedChartTheme = null;
+  cachedChartThemeAt = 0;
+  cachedChartThemeSig = '';
 }
 
 function readChartTheme(): ChartTheme {
   if (typeof window === 'undefined') {
+    const lightVowel = VOWEL_ROUNDING_COLORS.light;
     return {
       isDark: false,
       panel: '#ffffff',
@@ -199,14 +228,26 @@ function readChartTheme(): ChartTheme {
       danger: '#cf222e',
       warning: '#9a6700',
       lineWidth: 1.5,
+      vowelUnroundedRgb: lightVowel.unroundedRgb,
+      vowelUnroundedText: lightVowel.unroundedText,
+      vowelRoundedRgb: lightVowel.roundedRgb,
+      vowelRoundedText: lightVowel.roundedText,
     };
   }
   const root = document.documentElement;
+  const sig = `${root.getAttribute('data-mode') ?? ''}|${root.getAttribute('data-theme') ?? ''}|${root.getAttribute('data-palette') ?? ''}|${root.getAttribute('data-style') ?? ''}|${root.style.cssText.length}`;
+  const now = performance.now();
+  if (cachedChartTheme && sig === cachedChartThemeSig && now - cachedChartThemeAt < 600) {
+    return cachedChartTheme;
+  }
   const cs = getComputedStyle(root);
   const read = (k: string, fb: string) => cs.getPropertyValue(k).trim() || fb;
   const isDark = root.getAttribute('data-mode') === 'dark' || root.getAttribute('data-theme') === 'dark';
+  const fallbackVowel = isDark ? VOWEL_ROUNDING_COLORS.dark : VOWEL_ROUNDING_COLORS.light;
   const teal = read('--chart-series', isDark ? '#5eead4' : '#297c6b');
-  return {
+  const unroundedRaw = cs.getPropertyValue('--vowel-unrounded').trim();
+  const roundedRaw = cs.getPropertyValue('--vowel-rounded').trim();
+  cachedChartTheme = {
     isDark,
     panel: read('--chart-panel', isDark ? '#181b22' : '#fffef9'),
     text: read('--text', isDark ? '#e6edf7' : '#202020'),
@@ -222,15 +263,32 @@ function readChartTheme(): ChartTheme {
     danger: read('--danger', isDark ? '#f87171' : '#cf222e'),
     warning: read('--warning', isDark ? '#fbbf24' : '#9a6700'),
     lineWidth: Number(read('--chart-line', '1.65')) || 1.65,
+    vowelUnroundedRgb: unroundedRaw
+      ? cssColorToRgbTriplet(unroundedRaw, fallbackVowel.unroundedRgb)
+      : fallbackVowel.unroundedRgb,
+    vowelUnroundedText: read('--vowel-unrounded-text', fallbackVowel.unroundedText),
+    vowelRoundedRgb: roundedRaw
+      ? cssColorToRgbTriplet(roundedRaw, fallbackVowel.roundedRgb)
+      : fallbackVowel.roundedRgb,
+    vowelRoundedText: read('--vowel-rounded-text', fallbackVowel.roundedText),
   };
+  cachedChartThemeSig = sig;
+  cachedChartThemeAt = now;
+  return cachedChartTheme;
 }
 
-function setupCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number } | null {
+function setupCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D; w: number; h: number; dpr: number } | null {
   const scale = getCurrentPageScale();
-  const rect = canvas.getBoundingClientRect();
-  const w = Math.max(72, Math.round(canvas.clientWidth || rect.width / scale || 200));
-  const h = Math.max(60, Math.round(canvas.clientHeight || rect.height / scale || 110));
-  const dpr = Math.min(2.25, window.devicePixelRatio || 1);
+  let cw = canvas.clientWidth;
+  let ch = canvas.clientHeight;
+  if (!cw || !ch) {
+    const rect = canvas.getBoundingClientRect();
+    cw = cw || rect.width / scale;
+    ch = ch || rect.height / scale;
+  }
+  const w = Math.max(72, Math.round(cw || 200));
+  const h = Math.max(60, Math.round(ch || 110));
+  const dpr = Math.min(3, (window.devicePixelRatio || 1) * Math.max(1, scale));
   const pw = Math.round(w * dpr);
   const ph = Math.round(h * dpr);
   if (canvas.width !== pw || canvas.height !== ph) {
@@ -240,7 +298,7 @@ function setupCanvas(canvas: HTMLCanvasElement): { ctx: CanvasRenderingContext2D
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, w, h };
+  return { ctx, w, h, dpr };
 }
 
 const AXIS_LEFT = 29;
@@ -496,6 +554,7 @@ export function drawPtbAreaChart(
     ctx.strokeStyle = theme.wall;
     ctx.lineWidth = 1.15;
     ctx.stroke();
+    ctx.setLineDash([]);
 
     // Selected section vertical cursor line + dot
     if (selected) {
@@ -599,9 +658,11 @@ export function drawPtbSpectrumChart(
   const db = points.map(p => p.db);
   const ymax = Math.ceil(Math.max(0, ...db) / 10) * 10;
   const ymin = Math.min(ymax - 10, Math.floor(Math.min(0, ...db) / 10) * 10);
-  const { x, y, pad } = drawGridFrame(ctx, w, h, maxFreqHz, ymin, ymax, theme, value =>
-    value >= 1000 ? `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 1)}k` : '0 Hz', 'dB', fontScale,
-  );
+  const { x, y, pad } = drawGridFrame(ctx, w, h, maxFreqHz, ymin, ymax, theme, value => {
+    if (value <= 0) return '0 Hz';
+    if (value >= 1000) return `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 1)} kHz`;
+    return `${Math.round(value)} Hz`;
+  }, 'dB', fontScale);
 
   if (points.length > 1) {
     const line = new Path2D();
@@ -624,9 +685,54 @@ export function drawPtbSpectrumChart(
     ctx.stroke(line);
   }
 
-  // Antiformant zeros (Z1, Z2...): prominent dashed vertical marker + inverted triangle + frequency badge (T-27)
+  const plotH = Math.max(20, h - pad.t - pad.b);
+  const badgeH = Math.round(11 * Math.max(0.9, fontScale));
+  const rowStep = badgeH + 2;
+  const maxPeakRows = plotH >= 64 ? 3 : plotH >= 44 ? 2 : 1;
+  const maxZeroRows = plotH >= 68 ? 2 : 1;
+
+  // Draw Formant/Pole peaks (top-down) first so we know their lowest occupied Y
+  const labelColor = nasalOpen ? theme.warning : theme.accent;
+  const occupied = new Array<number>(maxPeakRows).fill(0);
+  let peakLowestY = pad.t;
+  peaks.forEach((hz, i) => {
+    const fx = x(hz);
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = labelColor;
+    ctx.globalAlpha = .68;
+    ctx.lineWidth = .9;
+    ctx.beginPath();
+    ctx.moveTo(fx, pad.t);
+    ctx.lineTo(fx, h - pad.b);
+    ctx.stroke();
+    ctx.restore();
+
+    const text = `${prefix}${i + 1}`;
+    ctx.font = monoFont(700, 8.5, fontScale);
+    const width = ctx.measureText(text).width + 7;
+    const bx = Math.max(pad.l + 1, Math.min(w - pad.r - width, fx - width * 0.5));
+    const row = occupied.findIndex(right => right < bx);
+    if (row < 0) return;
+    occupied[row] = bx + width + 3;
+    const by = pad.t + 2 + row * rowStep;
+    peakLowestY = Math.max(peakLowestY, by + badgeH + 2);
+    ctx.fillStyle = theme.panel;
+    ctx.strokeStyle = labelColor;
+    ctx.lineWidth = 0.95;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, width, badgeH, 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = labelColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, bx + width / 2, by + badgeH * 0.54);
+  });
+
+  // Antiformant zeros (Z1, Z2...): prominent dashed vertical marker + inverted triangle + bottom-up badge
   const zeroColor = theme.danger;
-  const zeroOccupied = [0, 0];
+  const zeroOccupied = new Array<number>(maxZeroRows).fill(0);
   zerosList.forEach((zero, i) => {
     const zx = x(zero.f_hz);
     const zyRaw = y(zero.db);
@@ -663,54 +769,20 @@ export function drawPtbSpectrumChart(
     const bx = Math.max(pad.l + 1, Math.min(w - pad.r - badgeW, zx - badgeW * 0.5));
     const row = zeroOccupied.findIndex(right => right < bx);
     if (row < 0) return;
+    const by = h - pad.b - badgeH - 2 - row * rowStep;
+    if (by < peakLowestY) return;
     zeroOccupied[row] = bx + badgeW + 3;
-    const by = Math.max(pad.t + 14, h - pad.b - 13 - row * 12);
     ctx.fillStyle = theme.panel;
     ctx.strokeStyle = zeroColor;
     ctx.lineWidth = 0.95;
     ctx.beginPath();
-    ctx.roundRect(bx, by, badgeW, 11, 2);
+    ctx.roundRect(bx, by, badgeW, badgeH, 2);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = zeroColor;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, bx + badgeW / 2, by + 5.8);
-  });
-
-  const labelColor = nasalOpen ? theme.warning : theme.accent;
-  const occupied = [0, 0, 0];
-  peaks.forEach((hz, i) => {
-    const fx = x(hz);
-    ctx.save();
-    ctx.setLineDash([2, 3]);
-    ctx.strokeStyle = labelColor;
-    ctx.globalAlpha = .68;
-    ctx.lineWidth = .9;
-    ctx.beginPath();
-    ctx.moveTo(fx, pad.t);
-    ctx.lineTo(fx, h - pad.b);
-    ctx.stroke();
-    ctx.restore();
-
-    const text = `${prefix}${i + 1}`;
-    ctx.font = monoFont(700, 8.5, fontScale);
-    const width = ctx.measureText(text).width + 7;
-    const bx = Math.max(pad.l + 1, Math.min(w - pad.r - width, fx - width * 0.5));
-    const row = occupied.findIndex(right => right < bx);
-    if (row < 0) return;
-    occupied[row] = bx + width + 3;
-    const by = pad.t + 2 + row * 12;
-    ctx.fillStyle = theme.panel;
-    ctx.strokeStyle = labelColor;
-    ctx.beginPath();
-    ctx.roundRect(bx, by, width, 11, 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = labelColor;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, bx + width / 2, by + 6);
+    ctx.fillText(text, bx + badgeW / 2, by + badgeH * 0.54);
   });
 
   return { prefix, peaks, zeros };
@@ -831,11 +903,11 @@ export function paintPtbSectionChart(
     ctx.font = `600 ${9 * fontScale}px "Segoe UI", "PingFang SC", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('气道闭塞 0 cm²', centerX, centerY);
+    ctx.fillText('气道闭塞 0 cm²', centerX, Math.min(centerY, h - 22));
   }
 
-  // Bottom-left 1 cm physical calibration bar (exact PTB style)
-  if (scale > 4) {
+  // Bottom-left 1 cm physical calibration bar (exact PTB style, clears right-side readout)
+  if (scale > 4 && 6 + scale + 28 < w - 4) {
     ctx.strokeStyle = theme.muted;
     ctx.fillStyle = theme.muted;
     ctx.lineWidth = 1.1;
@@ -1031,7 +1103,8 @@ export function panVowelSpaceAxes(
       return logVowelViewRange(span, low + shift * span);
     }
     const span = axis.max - axis.min;
-    return vowelViewRange(span, axis.min + shift * span);
+    const nextMin = Math.max(0, Math.min(Math.max(0, 12000 - span), axis.min + shift * span));
+    return vowelViewRange(span, nextMin);
   };
   return {
     f1: pan(axes.f1, -dyPx / Math.max(20, plotH)),
@@ -1074,6 +1147,14 @@ export function vowelAxisTicks(axis: VowelAxisSpec, scale: VowelCoordinateScale,
 
 const VOWEL_TRAIL_WINDOW_MS = 10000;
 
+interface VowelBackdropCache {
+  key: string;
+  references: VowelReferencePoint[];
+  canvas: HTMLCanvasElement;
+  marks: VowelSpaceLayout['marks'];
+}
+const vowelBackdropCache = new WeakMap<HTMLCanvasElement, VowelBackdropCache>();
+
 export function drawPtbVowelSpace(
   canvas: HTMLCanvasElement | null,
   opts: VowelSpaceRenderOptions,
@@ -1081,13 +1162,18 @@ export function drawPtbVowelSpace(
   if (!canvas) return null;
   const setup = setupCanvas(canvas);
   if (!setup) return null;
-  const { ctx, w, h } = setup;
+  const { ctx, w, h, dpr } = setup;
   const theme = readChartTheme();
   const now = opts.now ?? performance.now();
   const scale = opts.scale ?? 'linear';
   const fontScale = opts.fontScale ?? 1;
 
-  const pad = { l: 30, r: 9, t: 17, b: 22 };
+  const pad = {
+    l: Math.round(32 * Math.max(0.95, fontScale)),
+    r: Math.round(18 * Math.max(0.95, fontScale)),
+    t: Math.round(18 * Math.max(0.95, fontScale)),
+    b: Math.round(28 * Math.max(0.95, fontScale)),
+  };
   const plotW = Math.max(30, w - pad.l - pad.r);
   const plotH = Math.max(24, h - pad.t - pad.b);
 
@@ -1111,141 +1197,264 @@ export function drawPtbVowelSpace(
   const mapX = (f2Hz: number) => pad.l + (1 - fractionF2(f2Hz)) * plotW;
   const mapY = (f1Hz: number) => pad.t + fractionF1(f1Hz) * plotH;
 
-  ctx.clearRect(0, 0, w, h);
+  // Cache static backdrop (axes, gridlines, 29 Gaussian peaks, relaxed IPA labels) on an offscreen canvas.
+  const backdropKey = [
+    canvas.width,
+    canvas.height,
+    dpr.toFixed(3),
+    scale,
+    fontScale.toFixed(3),
+    f1Axis.min.toFixed(2),
+    f1Axis.max.toFixed(2),
+    f1Axis.step.toFixed(2),
+    f2Axis.min.toFixed(2),
+    f2Axis.max.toFixed(2),
+    f2Axis.step.toFixed(2),
+    theme.isDark ? '1' : '0',
+    theme.panel,
+    theme.muted,
+    theme.grid,
+    theme.vowelUnroundedRgb,
+    theme.vowelUnroundedText,
+    theme.vowelRoundedRgb,
+    theme.vowelRoundedText,
+    opts.references.length,
+  ].join('|');
 
-  ctx.fillStyle = theme.panel;
-  ctx.fillRect(pad.l, pad.t, plotW, plotH);
+  let cached = vowelBackdropCache.get(canvas);
+  let marks: VowelSpaceLayout['marks'];
+  const canOffscreen = typeof document !== 'undefined' && typeof document.createElement === 'function';
 
-  // Axis captions
-  ctx.font = monoFont(600, 8.2, fontScale);
-  ctx.fillStyle = theme.muted;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText('F1 (Hz)', 3, 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText('F2 (Hz · 前 ← → 后)', pad.l + plotW * 0.5, h - 1);
+  if (cached && cached.key === backdropKey && cached.references === opts.references) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(cached.canvas, 0, 0);
+    ctx.restore();
+    marks = cached.marks;
+  } else {
+    let targetCtx = ctx;
+    let offCanvas: HTMLCanvasElement | null = null;
+    if (canOffscreen) {
+      offCanvas = cached?.canvas ?? document.createElement('canvas');
+      if (offCanvas.width !== canvas.width || offCanvas.height !== canvas.height) {
+        offCanvas.width = canvas.width;
+        offCanvas.height = canvas.height;
+      }
+      const octx = offCanvas.getContext('2d');
+      if (octx) {
+        octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        targetCtx = octx;
+      } else {
+        offCanvas = null;
+      }
+    }
 
-  // Adaptive Frequency Gridlines & Ticks
-  ctx.strokeStyle = theme.grid;
-  ctx.lineWidth = 0.8;
-  ctx.font = monoFont(500, 8.4, fontScale);
+    targetCtx.clearRect(0, 0, w, h);
+    targetCtx.fillStyle = theme.panel;
+    targetCtx.fillRect(pad.l, pad.t, plotW, plotH);
 
-  for (const hz of vowelAxisTicks(f2Axis, scale, plotW, 28 * fontScale)) {
-    const gx = mapX(hz);
-    ctx.beginPath();
-    ctx.moveTo(gx, pad.t);
-    ctx.lineTo(gx, pad.t + plotH);
-    ctx.stroke();
-    ctx.fillStyle = theme.muted;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(String(Math.round(hz)), gx, pad.t + plotH + 2);
+    // Axis captions
+    targetCtx.font = monoFont(600, 8.2, fontScale);
+    targetCtx.fillStyle = theme.muted;
+    targetCtx.textAlign = 'left';
+    targetCtx.textBaseline = 'top';
+    targetCtx.fillText('F1 (Hz)', 3, 2);
+    targetCtx.textAlign = 'center';
+    targetCtx.textBaseline = 'bottom';
+    targetCtx.fillText('F2 (Hz · 前 ← → 后)', pad.l + plotW * 0.5, h - 1);
+
+    // Adaptive Frequency Gridlines & Ticks
+    targetCtx.strokeStyle = theme.grid;
+    targetCtx.lineWidth = 0.8;
+    targetCtx.font = monoFont(500, 8.4, fontScale);
+
+    for (const hz of vowelAxisTicks(f2Axis, scale, plotW, 28 * fontScale)) {
+      const gx = mapX(hz);
+      targetCtx.beginPath();
+      targetCtx.moveTo(gx, pad.t);
+      targetCtx.lineTo(gx, pad.t + plotH);
+      targetCtx.stroke();
+      targetCtx.fillStyle = theme.muted;
+      targetCtx.textAlign = 'center';
+      targetCtx.textBaseline = 'top';
+      targetCtx.fillText(String(Math.round(hz)), gx, pad.t + plotH + 2);
+    }
+
+    for (const hz of vowelAxisTicks(f1Axis, scale, plotH, 17 * fontScale)) {
+      const gy = mapY(hz);
+      targetCtx.beginPath();
+      targetCtx.moveTo(pad.l, gy);
+      targetCtx.lineTo(pad.l + plotW, gy);
+      targetCtx.stroke();
+      targetCtx.fillStyle = theme.muted;
+      targetCtx.textAlign = 'right';
+      targetCtx.textBaseline = 'middle';
+      targetCtx.fillText(String(Math.round(hz)), pad.l - 3, gy);
+    }
+
+    // Clip plot interior for reference vowel hull & dots
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.rect(pad.l, pad.t, plotW, plotH);
+    targetCtx.clip();
+
+    const bySym = new Map(opts.references.filter(point => !point.nasal).map((r) => [vowelSymbolKey(r.symbol), r]));
+    const corners = ['i', 'u', 'ɑ', 'a']
+      .map((sym) => bySym.get(sym) ?? (sym === 'ɑ' ? bySym.get('ɔ') ?? bySym.get('o') : undefined))
+      .filter((v): v is VowelReferencePoint => Boolean(v));
+    if (corners.length >= 3) {
+      targetCtx.beginPath();
+      corners.forEach((c, idx) => {
+        const px = mapX(c.f2);
+        const py = mapY(c.f1);
+        if (idx === 0) targetCtx.moveTo(px, py);
+        else targetCtx.lineTo(px, py);
+      });
+      targetCtx.closePath();
+      targetCtx.globalAlpha = theme.isDark ? 0.26 : 0.22;
+      targetCtx.strokeStyle = theme.muted;
+      targetCtx.lineWidth = 0.85;
+      targetCtx.setLineDash([3, 3]);
+      targetCtx.stroke();
+      targetCtx.setLineDash([]);
+      targetCtx.globalAlpha = 1;
+    }
+
+    // Pass 1: Render clean, luminous 2D Gaussian radial density peaks
+    const peakRadius = Math.max(11.5, 13.8 * fontScale);
+    const visibleRefs: Array<{
+      refPt: VowelReferencePoint;
+      cx: number;
+      cy: number;
+      lx: number;
+      ly: number;
+      halfW: number;
+      halfH: number;
+      rounded: boolean;
+      labelText: string;
+      fontSize: number;
+    }> = [];
+
+    for (const refPt of opts.references) {
+      if (!inView(refPt)) continue;
+      const cx = mapX(refPt.f2);
+      const cy = mapY(refPt.f1);
+      const rounded = isRoundedVowelSymbol(refPt.symbol);
+      const rgb = rounded ? theme.vowelRoundedRgb : theme.vowelUnroundedRgb;
+      const peakAlpha = theme.isDark ? 0.46 : 0.38;
+      const grad = targetCtx.createRadialGradient(cx, cy, 0, cx, cy, peakRadius);
+      for (const [offset, weight] of VOWEL_GAUSSIAN_STOPS) {
+        grad.addColorStop(offset, `rgba(${rgb}, ${(peakAlpha * weight).toFixed(3)})`);
+      }
+      targetCtx.beginPath();
+      targetCtx.arc(cx, cy, peakRadius, 0, Math.PI * 2);
+      targetCtx.fillStyle = grad;
+      targetCtx.fill();
+      const labelText = formatVowelChartLabel(refPt.symbol);
+      const isCompound = labelText.length > 2;
+      const fontSize = (isCompound ? 9.4 : 11.2) * fontScale;
+      targetCtx.font = `600 ${fontSize}px "PTBIPAPlus", "PTB-Doulos", "Doulos SIL", serif`;
+      const halfW = Math.max(5.5 * fontScale, targetCtx.measureText(labelText).width * 0.5 + 1.5);
+      const halfH = fontSize * 0.52;
+      visibleRefs.push({
+        refPt,
+        cx,
+        cy,
+        lx: cx,
+        ly: cy,
+        halfW,
+        halfH,
+        rounded,
+        labelText,
+        fontSize,
+      });
+    }
+
+    const minX = pad.l + 2;
+    const maxX = pad.l + plotW - 2;
+    const minY = pad.t + 2;
+    const maxY = pad.t + plotH - 2;
+    for (let iter = 0; iter < 8; iter++) {
+      let anyOverlap = false;
+      for (let i = 0; i < visibleRefs.length; i++) {
+        const a = visibleRefs[i];
+        for (let j = i + 1; j < visibleRefs.length; j++) {
+          const b = visibleRefs[j];
+          const dx = b.lx - a.lx;
+          const dy = b.ly - a.ly;
+          const ox = a.halfW + b.halfW + 1.2 - Math.abs(dx);
+          const oy = a.halfH + b.halfH + 0.8 - Math.abs(dy);
+          if (ox > 0 && oy > 0) {
+            anyOverlap = true;
+            if (ox < oy) {
+              const push = ox * 0.52 * (dx >= 0 ? 1 : -1);
+              a.lx -= push;
+              b.lx += push;
+            } else {
+              const push = oy * 0.52 * (dy >= 0 ? 1 : -1);
+              a.ly -= push;
+              b.ly += push;
+            }
+          }
+        }
+        a.lx += (a.cx - a.lx) * 0.08;
+        a.ly += (a.cy - a.ly) * 0.08;
+        a.lx = Math.max(minX + a.halfW, Math.min(maxX - a.halfW, a.lx));
+        a.ly = Math.max(minY + a.halfH, Math.min(maxY - a.halfH, a.ly));
+      }
+      if (!anyOverlap) break;
+    }
+
+    marks = [];
+    targetCtx.save();
+    targetCtx.textAlign = 'center';
+    targetCtx.textBaseline = 'middle';
+    targetCtx.lineJoin = 'round';
+    targetCtx.miterLimit = 2;
+
+    for (const item of visibleRefs) {
+      const { refPt, cx, cy, lx, ly, rounded, labelText, fontSize } = item;
+      marks.push({ x: lx, y: ly, point: refPt });
+      const textCol = rounded ? theme.vowelRoundedText : theme.vowelUnroundedText;
+      if (Math.hypot(lx - cx, ly - cy) > 5) {
+        targetCtx.beginPath();
+        targetCtx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+        targetCtx.fillStyle = textCol;
+        targetCtx.globalAlpha = 0.55;
+        targetCtx.fill();
+      }
+      targetCtx.font = `600 ${fontSize}px "PTBIPAPlus", "PTB-Doulos", "Doulos SIL", serif`;
+
+      targetCtx.strokeStyle = theme.panel;
+      targetCtx.lineWidth = 2.6 * fontScale;
+      targetCtx.globalAlpha = 0.88;
+      targetCtx.strokeText(labelText, lx, ly);
+
+      targetCtx.fillStyle = textCol;
+      targetCtx.globalAlpha = 1;
+      targetCtx.fillText(labelText, lx, ly);
+    }
+    targetCtx.restore();
+    targetCtx.restore();
+
+    if (offCanvas) {
+      cached = { key: backdropKey, references: opts.references, canvas: offCanvas, marks };
+      vowelBackdropCache.set(canvas, cached);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(offCanvas, 0, 0);
+      ctx.restore();
+    }
   }
 
-  for (const hz of vowelAxisTicks(f1Axis, scale, plotH, 17 * fontScale)) {
-    const gy = mapY(hz);
-    ctx.beginPath();
-    ctx.moveTo(pad.l, gy);
-    ctx.lineTo(pad.l + plotW, gy);
-    ctx.stroke();
-    ctx.fillStyle = theme.muted;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(Math.round(hz)), pad.l - 3, gy);
-  }
-
-  // Clip plot interior for reference vowel hull, dots, trail & live dot
+  // Dynamic overlay: 10-second fading trajectory trail + live current formant bullseye
   ctx.save();
   ctx.beginPath();
   ctx.rect(pad.l, pad.t, plotW, plotH);
   ctx.clip();
 
-  // Airy quadrilateral outline connecting cardinal corners if present (i -> u -> ɑ/o -> a), without muddy fill
-  const bySym = new Map(opts.references.filter(point => !point.nasal).map((r) => [vowelSymbolKey(r.symbol), r]));
-  const corners = ['i', 'u', 'ɑ', 'a']
-    .map((sym) => bySym.get(sym) ?? (sym === 'ɑ' ? bySym.get('ɔ') ?? bySym.get('o') : undefined))
-    .filter((v): v is VowelReferencePoint => Boolean(v));
-  if (corners.length >= 3) {
-    ctx.beginPath();
-    corners.forEach((c, idx) => {
-      const px = mapX(c.f2);
-      const py = mapY(c.f1);
-      if (idx === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.closePath();
-    ctx.globalAlpha = theme.isDark ? 0.26 : 0.22;
-    ctx.strokeStyle = theme.muted;
-    ctx.lineWidth = 0.85;
-    ctx.setLineDash([3, 3]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-  }
-
-  // Pass 1: Render clean, luminous 2D Gaussian radial density peaks (Sky-Azure vs Iris-Violet)
-  const roundingPalette = theme.isDark ? VOWEL_ROUNDING_COLORS.dark : VOWEL_ROUNDING_COLORS.light;
-  const peakRadius = Math.max(11.5, 13.8 * fontScale);
-  const visibleRefs: Array<{
-    refPt: VowelReferencePoint;
-    cx: number;
-    cy: number;
-    rounded: boolean;
-    labelText: string;
-  }> = [];
-
-  for (const refPt of opts.references) {
-    if (!inView(refPt)) continue;
-    const cx = mapX(refPt.f2);
-    const cy = mapY(refPt.f1);
-    const rounded = isRoundedVowelSymbol(refPt.symbol);
-    const rgb = rounded ? roundingPalette.roundedRgb : roundingPalette.unroundedRgb;
-    const peakAlpha = theme.isDark ? 0.46 : 0.38;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, peakRadius);
-    for (const [offset, weight] of VOWEL_GAUSSIAN_STOPS) {
-      grad.addColorStop(offset, `rgba(${rgb}, ${(peakAlpha * weight).toFixed(3)})`);
-    }
-    ctx.beginPath();
-    ctx.arc(cx, cy, peakRadius, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-    visibleRefs.push({
-      refPt,
-      cx,
-      cy,
-      rounded,
-      labelText: formatVowelChartLabel(refPt.symbol),
-    });
-  }
-
-  // Pass 2: Center IPA glyph directly on each Gaussian peak (no separate dot/square clutter)
-  const marks: VowelSpaceLayout['marks'] = [];
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.miterLimit = 2;
-
-  for (const { refPt, cx, cy, rounded, labelText } of visibleRefs) {
-    marks.push({ x: cx, y: cy, point: refPt });
-    const isCompound = labelText.length > 2;
-    const fontSize = (isCompound ? 9.4 : 11.2) * fontScale;
-    ctx.font = `600 ${fontSize}px "PTBIPAPlus", "PTB-Doulos", "Doulos SIL", serif`;
-
-    // Crisp panel-colored text halo keeps closely spaced IPA glyphs effortless to read
-    ctx.strokeStyle = theme.panel;
-    ctx.lineWidth = 2.6 * fontScale;
-    ctx.globalAlpha = 0.88;
-    ctx.strokeText(labelText, cx, cy);
-
-    ctx.fillStyle = rounded ? roundingPalette.roundedText : roundingPalette.unroundedText;
-    ctx.globalAlpha = 1;
-    ctx.fillText(labelText, cx, cy);
-  }
-  ctx.restore();
-
-  // 10-second fading trajectory trail
   for (let i = 0; i < activeHistory.length; i++) {
     const p = activeHistory[i];
     if (!inView(p)) continue;
@@ -1268,7 +1477,6 @@ export function drawPtbVowelSpace(
   }
   ctx.globalAlpha = 1;
 
-  // Live Current Formant Bullseye (always matches bottom legend `.key-live` accent bullseye)
   if (current) {
     const lx = mapX(current.f2);
     const ly = mapY(current.f1);

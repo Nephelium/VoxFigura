@@ -2,6 +2,8 @@
 import { computed, ref } from 'vue';
 import { panelSnapshots } from '@/data/panel-snapshots';
 import { m27Session } from '@/components/research/m27-session';
+import { useWorkbenchStore } from '@/stores/workbench';
+import { readTimeline } from '@/components/studio/nle-timeline';
 import IconSvg from '@/components/common/IconSvg.vue';
 import type { CardPlaybackSourceId } from './playback-sources';
 import {
@@ -11,20 +13,30 @@ import {
   type CardModuleMeta,
 } from './layout-tree';
 
-const props = defineProps<{
-  selectedIds: readonly CardModuleId[];
-}>();
+const props = withDefaults(
+  defineProps<{
+    selectedIds: readonly CardModuleId[];
+    hasAnySlots?: boolean;
+  }>(),
+  {
+    hasAnySlots: false,
+  },
+);
 
 const emit = defineEmits<{
   (e: 'toggle', id: CardModuleId): void;
   (e: 'apply-preset', ids: CardModuleId[], source?: CardPlaybackSourceId): void;
   (e: 'drag-module-start', id: CardModuleId, ev: DragEvent): void;
+  (e: 'drag-module-end'): void;
 }>();
 
-const category = ref<CardModuleCategory>('all');
+const wb = useWorkbenchStore();
+type GalleryFilter = CardModuleCategory | 'selected';
+const category = ref<GalleryFilter>('all');
 
-const categories: ReadonlyArray<{ id: CardModuleCategory; label: string }> = [
+const categories: ReadonlyArray<{ id: GalleryFilter; label: string }> = [
   { id: 'all', label: '全部' },
+  { id: 'selected', label: '已选' },
   { id: 'explore', label: '声道声学' },
   { id: 'ipa-synth', label: '音标合成' },
   { id: 'reconstruct-mixer', label: '重建调音' },
@@ -47,7 +59,7 @@ const presets: ReadonlyArray<{ id: string; label: string; modules: CardModuleId[
   {
     id: 'ipa-recon',
     label: '音标+重建',
-    modules: ['ipa-wave-spec', 'ipa-lexicon'],
+    modules: ['ipa-wave-spec', 'ipa-lexicon', 'm27-reconstruct'],
   },
   {
     id: 'mixer-cont',
@@ -61,33 +73,82 @@ const presets: ReadonlyArray<{ id: string; label: string; modules: CardModuleId[
   },
 ];
 
-const visibleModules = computed<CardModuleMeta[]>(() =>
-  category.value === 'all' ? [...CARD_MODULES] : CARD_MODULES.filter((m) => m.category === category.value),
-);
+const SHORT_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  '国际音标表 Plus': '音标表',
+  '声道动态重建': '声道重建',
+  '发声调音台': '调音台',
+  '声道连续统': '连续统',
+  '方言与变调': '方言',
+};
+
+function shortSourceLabel(page: string): string {
+  return SHORT_SOURCE_LABELS[page] ?? page;
+}
+
+const visibleModules = computed<CardModuleMeta[]>(() => {
+  if (category.value === 'selected') {
+    const idSet = new Set(props.selectedIds);
+    return props.selectedIds
+      .map((id) => CARD_MODULES.find((m) => m.id === id))
+      .filter((m): m is CardModuleMeta => Boolean(m && idSet.has(m.id)));
+  }
+  return category.value === 'all'
+    ? [...CARD_MODULES]
+    : CARD_MODULES.filter((m) => m.category === category.value);
+});
 
 function orderIndex(id: CardModuleId): number {
   return props.selectedIds.indexOf(id);
 }
 
-function hasLiveData(id: CardModuleId): boolean {
+function moduleDataStatus(id: CardModuleId): { live: boolean; label: string; tip: string } {
   switch (id) {
     case 'ipa-wave-spec':
-    case 'ipa-lexicon':
-      return Boolean(panelSnapshots.ipa.value);
-    case 'synth-timeline':
-      return Boolean(panelSnapshots.synthesis.value?.audioBuffer || panelSnapshots.synthesis.value?.clip?.syllable_order.length);
+    case 'ipa-lexicon': {
+      const ipa = panelSnapshots.ipa.value;
+      return ipa
+        ? { live: true, label: '实录就绪', tip: `当前音标 [${ipa.symbol}] ${ipa.nameZh}` }
+        : { live: false, label: '示范音标', tip: '尚未在音标表点选，将展示示范音标参考' };
+    }
+    case 'synth-timeline': {
+      const syn = panelSnapshots.synthesis.value;
+      const clip = syn?.clip ?? wb.project.value.clips[wb.activeClipId.value];
+      const hasData = Boolean(syn?.audioBuffer || clip?.syllable_order.length);
+      return hasData
+        ? { live: true, label: '已有词句', tip: syn?.lyrics ? `当前词句：${syn.lyrics}` : '已加载当前合成标注轨道' }
+        : { live: false, label: '待录入', tip: '尚未输入合成词句，添加后将显示待录入占位' };
+    }
     case 'm27-reconstruct':
-      return m27Session.rows.value.length > 0;
-    case 'voice-mixer':
-      return Boolean(panelSnapshots.mixer.value?.outputBlob || panelSnapshots.mixer.value);
+      return m27Session.rows.value.length > 0
+        ? { live: true, label: '反演就绪', tip: `已反演 ${m27Session.rows.value.length} 帧 (50Hz)` }
+        : { live: false, label: '演示回退', tip: '尚未反演录音，将复用音标或当前声道轨迹' };
+    case 'voice-mixer': {
+      const mix = panelSnapshots.mixer.value;
+      const hasAudio = Boolean(mix?.outputBlob || mix?.inputBlob);
+      return hasAudio
+        ? { live: true, label: '调音就绪', tip: `已加载：${mix?.presetLabel || '发声调制'}` }
+        : { live: false, label: '包络预览', tip: '尚未生成调音成品，将显示当前曲线预览' };
+    }
     case 'continuum-grid':
-      return Boolean(panelSnapshots.continuum.value?.cells.length);
+      return panelSnapshots.continuum.value?.cells.length
+        ? { live: true, label: '矩阵就绪', tip: `已生成 ${panelSnapshots.continuum.value.cells.length} 格连续统` }
+        : { live: false, label: '预设步进', tip: '将按默认元音端点生成 5 步连续统' };
     case 'dialect-sandhi':
-      return Boolean(panelSnapshots.dialect.value?.tones.length);
+      return panelSnapshots.dialect.value?.tones.length
+        ? { live: true, label: '方言就绪', tip: `当前方言：${panelSnapshots.dialect.value.packName}` }
+        : { live: false, label: '示范调值', tip: '尚未配置方言沙盒，将显示内置方言调值' };
     case 'arranger-roll':
-      return Boolean(panelSnapshots.arranger.value?.notes.length);
+      return panelSnapshots.arranger.value?.notes.length
+        ? { live: true, label: '简谱就绪', tip: `${panelSnapshots.arranger.value.notes.length} 个音符 · ${panelSnapshots.arranger.value.bpm} BPM` }
+        : { live: false, label: '示范简谱', tip: '尚未编曲，将展示示范旋律片段' };
+    case 'stage-nle': {
+      const clips = readTimeline(wb.project.value, wb.activeClipId.value);
+      return clips.length > 0
+        ? { live: true, label: '轨道就绪', tip: `当前工程含 ${clips.length} 个多轨片段` }
+        : { live: false, label: '工程示意', tip: '当前时间线无额外素材片段' };
+    }
     default:
-      return true;
+      return { live: true, label: '实时联动', tip: '与当前声道与声学状态实时联动' };
   }
 }
 
@@ -98,6 +159,10 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
   }
   emit('drag-module-start', id, ev);
 }
+
+function onNativeDragEnd(): void {
+  emit('drag-module-end');
+}
 </script>
 
 <template>
@@ -107,7 +172,7 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
         <strong>模块元素库</strong>
         <span class="mono muted">已选 {{ selectedIds.length }} 项</span>
       </div>
-      <p class="gallery-sub muted">点击勾选或拖入右侧卡面，声道模型与各页模块均可自由增删。</p>
+      <p class="gallery-sub muted">点选增删或拖入右侧卡面，支持自由嵌套分栏与留白排版。</p>
 
       <div class="preset-heading">推荐组合</div>
       <div class="preset-strip" role="group" aria-label="推荐组合">
@@ -115,15 +180,15 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
           v-for="p in presets"
           :key="p.id"
           type="button"
-          class="preset-chip"
+          class="btn xs preset-chip"
           @click="emit('apply-preset', p.modules, p.source)"
         >
           {{ p.label }}
         </button>
         <button
           type="button"
-          class="preset-chip clear-chip"
-          :disabled="selectedIds.length === 0"
+          class="btn xs clear-chip"
+          :disabled="selectedIds.length === 0 && !hasAnySlots"
           @click="emit('apply-preset', [])"
         >
           清空
@@ -136,17 +201,20 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
           :key="c.id"
           type="button"
           role="tab"
-          class="cat-tab"
+          class="btn xs cat-tab"
           :class="{ active: category === c.id }"
           :aria-selected="category === c.id"
           @click="category = c.id"
         >
-          {{ c.label }}
+          {{ c.id === 'selected' ? `${c.label}(${selectedIds.length})` : c.label }}
         </button>
       </div>
     </div>
 
     <div class="gallery-list">
+      <div v-if="visibleModules.length === 0" class="gallery-empty muted">
+        当前分类下暂无模块，可切换回全部或点击上方推荐组合。
+      </div>
       <button
         v-for="mod in visibleModules"
         :key="mod.id"
@@ -154,9 +222,11 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
         class="mod-card"
         :class="{ selected: orderIndex(mod.id) >= 0 }"
         :aria-pressed="orderIndex(mod.id) >= 0"
+        :title="`${mod.title} · ${moduleDataStatus(mod.id).tip}`"
         draggable="true"
         @click="emit('toggle', mod.id)"
         @dragstart="onNativeDragStart(mod.id, $event)"
+        @dragend="onNativeDragEnd"
       >
         <!-- Vector Miniature Preview Thumbnail (Zero Emoji) -->
         <div class="mod-thumb" aria-hidden="true">
@@ -294,9 +364,16 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
         <div class="mod-info">
           <div class="mod-head-line">
             <strong class="mod-name">{{ mod.shortTitle }}</strong>
-            <span class="mod-page-tag" :class="{ live: hasLiveData(mod.id) }">{{ mod.sourcePage }}</span>
+            <span
+              class="mod-live-dot"
+              :class="{ live: moduleDataStatus(mod.id).live }"
+              :title="moduleDataStatus(mod.id).tip"
+            >
+              {{ moduleDataStatus(mod.id).label }}
+            </span>
           </div>
           <span class="mod-desc muted">{{ mod.desc }}</span>
+          <span class="mod-source-meta muted">{{ shortSourceLabel(mod.sourcePage) }}</span>
         </div>
 
         <span class="mod-check" aria-hidden="true">
@@ -351,58 +428,43 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
 }
 
 .preset-chip {
-  height: 26px;
+  justify-content: center;
   padding: 0 4px;
-  border-radius: var(--r-ctrl);
-  border: 1px solid var(--panel-border);
-  background: var(--selected);
-  color: var(--accent);
   font-size: 0.791667rem;
   font-weight: 600;
-  cursor: pointer;
-}
-.preset-chip:not(:disabled):hover {
-  border-color: var(--accent);
+  background: var(--selected);
+  color: var(--accent);
 }
 .clear-chip {
-  background: var(--ctrl-bg);
+  justify-content: center;
+  padding: 0 4px;
+  font-size: 0.791667rem;
   color: var(--muted);
-}
-.clear-chip:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 
 .cat-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   border-top: 1px solid var(--panel-border);
   padding-top: 8px;
 }
 
 .cat-tab {
-  height: 22px;
-  padding: 0 4px;
-  border-radius: var(--r-ctrl);
-  border: 1px solid var(--panel-border);
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.791667rem;
-  cursor: pointer;
+  flex: 1 1 30%;
+  justify-content: center;
+  padding: 0 5px;
+  font-size: 0.775rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.cat-tab:hover {
-  color: var(--text);
-  border-color: var(--border);
-}
-.cat-tab.active {
-  background: var(--selected);
-  color: var(--accent);
-  border-color: var(--accent);
-  font-weight: 600;
+
+.gallery-empty {
+  padding: 18px 10px;
+  text-align: center;
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 .gallery-list {
@@ -419,17 +481,18 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
 .mod-card {
   width: 100%;
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr) 20px;
+  grid-template-columns: 68px minmax(0, 1fr) 20px;
   align-items: center;
   gap: 8px;
   padding: 6px 7px;
   text-align: left;
   border-radius: var(--r-ctrl);
-  border: 1px solid var(--panel-border);
+  border: var(--border-w, 1px) solid var(--ctrl-border, var(--panel-border));
   background: var(--ctrl-bg);
+  box-shadow: var(--ctrl-shadow);
   color: var(--text);
   cursor: pointer;
-  transition: border-color 140ms ease, background-color 140ms ease;
+  transition: border-color var(--dur-fast) var(--ease-out-expo), background-color var(--dur-fast) var(--ease-out-expo);
 }
 
 .mod-card:hover {
@@ -438,14 +501,14 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
 
 .mod-card.selected {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--selected) 75%, var(--panel));
+  background: color-mix(in srgb, var(--selected) 78%, var(--panel));
 }
 
 .mod-thumb {
   position: relative;
-  width: 74px;
-  height: 47px;
-  border-radius: 4px;
+  width: 68px;
+  height: 44px;
+  border-radius: max(2px, calc(var(--r-ctrl) - 2px));
   overflow: hidden;
   color: var(--text);
 }
@@ -543,18 +606,40 @@ function onNativeDragStart(id: CardModuleId, ev: DragEvent): void {
   text-overflow: ellipsis;
 }
 
-.mod-page-tag {
+.mod-live-dot {
   flex: none;
-  font-size: 0.72rem;
-  padding: 0 4px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.7rem;
+  padding: 0 5px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--panel-border);
   color: var(--muted);
+  background: var(--panel);
 }
 
-.mod-page-tag.live {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--panel-border));
-  color: var(--accent);
+.mod-live-dot::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.mod-live-dot.live {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--panel-border));
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--panel));
+}
+
+.mod-live-dot.live::before {
+  background: var(--success);
+}
+
+.mod-source-meta {
+  font-size: 0.72rem;
+  opacity: 0.82;
 }
 
 .mod-desc {

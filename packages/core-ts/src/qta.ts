@@ -9,13 +9,14 @@
  *        (entry crossfade + 35 ms exit quadratic least-squares state feedback)
  *  - L4: Deterministic vibrato (cents, delayed attack & taper)
  *  - L5: Perturbation metadata (flutter executed in VTL source; never mutates F0_ctl)
- *  - L6: Strict 60..600 Hz guard (rejects out_of_range without silent clamping)
+ *  - L6: Positive finite Hz guard (rejects <= 0 or non-finite without silent clamping)
  */
 
 import {
-  F0_LIMIT_HZ,
   SAMPLE_RATE_HZ,
+  assertValidF0Hz,
   hzToSt,
+  isValidF0Hz,
   msToSamples,
   ok,
   outOfRange,
@@ -277,16 +278,17 @@ function raisedCosineWeight(tMs: number, startMs: number, endMs: number, feather
  */
 function fitPinExitState(
   pin: F0PinSegment,
+  sortedPoints: readonly F0PinSegment['points'][number][],
   fRefHz: number,
 ): QtaState {
   const fitWindowSmp = msToSamples(Math.max(20, Math.min(45, pin.exit_fit_ms || 35)));
   const tailStart = Math.max(pin.start_smp, pin.end_smp - fitWindowSmp);
-  const pts = [...pin.points]
-    .filter((p) => p.t_smp >= tailStart && p.t_smp <= pin.end_smp)
-    .sort((a, b) => a.t_smp - b.t_smp);
+  // Pin control points may include an explicit anchor right at `end_smp` to define
+  // exit continuity, so the tail fit window includes boundary points up to `end_smp`.
+  const pts = sortedPoints.filter((p) => p.t_smp >= tailStart && p.t_smp <= pin.end_smp);
 
   if (pts.length === 0) {
-    const last = pin.points[pin.points.length - 1];
+    const last = sortedPoints[sortedPoints.length - 1];
     return { y: last ? hzToSt(last.f0_hz, fRefHz) : 0, yp: 0, ypp: 0 };
   }
   if (pts.length === 1) {
@@ -347,24 +349,29 @@ function fitPinExitState(
   return { y: coef[0], yp, ypp };
 }
 
-function interpolatePinAt(pin: F0PinSegment, tSmp: number, fRefHz: number): number {
-  const pts = [...pin.points].sort((a, b) => a.t_smp - b.t_smp);
+function interpolateSortedPinPointsAt(
+  pts: readonly F0PinSegment['points'][number][],
+  tSmp: number,
+  fRefHz: number,
+): number {
   if (pts.length === 0) return 0;
   if (tSmp <= pts[0].t_smp) return hzToSt(pts[0].f0_hz, fRefHz);
   const last = pts[pts.length - 1];
   if (tSmp >= last.t_smp) return hzToSt(last.f0_hz, fRefHz);
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i];
-    const b = pts[i + 1];
-    if (tSmp >= a.t_smp && tSmp <= b.t_smp) {
-      const span = b.t_smp - a.t_smp;
-      const u = span > 0 ? (tSmp - a.t_smp) / span : 0;
-      const ya = hzToSt(a.f0_hz, fRefHz);
-      const yb = hzToSt(b.f0_hz, fRefHz);
-      return ya + (yb - ya) * u;
-    }
+  let lo = 0;
+  let hi = pts.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >>> 1;
+    if (pts[mid].t_smp <= tSmp) lo = mid;
+    else hi = mid;
   }
-  return hzToSt(last.f0_hz, fRefHz);
+  const a = pts[lo];
+  const b = pts[hi];
+  const span = b.t_smp - a.t_smp;
+  const u = span > 0 ? (tSmp - a.t_smp) / span : 0;
+  const ya = hzToSt(a.f0_hz, fRefHz);
+  const yb = hzToSt(b.f0_hz, fRefHz);
+  return ya + (yb - ya) * u;
 }
 
 /** Interpolate time-ordered pin points on the same logarithmic scale as the piano roll. */
@@ -413,10 +420,10 @@ function localPinBlends(pins: F0PinSegment[], spans: ResolvedQtaSpan[]) {
 
 /**
  * Main L0..L6 F0 evaluator.
- * Rejects any voiced output outside 60..600 Hz without silent clamping.
+ * Rejects any non-positive or non-finite voiced output without silent clamping.
  */
 export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
-  const fRefRes = outOfRangeCheck('f_ref_hz', input.f_ref_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+  const fRefRes = assertValidF0Hz('f_ref_hz', input.f_ref_hz);
   if (!fRefRes.ok) return fRefRes;
 
   const stepSmp = input.step_smp ?? 240; // 5 ms @ 48 kHz
@@ -427,12 +434,29 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
     return outOfRange('total_smp', input.total_smp, 0, SAMPLE_RATE_HZ * 60, 'smp');
   }
 
-  // Validate pin points up front against 60..600 Hz
-  const pins = [...(input.pins ?? [])].sort((a, b) => a.start_smp - b.start_smp);
-  const localPins = (input.local_pins ?? []).filter(pin => pin.points.length).sort((a, b) => a.start_smp - b.start_smp);
-  for (const pin of [...pins, ...localPins]) {
+  // Validate pin points up front (> 0 Hz finite) and pre-sort pin point sets once
+  const pins = [...(input.pins ?? [])]
+    .sort((a, b) => a.start_smp - b.start_smp)
+    .map((pin) => ({
+      pin,
+      sortedPoints: [...pin.points].sort((a, b) => a.t_smp - b.t_smp),
+    }));
+  const localPins = (input.local_pins ?? [])
+    .filter((pin) => pin.points.length)
+    .sort((a, b) => a.start_smp - b.start_smp)
+    .map((pin) => ({
+      ...pin,
+      points: [...pin.points].sort((a, b) => a.t_smp - b.t_smp),
+    }));
+  for (const { sortedPoints } of pins) {
+    for (const pt of sortedPoints) {
+      const r = assertValidF0Hz('pin.f0_hz', pt.f0_hz);
+      if (!r.ok) return r;
+    }
+  }
+  for (const pin of localPins) {
     for (const pt of pin.points) {
-      const r = outOfRangeCheck('pin.f0_hz', pt.f0_hz, F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+      const r = assertValidF0Hz('pin.f0_hz', pt.f0_hz);
       if (!r.ok) return r;
     }
   }
@@ -448,24 +472,6 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
   const resolvedSpans = resolveAllTargets(input.spans, fMidSt, context, input.singing_portamento);
   const localBlends = localPinBlends(localPins, resolvedSpans);
   const speedWarnings: EvalF0Output['speed_warnings'] = [];
-
-  // Xu & Sun (2002) maximum pitch change speed empirical check (hint only, never blocks)
-  for (const sp of resolvedSpans) {
-    const durS = (sp.end_smp - sp.start_smp) / SAMPLE_RATE_HZ;
-    if (durS > 0 && sp.voiced) {
-      const excursion = Math.abs(sp.candidate.m_st_per_s) * durS;
-      // Empirical max speed roughly 10.7 + 12.4 * excursion (st/s) or ~120 st/s practical ceiling
-      const limit = Math.max(85, 10.7 + 12.4 * excursion);
-      if (Math.abs(sp.candidate.m_st_per_s) > limit) {
-        speedWarnings.push({
-          span_id: sp.span_id,
-          required_st_per_s: Math.round(Math.abs(sp.candidate.m_st_per_s) * 10) / 10,
-          limit_st_per_s: Math.round(limit * 10) / 10,
-          hint: '变调速率接近或超过人声生理经验上限，可延长前导量或降低跳进幅度',
-        });
-      }
-    }
-  }
 
   const timesSmp: number[] = [];
   const qtaSt: number[] = [];
@@ -513,9 +519,8 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
     if (needsSpeechOnset && sp.voiced) {
       const targetStartSt = sp.candidate.b_end_st - sp.candidate.m_st_per_s * durS;
       const targetStartHz = stToHz(targetStartSt, input.f_ref_hz);
-      // Some linear targets extrapolate beyond the valid source range at the start.
-      // Use the usual onset in that case and let the output guard validate the contour.
-      const onsetSt = targetStartHz >= F0_LIMIT_HZ.min && targetStartHz <= F0_LIMIT_HZ.max ? targetStartSt : fMidSt;
+      // Guard against extreme extrapolated slopes producing underflow/overflow at onset.
+      const onsetSt = isValidF0Hz(targetStartHz) && targetStartHz >= 1 && targetStartHz <= 24000 ? targetStartSt : fMidSt;
       state = { y: onsetSt, yp: 0, ypp: 0 };
       needsSpeechOnset = false;
     }
@@ -523,13 +528,13 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
     spanInitStates.set(sp.span_id, { ...state });
 
     // Check if an absolute pin exits inside or at the end of this span
-    const exitingPins = pins.filter((p) => p.end_smp > sp.start_smp && p.end_smp <= sp.end_smp);
-    const intersectingPin = exitingPins.reduce<F0PinSegment | undefined>(
-      (latest, p) => (!latest || p.end_smp > latest.end_smp ? p : latest), undefined);
+    const exitingPins = pins.filter((entry) => entry.pin.end_smp > sp.start_smp && entry.pin.end_smp <= sp.end_smp);
+    const intersectingPin = exitingPins.reduce<typeof pins[number] | undefined>(
+      (latest, entry) => (!latest || entry.pin.end_smp > latest.pin.end_smp ? entry : latest), undefined);
     if (intersectingPin) {
-      const exitState = fitPinExitState(intersectingPin, input.f_ref_hz);
-      spanExitStates.set(sp.span_id, { exit_smp: intersectingPin.end_smp, state: exitState });
-      const remainS = (sp.end_smp - intersectingPin.end_smp) / SAMPLE_RATE_HZ;
+      const exitState = fitPinExitState(intersectingPin.pin, intersectingPin.sortedPoints, input.f_ref_hz);
+      spanExitStates.set(sp.span_id, { exit_smp: intersectingPin.pin.end_smp, state: exitState });
+      const remainS = (sp.end_smp - intersectingPin.pin.end_smp) / SAMPLE_RATE_HZ;
       state = remainS > 0
         ? evalQtaSegmentAt(remainS, remainS, sp.candidate.m_st_per_s, sp.candidate.b_end_st,
           sp.candidate.lambda_per_s, exitState)
@@ -546,7 +551,36 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
     }
 
     prevSpanEndSmp = sp.end_smp;
-    prevWasRest = !sp.voiced && sp.is_rest_after;
+    prevWasRest = Boolean(sp.is_rest_after);
+  }
+
+  // Xu & Sun (2002), J. Acoust. Soc. Am. 111(3):1399-1413,
+  // "Maximum speed of pitch change and how it may relate to speech":
+  // empirical maximum average speed of pitch change as a function of excursion d (semitones):
+  //   rising : v_max = 10.8 + 5.6 * d (st/s)
+  //   falling: v_max =  8.9 + 6.2 * d (st/s)
+  // Evaluates both inter-span target jump |b_end[i] - y_start[i]| / D (catching level-target leaps)
+  // and intra-span target slope |m_st_per_s|. Hint only; never blocks synthesis.
+  for (const sp of resolvedSpans) {
+    const durS = (sp.end_smp - sp.start_smp) / SAMPLE_RATE_HZ;
+    if (durS > 0 && sp.voiced) {
+      const yStartSt = spanInitStates.get(sp.span_id)?.y ?? fMidSt;
+      const jumpDeltaSt = sp.candidate.b_end_st - yStartSt;
+      const jumpRate = Math.abs(jumpDeltaSt) / durS;
+      const slopeRate = Math.abs(sp.candidate.m_st_per_s);
+      const requiredRate = Math.max(jumpRate, slopeRate);
+      const excursion = Math.max(Math.abs(jumpDeltaSt), slopeRate * durS);
+      const isRising = jumpRate >= slopeRate ? jumpDeltaSt >= 0 : sp.candidate.m_st_per_s >= 0;
+      const limit = isRising ? 10.8 + 5.6 * excursion : 8.9 + 6.2 * excursion;
+      if (excursion >= 0.5 && requiredRate > limit) {
+        speedWarnings.push({
+          span_id: sp.span_id,
+          required_st_per_s: Math.round(requiredRate * 10) / 10,
+          limit_st_per_s: Math.round(limit * 10) / 10,
+          hint: '变调速率超过 Xu & Sun (2002) 人声生理经验上限，可延长前导量、放慢速度或降低跳进幅度',
+        });
+      }
+    }
   }
 
   const residuals = input.residuals ?? [];
@@ -591,23 +625,23 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
       qVal = state.y;
     }
 
-    // L3: Absolute Pin (entry crossfade + direct replacement + exit crossfade)
+    // L3: Absolute Pin (entry crossfade + half-open [start_smp, end_smp) direct replacement + exit crossfade)
     let qWithPin = qVal;
-    for (const pin of pins) {
+    for (const { pin, sortedPoints } of pins) {
       const transSmp = msToSamples(Math.max(20, Math.min(40, pin.transition_ms || 30)));
       const entryStart = pin.start_smp - transSmp;
       const exitEnd = pin.end_smp + transSmp;
       if (tSmp >= entryStart && tSmp < pin.start_smp) {
         const u = (tSmp - entryStart) / Math.max(1, transSmp);
         const w = 0.5 * (1 - Math.cos(Math.PI * u));
-        const pinVal = interpolatePinAt(pin, pin.start_smp, input.f_ref_hz);
+        const pinVal = interpolateSortedPinPointsAt(sortedPoints, pin.start_smp, input.f_ref_hz);
         qWithPin = qWithPin * (1 - w) + pinVal * w;
-      } else if (tSmp >= pin.start_smp && tSmp <= pin.end_smp) {
-        qWithPin = interpolatePinAt(pin, tSmp, input.f_ref_hz);
-      } else if (tSmp > pin.end_smp && tSmp < exitEnd) {
+      } else if (tSmp >= pin.start_smp && tSmp < pin.end_smp) {
+        qWithPin = interpolateSortedPinPointsAt(sortedPoints, tSmp, input.f_ref_hz);
+      } else if (tSmp >= pin.end_smp && tSmp < exitEnd) {
         const u = (tSmp - pin.end_smp) / Math.max(1, transSmp);
         const w = 0.5 * (1 - Math.cos(Math.PI * u));
-        const pinVal = interpolatePinAt(pin, pin.end_smp, input.f_ref_hz);
+        const pinVal = interpolateSortedPinPointsAt(sortedPoints, pin.end_smp, input.f_ref_hz);
         qWithPin = pinVal * (1 - w) + qVal * w;
       }
     }
@@ -676,16 +710,14 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
       totalSt = hzToSt(hz, input.f_ref_hz);
     }
 
-    // L6: Strict 60..600 Hz guard without silent clamping
-    if (isVoiced && (hz < F0_LIMIT_HZ.min || hz > F0_LIMIT_HZ.max || !Number.isFinite(hz))) {
-      return outOfRange(
+    // L6: Positive finite Hz guard without silent clamping
+    if (isVoiced && !isValidF0Hz(hz)) {
+      const f0Chk = assertValidF0Hz(
         'f0_hz',
-        Math.round(hz * 100) / 100,
-        F0_LIMIT_HZ.min,
-        F0_LIMIT_HZ.max,
-        'Hz',
-        `音节/区间 ${sp?.span_id ?? '?'} 在 ${(tSmp / SAMPLE_RATE_HZ).toFixed(3)}s 处基频 ${hz.toFixed(1)} Hz 超出声源范围 [60, 600] Hz；请整体移调或调整靶点，系统不会静默夹紧`,
+        hz,
+        `音节/区间 ${sp?.span_id ?? '?'} 在 ${(tSmp / SAMPLE_RATE_HZ).toFixed(3)}s 处基频 ${hz} Hz 非法（须为有限正数 > 0 Hz）；请调整靶点，系统不会静默夹紧`,
       );
+      if (!f0Chk.ok) return f0Chk;
     }
 
     timesSmp.push(tSmp);
@@ -706,19 +738,6 @@ export function evalF0(input: EvalF0Input): Result<EvalF0Output> {
     end_state: state,
     speed_warnings: speedWarnings,
   });
-}
-
-function outOfRangeCheck(
-  field: string,
-  val: number,
-  min: number,
-  max: number,
-  unit: string,
-): Result<number> {
-  if (typeof val !== 'number' || !Number.isFinite(val) || val < min || val > max) {
-    return outOfRange(field, val, min, max, unit);
-  }
-  return ok(val);
 }
 
 /**
@@ -876,82 +895,5 @@ export function calibrateMonosyllableTone(
     ...initial,
     b_end_st: 0.5 * (lo + hi),
     rule: `${initial.rule ?? 'tone'}_calibrated`,
-  };
-}
-
-/**
- * Fit a hand-drawn F0 contour (samples in {t_sec, f0_st}) to a qTA target `(m, b_end, λ)`
- * via 1-D grid search over `λ` and closed-form OLS on `(m, b_end)`.
- * Returns RMS error in semitones; if rmse <= 0.3 st, write back as `user` target.
- */
-export function fitHanddrawnToQtaTarget(
-  samples: ReadonlyArray<{ t_sec: number; f0_st: number }>,
-  durationSec: number,
-  init: QtaState,
-): { candidate: QtaTargetCandidate; rmse_st: number } | null {
-  if (samples.length < 3 || durationSec <= 0) return null;
-  const D = durationSec;
-  let best: { m: number; bEnd: number; lam: number; rmse: number } | null = null;
-
-  for (let lam = 20; lam <= 115; lam += 5) {
-    // At fixed lambda, f0(t) is linear in (m, b_end):
-    // Let b_start = b_end - m*D.
-    // c1 = y0 - b_end + m*D
-    // c2 = yp0 + lam*y0 - lam*b_end + (lam*D - 1)*m
-    // c3 = (ypp0 + 2*lam*yp0 + lam^2*y0 - lam^2*b_end + (lam^2*D - 2*lam)*m)/2
-    // So f0(t) = const_part(t) + A_m(t)*m + A_b(t)*b_end
-    let sMM = 0, sMB = 0, sBB = 0, rM = 0, rB = 0;
-    const amList: number[] = [];
-    const abList: number[] = [];
-    const rhsList: number[] = [];
-
-    for (const pt of samples) {
-      const t = Math.max(0, Math.min(D, pt.t_sec));
-      const e = Math.exp(-lam * t);
-      const t2 = t * t;
-
-      const c0Const = init.y + (init.yp + lam * init.y) * t + 0.5 * (init.ypp + 2 * lam * init.yp + lam * lam * init.y) * t2;
-      const constVal = c0Const * e;
-
-      const am = (t - D) + (D + (lam * D - 1) * t + 0.5 * (lam * lam * D - 2 * lam) * t2) * e;
-      const ab = 1 - (1 + lam * t + 0.5 * lam * lam * t2) * e;
-      const rhs = pt.f0_st - constVal;
-
-      amList.push(am);
-      abList.push(ab);
-      rhsList.push(rhs);
-      sMM += am * am;
-      sMB += am * ab;
-      sBB += ab * ab;
-      rM += am * rhs;
-      rB += ab * rhs;
-    }
-
-    const det = sMM * sBB - sMB * sMB;
-    if (Math.abs(det) < 1e-10) continue;
-    const m = (rM * sBB - rB * sMB) / det;
-    const bEnd = (sMM * rB - sMB * rM) / det;
-
-    let sse = 0;
-    for (let i = 0; i < rhsList.length; i++) {
-      const err = amList[i] * m + abList[i] * bEnd - rhsList[i];
-      sse += err * err;
-    }
-    const rmse = Math.sqrt(sse / rhsList.length);
-    if (!best || rmse < best.rmse) {
-      best = { m, bEnd, lam, rmse };
-    }
-  }
-
-  if (!best) return null;
-  return {
-    candidate: {
-      m_st_per_s: best.m,
-      b_end_st: best.bEnd,
-      lambda_per_s: best.lam,
-      source: 'user',
-      rule: 'handdrawn_qta_fit',
-    },
-    rmse_st: best.rmse,
   };
 }

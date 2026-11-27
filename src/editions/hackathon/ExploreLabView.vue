@@ -12,6 +12,7 @@ import { metricsFromVtlSnapshot } from '@/data/vtl-acoustic';
 import { EXPLORE_SPLITTERS } from '@/data/splitter-layout';
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { SAMPLE_RATE_HZ } from '@vocalcut/core';
+import { defaultVtlTransport } from '@vocalcut/model-adapters';
 import {
   EXPLORE_CASES,
   EXPLORE_DEMO_NOTES,
@@ -364,29 +365,23 @@ async function fetchSingleCompareState(
   signal?: AbortSignal,
 ): Promise<Record<string, unknown> | null> {
   if (store.engineStatus.value === 'prewarm-fallback' || labDisposed) return null;
-  try {
-    const spk = store.project.value.voices[store.activeVoiceId.value]?.speaker ?? 'JD2';
-    const resp = await fetch('/api/vtl/pose', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
-      body: JSON.stringify({
-        speaker: spk,
-        section_count: 65,
-        params: tractRecordToArray19(params),
-        lip_width: extras.lip_width,
-        larynx_height: extras.larynx_height,
-        manual_root: extras.manual_root,
-        tongue_shape: [...extras.tongue_shape],
-        lip_shape: [...extras.lip_shape],
-      }),
-    });
-    if (!resp.ok) return null;
-    const json = (await resp.json()) as Record<string, unknown>;
-    return (json.state as Record<string, unknown>) ?? json;
-  } catch {
-    return null;
-  }
+  const spk = store.project.value.voices[store.activeVoiceId.value]?.speaker ?? 'JD2';
+  const res = await defaultVtlTransport.requestPoseRaw(
+    {
+      speaker: spk,
+      section_count: 65,
+      params: tractRecordToArray19(params),
+      lip_width: extras.lip_width,
+      larynx_height: extras.larynx_height,
+      manual_root: extras.manual_root,
+      tongue_shape: [...extras.tongue_shape],
+      lip_shape: [...extras.lip_shape],
+    },
+    { signal, timeoutMs: 8000 },
+  );
+  if (!res.ok) return null;
+  const json = res.value;
+  return (json.state as Record<string, unknown>) ?? json;
 }
 
 async function syncCompareStatesToStore(): Promise<void> {
@@ -1002,7 +997,7 @@ function onViewportDragEnd(delta: TractDelta): void {
   store.executeCommand({
     type: 'artic.set_pose',
     label: '声道画布拖拽构音',
-    payload: { delta },
+    payload: { params: delta },
   });
   void store.requestVtlPose(delta);
 }

@@ -105,4 +105,34 @@ describe('Mixed-language Text2Prosody run extraction and timeline mapping', () =
     // Mismatched group count returns null
     expect(mapProsodyRunDurationsMs(rows.slice(0, 3), predicted, weights.slice(0, 3))).toBeNull();
   });
+
+  it('extracts eligible unmarked [IPA] runs separated by VoQS scopes for Text2Prosody-Lite LANG_IPA=3', () => {
+    const rows: MixedProsodyRowInput[] = [
+      { word: 'ˈnɔ', language: 'ipa', ipaPhones: ['n', 'ɔ'], pause: 0, eligible: true, groupKey: 'plain' },
+      { word: 'məl', language: 'ipa', ipaPhones: ['m', 'ə', 'l'], pause: 0, eligible: true, groupKey: 'plain' },
+      { word: 'ˈvɔɪs', language: 'ipa', ipaPhones: ['v', 'ɔ', 'ɪ', 's'], pause: 350, phraseEnd: true, eligible: true, groupKey: 'plain' },
+      { word: 'fɔl', language: 'ipa', ipaPhones: ['f', 'ɔ', 'l'], pause: 0, eligible: true, groupKey: 'F:' },
+      { word: 'ˈsɛ', language: 'ipa', ipaPhones: ['s', 'ɛ'], pause: 0, eligible: true, groupKey: 'F:' },
+      { word: 'toʊ', language: 'ipa', ipaPhones: ['t', 'oʊ'], pause: 0, eligible: true, groupKey: 'F:' },
+      { word: 'ma⁵⁵', language: 'ipa', ipaPhones: ['m', 'a'], pause: 0, eligible: false, groupKey: 'plain' },
+    ];
+    const runs = extractMixedProsodyRuns(rows);
+    expect(runs).toEqual([
+      { startIndex: 0, endIndex: 3, text: '[n ɔ] [m ə l] [v ɔ ɪ s].' },
+      { startIndex: 3, endIndex: 6, text: '[f ɔ l] [s ɛ] [t oʊ].' },
+    ]);
+  });
+
+  it('keeps continuous IPA prosody across 175 ms space short-pauses while splitting dot boundaries and keeping commas', () => {
+    const rows: MixedProsodyRowInput[] = [
+      { word: '[ˈnɔməl]', language: 'ipa', ipaPhones: ['n', 'ɔ', 'm', 'ə', 'l'], pause: 175, eligible: true, groupKey: 'plain' },
+      { word: '[ˈvɔɪs]', language: 'ipa', ipaPhones: ['v', 'ɔ', 'ɪ', 's'], pause: 350, phraseEnd: true, eligible: true, groupKey: 'plain' },
+      { word: '[ˈtɛst]', language: 'ipa', ipaPhones: ['t', 'ɛ', 's', 't'], pause: 180, phraseEnd: true, eligible: true, groupKey: 'plain' },
+      { word: '[ˈwʌn]', language: 'ipa', ipaPhones: ['w', 'ʌ', 'n'], pause: 0, eligible: true, groupKey: 'plain' },
+    ];
+    expect(extractMixedProsodyRuns(rows)).toEqual([
+      { startIndex: 0, endIndex: 2, text: '[n ɔ m ə l] [v ɔ ɪ s].' },
+      { startIndex: 2, endIndex: 4, text: '[t ɛ s t], [w ʌ n].' },
+    ]);
+  });
 });

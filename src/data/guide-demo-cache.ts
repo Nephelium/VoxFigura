@@ -9,7 +9,7 @@
 
 import { ref } from 'vue';
 
-export const DEMO_CACHE_SCHEMA_VERSION = 'v2';
+export const DEMO_CACHE_SCHEMA_VERSION = 'v3';
 const DB_NAME = 'voxfigura-guide-demos';
 const DB_VERSION = 1;
 const STORE_NAME = 'demos';

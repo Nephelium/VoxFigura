@@ -25,4 +25,35 @@ describe('reconstruction TextGrid boundary editing', () => {
     expect(result.tiers[2]).toBe(grid.tiers[2]);
     expect(grid.tiers[0]).toMatchObject({ intervals: [{ xmax: .3 }, { xmin: .3 }] });
   });
+
+  it('constrains slightly offset cross-tier boundaries only by their own tier neighbors', () => {
+    const grid: TextGridDocument = { xmin: 0, xmax: 1, tiers: [
+      { kind: 'IntervalTier', name: 'syllables', xmin: 0, xmax: 1, intervals: [
+        { xmin: 0, xmax: .405, text: '好' },
+        { xmin: .405, xmax: 1, text: '啊' },
+      ] },
+      { kind: 'IntervalTier', name: 'phones', xmin: 0, xmax: 1, intervals: [
+        { xmin: 0, xmax: .4, text: 'x' },
+        { xmin: .4, xmax: .7, text: 'ɑʊ' },
+        { xmin: .7, xmax: 1, text: 'a' },
+      ] },
+    ] };
+    const mark = alignmentBoundaries(grid, alignmentLanes(grid), 1).find(item => item.sample === alignmentSample(.4))!;
+    expect(mark.min).toBe(1);
+    expect(mark.max).toBe(alignmentSample(.7) - 1);
+    const result = relocateAlignmentBoundary(grid, mark, alignmentSample(.52));
+    expect(result.tiers[1]).toMatchObject({
+      intervals: [
+        { xmin: 0, xmax: .52 },
+        { xmin: .52, xmax: .7 },
+        { xmin: .7, xmax: 1 },
+      ],
+    });
+    expect(result.tiers[0]).toMatchObject({
+      intervals: [
+        { xmin: 0, xmax: .405 },
+        { xmin: .405, xmax: 1 },
+      ],
+    });
+  });
 });

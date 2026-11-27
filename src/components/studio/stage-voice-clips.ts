@@ -1,29 +1,40 @@
-import { SAMPLE_RATE_HZ, msToSamples, type Clip, type Syllable } from '@vocalcut/core';
+import { SAMPLE_RATE_HZ, msToSamples, type AnnotationControls, type Clip, type Syllable } from '@vocalcut/core';
 import { trackFrameAt, type AnnotationTractFrame } from '@/components/research/annotation-edit';
 import { isStageVocalTrack, type NleClip } from './nle-timeline';
-import { cropArrangerPitchPin, isArrangerPin, withArrangerPitchPins } from './arranger-pitch';
+import { cropArrangerPitchPin } from './arranger-pitch';
 
 export function voiceCompanionClips(audio: NleClip, phrase: Clip | undefined,
   frames: NleClip['poseFrames'] = [], rows?: number[][]): NleClip[] {
   if (!isStageVocalTrack(audio.track)) return [];
-  const shared = { ...audio, linkedAudioId: audio.id, assetId: undefined, sourceStartSmp: phrase?.start_smp ?? 0 };
+  const { gain: _gain, gainPoints: _gainPoints, muted: _muted, assetId: _assetId, ...visualBase } = audio;
+  const shared: NleClip = {
+    ...visualBase,
+    linkedAudioId: audio.id,
+    sourceStartSmp: Number.isSafeInteger(audio.sourceStartSmp) && audio.sourceStartSmp >= 0
+      ? audio.sourceStartSmp
+      : (phrase?.start_smp ?? 0),
+  };
   const companions: NleClip[] = [];
   if (phrase?.syllable_order.length) {
     companions.push({ ...shared, id: crypto.randomUUID(), track: 'v3' });
   }
   if (frames.length || phrase?.syllable_order.length) {
-    companions.push({ ...shared, id: crypto.randomUUID(), track: 'v1', sourceLength: audio.endSmp - audio.startSmp,
+    companions.push({ ...shared, id: crypto.randomUUID(), track: 'v1', sourceLength: audio.sourceLength ?? (audio.endSmp - audio.startSmp),
       poseFrames: frames, m27RowsPa: rows });
   }
   return companions;
 }
 
 export function copyStageAudio(audio: AudioBuffer, offset: number, length: number): AudioBuffer {
-  const channels = audio.numberOfChannels;
-  const result = new AudioBuffer({ numberOfChannels: channels, length, sampleRate: SAMPLE_RATE_HZ });
   if (audio.sampleRate !== SAMPLE_RATE_HZ) throw new Error('音频尚未转为 48 kHz 工程时基');
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const available = Math.max(0, audio.length - safeOffset);
+  const copyLen = Math.min(Math.max(0, Math.floor(length)), available);
+  if (copyLen <= 0) throw new Error('所选片段超出源音频有效时长范围');
+  const channels = audio.numberOfChannels;
+  const result = new AudioBuffer({ numberOfChannels: channels, length: copyLen, sampleRate: SAMPLE_RATE_HZ });
   for (let channel = 0; channel < channels; channel++) {
-    result.copyToChannel(audio.getChannelData(channel).subarray(offset, offset + length), channel);
+    result.copyToChannel(audio.getChannelData(channel).subarray(safeOffset, safeOffset + copyLen), channel);
   }
   return result;
 }
@@ -65,7 +76,8 @@ export function cropStagePhrase(clip: Clip, offset: number, duration: number): C
     source.lyrics = syllable_order.map(id => syllables[id].text).join('');
     delete source.score;
   }
-  const pitchPins = (clip.annotation_controls?.f0_pins ?? []).filter(isArrangerPin).flatMap(pin => {
+  const rawControls = clip.annotation_controls;
+  const croppedPins = (rawControls?.f0_pins ?? []).flatMap(pin => {
     const cropped = cropArrangerPitchPin(pin, offset, limit);
     return cropped ? [{
       ...cropped,
@@ -74,9 +86,25 @@ export function cropStagePhrase(clip: Clip, offset: number, duration: number): C
       points: cropped.points.map(point => ({ ...point, t_smp: point.t_smp - offset })),
     }] : [];
   });
+  const croppedAnchors: AnnotationControls['phonation_anchors'] = {};
+  const croppedAnchorOrder: string[] = [];
+  for (const anchorId of rawControls?.phonation_anchor_order ?? Object.keys(rawControls?.phonation_anchors ?? {})) {
+    const anchor = rawControls?.phonation_anchors?.[anchorId];
+    if (!anchor || anchor.t_smp < offset || anchor.t_smp >= limit) continue;
+    croppedAnchors[anchorId] = { ...anchor, t_smp: anchor.t_smp - offset };
+    croppedAnchorOrder.push(anchorId);
+  }
+  const annotation_controls: AnnotationControls | undefined = rawControls
+    ? {
+      ...rawControls,
+      phonation_anchor_order: croppedAnchorOrder,
+      phonation_anchors: croppedAnchors,
+      f0_pins: croppedPins,
+    }
+    : undefined;
   return {
     ...clip, start_smp: 0, end_smp: duration, syllable_order, syllables, source,
-    annotation_controls: withArrangerPitchPins(clip.annotation_controls, pitchPins),
+    annotation_controls,
   };
 }
 

@@ -2,7 +2,6 @@
 import { onBeforeUnmount, ref } from 'vue';
 import { SAMPLE_RATE_HZ } from '@vocalcut/core';
 import { encodeWavFromAudioBuffer } from '@/components/modals/download';
-import { applyPeakAudioGain, synthesisGainMode } from '@/data/voice-renderer';
 
 const props = defineProps<{
   setId: string;
@@ -70,7 +69,6 @@ async function toggleRecording() {
         const audio = await new OfflineAudioContext(1, 1, SAMPLE_RATE_HZ).decodeAudioData(bytes);
         if (!disposed) {
           discardDraft();
-          if (synthesisGainMode.value === 'peak') applyPeakAudioGain(audio);
           draft = encodeWavFromAudioBuffer(audio);
           previewUrl.value = URL.createObjectURL(draft);
         }

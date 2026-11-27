@@ -4,7 +4,7 @@
   "units": {
     "sample_rate_hz": 48000,
     "time": "48 kHz integer samples (_smp), half-open [start_smp, end_smp)",
-    "f0": "Hz (allowed 60..600 Hz) or semitones relative to f0_ref_hz (_st)",
+    "f0": "Hz (finite > 0 Hz; VTL 2.4 physical synthesis requires 40..600 Hz) or semitones relative to f0_ref_hz (_st)",
     "pressure": "Pa (allowed 0..1600 Pa; converted to dPa = Pa * 10 only inside engine/)"
   },
   "permissions": {
@@ -183,7 +183,7 @@
       "name": "score.validate",
       "permission": "R",
       "mvp": true,
-      "description": "校验结构化乐谱：小节拍数合计、歌词音节与音符数量、60-600 Hz 音域与休止合法性。",
+      "description": "校验结构化乐谱：小节拍数合计、歌词音节与音符数量、MIDI 音域与休止合法性。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -312,7 +312,7 @@
       "name": "f0.set_targets",
       "permission": "E",
       "mvp": true,
-      "description": "写入 qTA 靶点（m, b_end_st, lambda）与音高；越界 60-600 Hz 直接报错不夹紧。",
+      "description": "写入 qTA 靶点（m, b_end_st, lambda）与音高；非法非正基频直接报错不夹紧。",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -327,7 +327,7 @@
               "properties": {
                 "syllable": { "type": "string" },
                 "span": { "type": "string" },
-                "note_hz": { "type": "number", "minimum": 60, "maximum": 600 },
+                "note_hz": { "type": "number", "exclusiveMinimum": 0 },
                 "m": { "type": "number", "minimum": -120, "maximum": 120 },
                 "b_end_st": { "type": "number", "minimum": -36, "maximum": 36 },
                 "lambda": { "type": "number", "minimum": 5, "maximum": 200 }

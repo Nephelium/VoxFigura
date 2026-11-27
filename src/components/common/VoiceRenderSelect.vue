@@ -4,14 +4,16 @@ import CustomSelect from './CustomSelect.vue';
 import { voiceRenderLabels, voiceRenderMode, type VoiceRenderMode } from '@/data/voice-renderer';
 import { useWorkbenchStore } from '@/stores/workbench';
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     size?: 'md' | 'sm' | 'xs';
     wide?: boolean;
+    customTitle?: string;
   }>(),
   {
     size: 'sm',
     wide: false,
+    customTitle: '',
   },
 );
 
@@ -22,7 +24,9 @@ const options = (Object.keys(voiceRenderLabels) as VoiceRenderMode[]).map((value
 }));
 
 const hintTitle = computed(
-  () => `适用于新合成。Tract2Vox-Lite 使用 JD2 成年男声 3D 几何模型与「${store.customSpeakerName.value}」参考声纹。`,
+  () =>
+    props.customTitle ||
+    `适用于新合成。Tract2Vox-Lite 使用 JD2 成年男声 3D 几何模型与「${store.customSpeakerName.value}」参考声纹。`,
 );
 </script>
 

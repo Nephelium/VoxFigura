@@ -203,4 +203,156 @@ describe('realtime synthesis gain', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('backs off after backend errors instead of hammering requests on every audio block', async () => {
+    let nowMs = 1000;
+    const perfSpy = vi.spyOn(performance, 'now').mockImplementation(() => nowMs);
+    const node = () => ({ connect: vi.fn(), disconnect: vi.fn(), stop: vi.fn(), start: vi.fn() });
+    const scriptProcessor = { ...node(), onaudioprocess: (_event: AudioProcessingEvent) => {} };
+    const ctx = {
+      state: 'running',
+      sampleRate: SAMPLE_RATE,
+      currentTime: 0,
+      createMediaStreamSource: node,
+      createGain: () => ({
+        ...node(),
+        gain: { value: 1, setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() },
+      }),
+      createScriptProcessor: () => scriptProcessor,
+      createBuffer: () => ({ copyToChannel: vi.fn() }),
+      createBufferSource: node,
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.stubGlobal('window', { AudioContext: class { constructor() { return ctx; } } });
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    });
+    let failCount = 1;
+    const fetchMock = vi.fn(async () => {
+      if (failCount > 0) {
+        failCount--;
+        return Response.json({ ok: false, error: { code: 'engine_busy', hint: '引擎繁忙' } }, { status: 503 });
+      }
+      return Response.json({ ok: true, compute_ms: 12 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onStep = vi.fn();
+    const onError = vi.fn();
+    const controller = new M27RealtimeController({
+      includeTractGeometry: false,
+      useTimbreModel: false,
+      synthesizeAudio: false,
+      delayTargetMs: 700,
+      autoGain: false,
+      keepRecording: false,
+      speakerMode: 'lecture',
+      speakerKey: '',
+    }, { onStep, onError });
+    const capture = (length: number) => {
+      scriptProcessor.onaudioprocess({
+        inputBuffer: { getChannelData: () => new Float32Array(length) },
+      } as unknown as AudioProcessingEvent);
+    };
+
+    try {
+      await controller.start();
+      capture(16 * 320);
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Additional blocks arriving during the 600 ms backoff window must not trigger new requests.
+      nowMs += 200;
+      capture(10 * 320);
+      capture(10 * 320);
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // Once backoff expires, the next block resumes inference cleanly.
+      nowMs += 500;
+      capture(10 * 320);
+      await vi.waitFor(() => expect(onStep).toHaveBeenCalledTimes(1));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      if (controller.isActive) controller.stop();
+      perfSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('re-anchors the stream cursor and resets scheduled audio when lowering delayTargetMs', async () => {
+    const overlap = 240;
+    const stoppedSources: Array<ReturnType<typeof vi.fn>> = [];
+    const node = () => ({ connect: vi.fn(), disconnect: vi.fn(), stop: vi.fn(), start: vi.fn() });
+    const scriptProcessor = { ...node(), onaudioprocess: (_event: AudioProcessingEvent) => {} };
+    const ctx = {
+      state: 'running',
+      sampleRate: SAMPLE_RATE,
+      currentTime: 0,
+      createMediaStreamSource: node,
+      createGain: () => ({
+        ...node(),
+        gain: { value: 1, setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() },
+      }),
+      createScriptProcessor: () => scriptProcessor,
+      createBuffer: () => ({ copyToChannel: vi.fn() }),
+      createBufferSource: () => {
+        const stop = vi.fn();
+        stoppedSources.push(stop);
+        return { ...node(), stop };
+      },
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.stubGlobal('window', { AudioContext: class { constructor() { return ctx; } } });
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      const pcm = new Int16Array(overlap + request.emit_frames * 320).fill(160);
+      return Response.json({
+        ok: true,
+        audio_sr: SAMPLE_RATE,
+        pcm16le_base64: Buffer.from(pcm.buffer).toString('base64'),
+        overlap_left_samples: overlap,
+      });
+    }));
+    const onStep = vi.fn();
+    const onError = vi.fn();
+    const controller = new M27RealtimeController({
+      includeTractGeometry: false,
+      useTimbreModel: false,
+      synthesizeAudio: true,
+      delayTargetMs: 1000,
+      autoGain: false,
+      keepRecording: false,
+      speakerMode: 'lecture',
+      speakerKey: '',
+    }, { onStep, onError });
+    const capture = (length: number) => {
+      scriptProcessor.onaudioprocess({
+        inputBuffer: { getChannelData: () => new Float32Array(length) },
+      } as unknown as AudioProcessingEvent);
+    };
+
+    try {
+      await controller.start();
+      // 1000 ms profile: lookahead 18, emit 12 -> 30 frames triggers first emission (emittedThroughFrame = 12).
+      capture(30 * 320);
+      await vi.waitFor(() => expect(onStep).toHaveBeenCalledTimes(1));
+      expect(stoppedSources).toHaveLength(1);
+
+      // Capture 10 more frames (total 40; not enough for 1000 ms profile, but 20 frames ahead for 700 ms profile).
+      capture(10 * 320);
+      controller.updateOptions({ delayTargetMs: 700 });
+      expect(stoppedSources[0]).toHaveBeenCalledTimes(1);
+
+      capture(1 * 320);
+      await vi.waitFor(() => expect(onStep).toHaveBeenCalledTimes(2));
+      expect(onError).not.toHaveBeenCalled();
+      expect(onStep.mock.calls[1][1].skippedInputMs).toBe(0);
+    } finally {
+      if (controller.isActive) controller.stop();
+      vi.unstubAllGlobals();
+    }
+  });
 });

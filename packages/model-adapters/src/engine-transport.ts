@@ -8,8 +8,8 @@
  */
 
 import {
-  F0_LIMIT_HZ,
   PRESSURE_LIMIT_PA,
+  VTL_F0_LIMIT_HZ,
   assertInRange,
   fail,
   ok,
@@ -130,6 +130,52 @@ export interface DenseSynthesisResponse {
   interpolation_note?: string;
 }
 
+function buildTransportSignal(callerSignal?: AbortSignal, timeoutMs?: number): AbortSignal | undefined {
+  if (timeoutMs !== undefined && timeoutMs > 0) {
+    const timer = AbortSignal.timeout(timeoutMs);
+    return callerSignal ? AbortSignal.any([callerSignal, timer]) : timer;
+  }
+  return callerSignal;
+}
+
+export interface VtlBatchContoursRequest {
+  speaker: string;
+  poses: number[][];
+  with_resonances?: boolean;
+  lip_width_frames?: number[];
+  larynx_height_frames?: number[];
+  tongue_shape_frames?: number[][];
+  lip_shape_frames?: number[][];
+  manual_root_frames?: boolean[];
+}
+
+export interface VtlBatchContourItem {
+  pts: number[];
+  nasal: number;
+  lm: number[];
+  amin_cm2?: number;
+  f1_hz?: number;
+  f2_hz?: number;
+  f3_hz?: number;
+}
+
+export interface VtlBatchContoursResponse {
+  ok: true;
+  parts: string[];
+  part_sizes: number[];
+  items: VtlBatchContourItem[];
+}
+
+export type VtlSynthesizeRawResult =
+  | { kind: 'audio'; buffer: ArrayBuffer; contentType: string }
+  | { kind: 'json'; data: Record<string, unknown> };
+
+export interface VtlLivePullResponse {
+  ok: true;
+  sample_rate_hz?: number;
+  pcm_f32_b64?: string;
+}
+
 export interface TransportConfig {
   wasmManifestUrl?: string;
   apiBaseUrl?: string;
@@ -156,7 +202,7 @@ export class VocalEngineTransport {
     this.prewarmBaseUrl = config?.prewarmBaseUrl ?? '/prewarm';
     this.speaker = config?.defaultSpeaker ?? 'JD2';
     this.computeDevice = config?.computeDevice ?? 'wasm-cpu';
-    this.fetchFn = config?.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    this.fetchFn = config?.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   setComputeDevice(device: ComputeDevice): void {
@@ -327,9 +373,16 @@ export class VocalEngineTransport {
   }
 
   async synthesizeDense(req: DenseSynthesisRequest): Promise<Result<DenseSynthesisResponse>> {
-    // Validate strict boundaries before crossing transport (no silent clamping)
+    // Validate VTL 2.4 C++ GeometricGlottis native physical bounds before crossing transport (no silent clamping)
     for (let i = 0; i < req.f0_hz.length; i++) {
-      const fChk = assertInRange(`f0_hz[${i}]`, req.f0_hz[i], F0_LIMIT_HZ.min, F0_LIMIT_HZ.max, 'Hz');
+      const fChk = assertInRange(
+        `f0_hz[${i}]`,
+        req.f0_hz[i],
+        VTL_F0_LIMIT_HZ.min,
+        VTL_F0_LIMIT_HZ.max,
+        'Hz',
+        `VTL 2.4 物理声门仅支持 [${VTL_F0_LIMIT_HZ.min}, ${VTL_F0_LIMIT_HZ.max}] Hz（当前 f0_hz[${i}] = ${req.f0_hz[i]} Hz）；宽音域基频请改用 Tract2Vox-Lite 神经合成`,
+      );
       if (!fChk.ok) return fChk;
     }
     for (let i = 0; i < req.pressure_pa.length; i++) {
@@ -443,6 +496,173 @@ export class VocalEngineTransport {
     }
   }
 
+  async fetchMetaRaw(
+    speaker?: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<Record<string, unknown>>> {
+    const query = speaker ? `?speaker=${encodeURIComponent(speaker)}` : '';
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/meta${query}`, {
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs ?? 4000),
+      });
+      const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+      if (!res.ok || !ct.includes('application/json')) {
+        return fail({ code: 'not_found', field: 'vtl.meta', hint: `VTL meta 请求失败: HTTP ${res.status}` });
+      }
+      const meta = (await res.json()) as Record<string, unknown>;
+      if (!meta || meta.ok === false) {
+        return fail(normalizeTransportError(meta?.error as Partial<CoreErrorDetail> | undefined, 'vtl.meta', 'VTL meta 返回异常'));
+      }
+      return ok(meta);
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.meta', hint: `无法获取 VTL metadata: ${String(err)}` });
+    }
+  }
+
+  async requestPoseRaw(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<Record<string, unknown>>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/pose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs ?? 8000),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!res.ok || !data || data.ok === false) {
+        return fail(
+          normalizeTransportError(
+            data?.error as Partial<CoreErrorDetail> | undefined,
+            'vtl.pose',
+            `本地声道几何接口不可用（HTTP ${res.status}）`,
+          ),
+        );
+      }
+      return ok(data);
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.pose', hint: `VTL pose 请求失败: ${String(err)}` });
+    }
+  }
+
+  async requestPoseBatchRaw(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<Record<string, unknown>>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/pose-batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs ?? 15_000),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!res.ok || !data || data.ok === false) {
+        const errCode = res.status === 404 ? 'not_found' : undefined;
+        const rawErr = (data?.error as Partial<CoreErrorDetail> | undefined)
+          ?? (errCode ? { code: errCode } : undefined);
+        return fail(
+          normalizeTransportError(
+            rawErr,
+            'vtl.pose-batch',
+            `本地批量声道几何接口不可用（HTTP ${res.status}）`,
+          ),
+        );
+      }
+      return ok(data);
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.pose-batch', hint: `VTL pose-batch 请求失败: ${String(err)}` });
+    }
+  }
+
+  async requestBatchContours<T extends object = VtlBatchContoursResponse>(
+    body: VtlBatchContoursRequest,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<T>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/batch-contours`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs ?? 30_000),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as (T & { ok?: boolean; error?: Partial<CoreErrorDetail> }) | null;
+      if (!res.ok || !data || data.ok === false) {
+        return fail(
+          normalizeTransportError(
+            data?.error,
+            'vtl.batch-contours',
+            `未取得声道轮廓，请检查本地引擎连接（HTTP ${res.status}）`,
+          ),
+        );
+      }
+      return ok(data);
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.batch-contours', hint: `VTL batch-contours 请求失败: ${String(err)}` });
+    }
+  }
+
+  async requestSynthesizeRaw(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<VtlSynthesizeRawResult>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs),
+        body: JSON.stringify(body),
+      });
+      const ct = (res.headers.get('content-type') ?? '').toLowerCase();
+      if (res.ok && ct.includes('audio/')) {
+        return ok({ kind: 'audio', buffer: await res.arrayBuffer(), contentType: ct });
+      }
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!res.ok || !data || data.ok === false) {
+        const rawErr = (data?.error as Partial<CoreErrorDetail> | undefined)
+          ?? (typeof data?.hint === 'string' ? { hint: data.hint } : undefined);
+        return fail(normalizeTransportError(rawErr, 'vtl.synthesize', `本地 VTL 2.4 引擎不可用（HTTP ${res.status}）`));
+      }
+      return ok({ kind: 'json', data });
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.synthesize', hint: `VTL 合成请求失败: ${String(err)}` });
+    }
+  }
+
+  async requestSynthesizeStream(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
+  ): Promise<Response> {
+    return this.fetchFn(`${this.apiBaseUrl}/synthesize-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: options?.signal,
+      body: JSON.stringify(body),
+    });
+  }
+
+  async requestLivePull(
+    body: Record<string, unknown>,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<Result<VtlLivePullResponse>> {
+    try {
+      const res = await this.fetchFn(`${this.apiBaseUrl}/live-pull`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: buildTransportSignal(options?.signal, options?.timeoutMs ?? 2500),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => null)) as (VtlLivePullResponse & { ok?: boolean; error?: Partial<CoreErrorDetail> }) | null;
+      if (!res.ok || !data || data.ok !== true) {
+        return fail(normalizeTransportError(data?.error, 'vtl.live-pull', `VTL 实时音频拉取失败: HTTP ${res.status}`));
+      }
+      return ok(data);
+    } catch (err) {
+      return fail({ code: 'not_found', field: 'vtl.live-pull', hint: `VTL 实时音频拉取异常: ${String(err)}` });
+    }
+  }
+
   dispose(): void {
     if (this.wasmWorker) {
       this.wasmWorker.terminate();
@@ -450,3 +670,5 @@ export class VocalEngineTransport {
     }
   }
 }
+
+export const defaultVtlTransport = new VocalEngineTransport();

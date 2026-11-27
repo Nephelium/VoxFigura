@@ -716,6 +716,7 @@ export class WebcamFaceTracker {
 
   private active = false;
   private inFlight = false;
+  private startSeq = 0;
   private rafId = 0;
   private vfcId = 0;
   private lastVideoTime = -1;
@@ -765,6 +766,7 @@ export class WebcamFaceTracker {
 
   async start(deviceId = ''): Promise<void> {
     this.stop();
+    const seq = ++this.startSeq;
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('当前浏览器不支持摄像头采集');
     }
@@ -776,41 +778,59 @@ export class WebcamFaceTracker {
       ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user' }),
     };
 
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: videoConstraints,
       audio: false,
     });
+    if (seq !== this.startSeq) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    this.stream = stream;
 
-    const video = document.createElement('video');
-    video.playsInline = true;
-    video.muted = true;
-    video.srcObject = this.stream;
-    await video.play();
-    this.video = video;
+    try {
+      const video = document.createElement('video');
+      video.playsInline = true;
+      video.muted = true;
+      video.srcObject = stream;
+      this.video = video;
+      await video.play();
+      if (seq !== this.startSeq) {
+        return;
+      }
 
-    const workerUrl = new URL(`${import.meta.env.BASE_URL}mediapipe-0.10.14/face-worker.js`, window.location.href);
-    const worker = new Worker(workerUrl);
-    worker.onmessage = ({ data }) => {
-      const item = this.pending.get(data.id);
-      if (!item) return;
-      clearTimeout(item.timer);
-      this.pending.delete(data.id);
-      if (data.ok) item.resolve(data.value);
-      else item.reject(new Error(data.error || '特征点推理错误'));
-    };
-    worker.onerror = (ev) => {
-      this.onError(ev.message || '面部特征点后台线程异常');
-    };
-    this.worker = worker;
+      const workerUrl = new URL(`${import.meta.env.BASE_URL}mediapipe-0.10.14/face-worker.js`, window.location.href);
+      const worker = new Worker(workerUrl);
+      worker.onmessage = ({ data }) => {
+        const item = this.pending.get(data.id);
+        if (!item) return;
+        clearTimeout(item.timer);
+        this.pending.delete(data.id);
+        if (data.ok) item.resolve(data.value);
+        else item.reject(new Error(data.error || '特征点推理错误'));
+      };
+      worker.onerror = (ev) => {
+        this.onError(ev.message || '面部特征点后台线程异常');
+      };
+      this.worker = worker;
 
-    const initInfo = await this.callWorker('init', { delegate: 'GPU', mode: 'VIDEO' });
-    this.delegateName = initInfo?.delegate || 'CPU';
-    this.stabilizer.reset();
-    this.fpsWindow = [];
-    this.lastVideoTime = -1;
-    this.active = true;
-    this.inFlight = false;
-    this.scheduleNextFrame();
+      const initInfo = await this.callWorker('init', { delegate: 'GPU', mode: 'VIDEO' });
+      if (seq !== this.startSeq) {
+        return;
+      }
+      this.delegateName = initInfo?.delegate || 'CPU';
+      this.stabilizer.reset();
+      this.fpsWindow = [];
+      this.lastVideoTime = -1;
+      this.active = true;
+      this.inFlight = false;
+      this.scheduleNextFrame();
+    } catch (err) {
+      if (seq === this.startSeq) {
+        this.stop();
+      }
+      throw err;
+    }
   }
 
   private scheduleNextFrame(): void {
@@ -907,6 +927,7 @@ export class WebcamFaceTracker {
   }
 
   stop(): void {
+    this.startSeq++;
     this.active = false;
     if (this.rafId) {
       cancelAnimationFrame(this.rafId);

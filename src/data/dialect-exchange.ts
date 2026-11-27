@@ -1,4 +1,4 @@
-import { F0_LIMIT_HZ } from '@vocalcut/core';
+import { isValidF0Hz } from '@vocalcut/core';
 
 export interface SpeakerPitchRange {
   minHz: number;
@@ -6,15 +6,16 @@ export interface SpeakerPitchRange {
 }
 
 /**
- * A valid speaker pitch register must stay within `[60, 600] Hz` and span at least
- * 3 semitones (`maxHz / minHz >= 2^(3/12)`), preventing monotone single-word recordings
- * from collapsing onto a degenerate self-normalized denominator.
+ * A valid speaker pitch register must use positive finite frequencies (`minHz > 0`,
+ * `maxHz > minHz`) and span at least 3 semitones (`maxHz / minHz >= 2^(3/12)`),
+ * preventing monotone single-word recordings from collapsing onto a degenerate
+ * self-normalized denominator.
  */
 export function isValidSpeakerPitchRange(range?: SpeakerPitchRange | null): range is SpeakerPitchRange {
   if (!range) return false;
   const { minHz, maxHz } = range;
-  if (!Number.isFinite(minHz) || !Number.isFinite(maxHz)) return false;
-  if (minHz < F0_LIMIT_HZ.min || maxHz > F0_LIMIT_HZ.max || maxHz <= minHz) return false;
+  if (!isValidF0Hz(minHz) || !isValidF0Hz(maxHz)) return false;
+  if (maxHz <= minHz) return false;
   return Math.log2(maxHz / minHz) * 12 >= 3;
 }
 
@@ -28,7 +29,7 @@ export function estimateSpeakerPitchRangeFromCurves(
 ): SpeakerPitchRange | null {
   const values = curves
     .flatMap((pts) => pts.map((p) => p.hz))
-    .filter((hz) => Number.isFinite(hz) && hz >= F0_LIMIT_HZ.min && hz <= F0_LIMIT_HZ.max)
+    .filter((hz) => isValidF0Hz(hz))
     .sort((a, b) => a - b);
   if (values.length < 6) return null;
   const at = (q: number) => {
@@ -37,8 +38,8 @@ export function estimateSpeakerPitchRangeFromCurves(
     const hi = Math.min(values.length - 1, lo + 1);
     return values[lo] + (values[hi] - values[lo]) * (pos - lo);
   };
-  const minHz = Math.max(F0_LIMIT_HZ.min, Math.round(at(0.05)));
-  const maxHz = Math.min(F0_LIMIT_HZ.max, Math.round(at(0.95)));
+  const minHz = Math.max(1, Math.round(at(0.05)));
+  const maxHz = Math.round(at(0.95));
   if (maxHz <= minHz || Math.log2(maxHz / minHz) * 12 < 3.5) return null;
   return { minHz, maxHz };
 }

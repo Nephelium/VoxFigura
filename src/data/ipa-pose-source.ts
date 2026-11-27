@@ -1,11 +1,12 @@
 import { computed, ref } from 'vue';
 import type { AnnotationIpaPoseSource } from '@/components/research/annotation-audio';
 
-const preferenceKey = 'vocalcut.synthesis-ipa-pose.v1';
-const source = ref<AnnotationIpaPoseSource>('current');
+const preferenceKey = 'vocalcut.synthesis-ipa-pose.v2';
+const source = ref<AnnotationIpaPoseSource>('auto');
 try {
-  if (localStorage.getItem(preferenceKey) === 'model') source.value = 'model';
-} catch { /* Use the current IPA poses when storage is unavailable. */ }
+  const saved = localStorage.getItem(preferenceKey);
+  if (saved === 'auto' || saved === 'current' || saved === 'model') source.value = saved;
+} catch { /* Default to automatic switching when storage is unavailable. */ }
 
 export const textPoseSource = computed({
   get: () => source.value,
@@ -16,6 +17,7 @@ export const textPoseSource = computed({
 });
 
 export const textPoseOptions = [
-  { value: 'current', label: '当前 IPA 构型' },
+  { value: 'auto', label: '自动切换' },
   { value: 'model', label: '模型默认构型' },
+  { value: 'current', label: '当前 IPA 构型' },
 ];

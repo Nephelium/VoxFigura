@@ -1,6 +1,6 @@
 # VoxFigura 视觉风格体系与扩展指南（STYLE_EXTENSION_GUIDE）
 
-## 1. 架构总览：8 × 6 × (29 + 1)
+## 1. 架构总览
 
 VoxFigura 采用正交的三维主题架构，全部基于原生 CSS 自定义属性（CSS Custom Properties）与 `<html>` 根节点的 `data-*` 属性驱动，严禁引入 Element Plus / Ant Design Vue / Naive UI 等第三方重型组件库：
 
@@ -13,14 +13,21 @@ VoxFigura 采用正交的三维主题架构，全部基于原生 CSS 自定义�
    - `swiss`：瑞士网格
    - `bauhaus`：包豪斯几何
    - `brutal`：轻新粗野
-2. **6 档高清科技背景（`data-bg`）**：
-   - `aurora`：极光网格（默认）
-   - `spectrum`：流光光谱
-   - `radar`：声学雷达
-   - `topo`：声纹等高线
-   - `nebula`：星云弥散
-   - `plain`：极简素底
-   - 配套实时调节参数：`--glass-blur`（默认 `7px`，滑块范围 `0–22px`）、`--glass-alpha`、背景饱和度与覆盖度。
+2. **12 档背景（`data-bg`，注册表在 `src/styles/skin-registry.ts`）**：
+   - `aurora`：折光纸幕（默认）
+   - `spectrum`：潮汐海岸
+   - `radar`：叠色套印
+   - `topo`：岸边芦影
+   - `plain`：雾面底色
+   - `red-canyon`：赭岩峡谷
+   - `moss-grove`：苔林微光
+   - `alpine-ice`：霜岭长天
+   - `neon-alley`：雨巷霓虹
+   - `lunar-crater`：月面环山
+   - `glazed-tiles`：金釉拼砖
+   - `ringed-world`：紫暮星环
+   - 七款新增壁纸各有独立日间、夜间图与设置页缩略图。旧设置中的 `nebula` 转为 `radar`。
+   - 配套实时调节参数：`--glass-blur`（默认 `7px`，滑块范围 `0–22px`）、`--glass-alpha`（默认 `68%` 浅色 / `64%` 深色，真源为 `src/styles/tokens.css`）、背景饱和度与覆盖度。
 3. **29 + 1 套配色体系（默认 `codex`，支持 `light` / `dark` 明暗双模）**：
    - 29 套预设：`absolutely`, `ayu`, `catppuccin`, `codex`, `dracula`, `everforest`, `github`, `gruvbox`, `linear`, `lobster`, `material`, `matrix`, `monokai`, `night-owl`, `nord`, `notion`, `og`, `oscurange`, `one`, `proof`, `raycast`, `rose-pine`, `sentry`, `solarized`, `temple`, `tokyo-night`, `vercel`, `vscode-plus`, `xcode`。
    - +1 自定义面板：`custom`（支持实时取色覆盖 `--bg`、`--fg`、`--accent`）。
@@ -29,7 +36,7 @@ VoxFigura 采用正交的三维主题架构，全部基于原生 CSS 自定义�
 
 用户或开发者可通过以下四种方式切换与调试风格：
 
-1. **设置页（Settings Modal）**：顶栏右上角点击「设置」，可视化选择 8 套质感、6 档背景、29+1 配色、明暗模式及磨砂模糊半径滑块。
+1. **设置页**。顶栏右上角点击「设置」，可视化选择 8 套质感、12 档背景、29+1 配色、明暗模式及磨砂模糊半径。「当前配色」切换质感时沿用当前外观参数。「原始配色」应用该质感按示意卡取色的日夜色板，并恢复默认底纹及材质参数。明暗选择和字体设置单独控制。
 2. **Style Lab 浮动面板**：
    - URL 参数 `?stylelab=1` 自动弹出浮动风格实验室；
    - 全局快捷键 `Alt + Shift + S` 随时呼出/收起；

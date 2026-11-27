@@ -799,7 +799,7 @@ export default {
   "platform.this_audio_permission_request_has_expired_click_authorize_and": "音声の権限要求が無効になっています。許可してデバイスを更新を再度クリックしてください。",
   "platform.this_media_permission_request_has_expired_click_start_capture": "メディアの権限要求が無効になっています。収録開始を再度クリックしてください。",
   "platform.no_output_folder_was_selected_managed_results_are_retained": "出力先フォルダーを選択していません。管理中の結果は保持されており、書き出しを再試行できます。",
-  "platform.jing_shaozi": "井韶子",
+  "platform.jing_shaozi": "井立文",
   "platform.this_feedback_operation_is_unavailable": "このフィードバック操作は利用できません。",
   "platform.your_login_has_expired_log_in_again": "ログインの有効期限が切れています。再度ログインしてください。",
   "platform.the_account_has_changed_reopen_feedback": "アカウントが切り替わっています。フィードバックを開き直してください。",

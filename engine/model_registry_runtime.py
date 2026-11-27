@@ -58,7 +58,7 @@ class TensorSpec:
     name: str
     rank: int
     dtype: str  # e.g. 'tensor(float)', 'tensor(int64)', 'tensor(double)'
-    fixed_dims: Tuple[Tuple[int, int], ...] = ()  # pairs of (axis, expected_size)
+    fixed_dims: Tuple[Tuple[int, int | Tuple[int, ...]], ...] = ()  # pairs of (axis, expected_size_or_choices)
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,7 @@ class ModelSlotSpec:
     filename_patterns: Tuple[str, ...]
     optional_fallback_hint: str = ""
     contract_summary: str = ""
+    alt_outputs: Tuple[Tuple[TensorSpec, ...], ...] = ()
 
 
 MODEL_SLOTS: Tuple[ModelSlotSpec, ...] = (
@@ -97,8 +98,23 @@ MODEL_SLOTS: Tuple[ModelSlotSpec, ...] = (
             TensorSpec("glot8", 3, "tensor(float)", ((2, 8),)),
             TensorSpec("h_backbone", 3, "tensor(float)", ((2, 192),)),
         ),
+        alt_outputs=(
+            (
+                TensorSpec("tract17", 3, "tensor(float)", ((2, 17),)),
+                TensorSpec("pr1", 3, "tensor(float)", ((2, 1),)),
+                TensorSpec("glot8", 3, "tensor(float)", ((2, 8),)),
+                TensorSpec("h_backbone", 3, "tensor(float)", ((2, 192),)),
+                TensorSpec("speech_mask_logit", 2, "tensor(float)"),
+                TensorSpec("zh_syl_ctc_logits", 3, "tensor(float)", ((2, 415),)),
+                TensorSpec("phone_frame_logits", 3, "tensor(float)", ((2, 65),)),
+                TensorSpec("phone_ctc_logits", 3, "tensor(float)", ((2, 65),)),
+                TensorSpec("boundary_logits", 3, "tensor(float)", ((2, 2),)),
+                TensorSpec("tone_logits", 3, "tensor(float)", ((2, 8),)),
+                TensorSpec("lang_logits", 3, "tensor(float)", ((2, 3),)),
+            ),
+        ),
         filename_patterns=("vox2tract", "inverter", "m27_invert"),
-        contract_summary="(B,T,163)+(B,T,3)+(B,T) -> tract17, pr1, glot8, h192",
+        contract_summary="(B,T,163)+(B,T,3)+(B,T) -> tract17, pr1, glot8, h192 (+ 可选 7 路联合对齐头)",
     ),
     ModelSlotSpec(
         name="Vox2Align-Lite v2",
@@ -134,7 +150,7 @@ MODEL_SLOTS: Tuple[ModelSlotSpec, ...] = (
         dtype_detail="ONNX",
         threads=AUTO_THREADS_HEAVY,
         inputs=(
-            TensorSpec("cond", 3, "tensor(float)", ((2, 111),)),
+            TensorSpec("cond", 3, "tensor(float)", ((2, (111, 121)),)),
             TensorSpec("x_base", 3, "tensor(float)", ((2, 26),)),
             TensorSpec("alpha", 1, "tensor(float)"),
         ),
@@ -143,7 +159,7 @@ MODEL_SLOTS: Tuple[ModelSlotSpec, ...] = (
         ),
         filename_patterns=("ipa2tract", "kf2tract", "keyframe_tract"),
         optional_fallback_hint="卸载后协同构音将退回基础 qTA / 手工轨迹",
-        contract_summary="(B,T,111)+(B,T,26)+(1,) -> (B,T,26)",
+        contract_summary="(B,T,111/121)+(B,T,26)+(1,) -> (B,T,26)",
     ),
     ModelSlotSpec(
         name="Tract2Vox-Lite",
@@ -210,7 +226,7 @@ MODEL_SLOTS: Tuple[ModelSlotSpec, ...] = (
         dtype_detail="ONNX",
         threads=AUTO_THREADS_LIGHT,
         inputs=(
-            TensorSpec("phon_feat", 3, "tensor(float)", ((2, 22),)),
+            TensorSpec("phon_feat", 3, "tensor(float)", ((2, (22, 32)),)),
             TensorSpec("pos_struct", 3, "tensor(float)", ((2, 10),)),
             TensorSpec("lang_id", 2, "tensor(int64)"),
             TensorSpec("tone_stress_id", 2, "tensor(int64)"),
@@ -404,8 +420,12 @@ def _check_tensor_list(
             return f"{model_name} {kind} `{exp.name}` 维度阶数不匹配：期望 {exp.rank}D，实际 {len(act_shape)}D ({act_shape})"
         for axis, exp_dim in exp.fixed_dims:
             got = act_shape[axis]
-            if isinstance(got, int) and got != exp_dim:
-                return f"{model_name} {kind} `{exp.name}` 第 {axis} 维大小不匹配：期望 {exp_dim}，实际 {got}"
+            if isinstance(got, int):
+                if isinstance(exp_dim, tuple):
+                    if got not in exp_dim:
+                        return f"{model_name} {kind} `{exp.name}` 第 {axis} 维大小不匹配：期望 {exp_dim} 之一，实际 {got}"
+                elif got != exp_dim:
+                    return f"{model_name} {kind} `{exp.name}` 第 {axis} 维大小不匹配：期望 {exp_dim}，实际 {got}"
     return None
 
 
@@ -413,7 +433,13 @@ def validate_onnx_session_contract(session: ort.InferenceSession, slot: ModelSlo
     err = _check_tensor_list(session.get_inputs(), slot.inputs, "输入", slot.name)
     if err:
         raise ModelContractError(err)
-    err = _check_tensor_list(session.get_outputs(), slot.outputs, "输出", slot.name)
+    actual_outputs = session.get_outputs()
+    err = _check_tensor_list(actual_outputs, slot.outputs, "输出", slot.name)
+    if err and slot.alt_outputs:
+        for alt in slot.alt_outputs:
+            if _check_tensor_list(actual_outputs, alt, "输出", slot.name) is None:
+                err = None
+                break
     if err:
         raise ModelContractError(err)
 
@@ -465,6 +491,13 @@ class LocalModelManager:
         self._active_provider: Dict[str, str] = {}
         self._load_ms: Dict[str, Optional[float]] = {s.name: None for s in MODEL_SLOTS}
         self._load_persisted_state()
+        for slot in MODEL_SLOTS:
+            if (
+                slot.name == "Vox2Align-Lite v2"
+                and self._external_path.get(slot.name) is None
+                and not (TT3_ROOT / slot.rel_path).is_file()
+            ):
+                self._enabled[slot.name] = False
 
     def _load_persisted_state(self) -> None:
         if not self._state_path.is_file():
@@ -530,11 +563,6 @@ class LocalModelManager:
         slot = self.resolve_slot(name)
         with self._lock:
             return bool(self._enabled.get(slot.name, True))
-
-    def is_in_memory(self, name: str) -> bool:
-        slot = self.resolve_slot(name)
-        with self._lock:
-            return any(k[0] == slot.name for k in self._sessions)
 
     def _drop_sessions_locked(self, name: str) -> None:
         keys = [k for k in self._sessions if k[0] == name]
@@ -641,6 +669,8 @@ class LocalModelManager:
         errors: List[Dict[str, str]] = []
         with self._lock:
             for slot in MODEL_SLOTS:
+                if slot.name == "Vox2Align-Lite v2" and not self.active_path(slot.name).is_file():
+                    continue
                 try:
                     self.load_model(slot.name, device=device)
                 except Exception as exc:
@@ -769,9 +799,10 @@ class LocalModelManager:
             self._external_path[slot.name] = None
             self._external_label[slot.name] = None
             self._drop_sessions_locked(slot.name)
-            self._enabled[slot.name] = True
+            has_builtin = self.active_path(slot.name).is_file()
+            self._enabled[slot.name] = has_builtin
             self._save_persisted_state()
-            if reload_if_enabled and self.active_path(slot.name).is_file():
+            if reload_if_enabled and has_builtin:
                 self.require_session(slot.name, device="cpu")
             return self.slot_status(slot.name)
 
@@ -781,7 +812,7 @@ class LocalModelManager:
                 self._external_path[slot.name] = None
                 self._external_label[slot.name] = None
                 self._drop_sessions_locked(slot.name)
-                self._enabled[slot.name] = True
+                self._enabled[slot.name] = self.active_path(slot.name).is_file()
             self._save_persisted_state()
             return self.list_status()
 

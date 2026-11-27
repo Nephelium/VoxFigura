@@ -7,11 +7,13 @@ import SpeakerReferenceControls from '@/components/common/SpeakerReferenceContro
 import VoiceRenderSelect from '@/components/common/VoiceRenderSelect.vue';
 import { openCardStudio } from '@/components/phonetic-card/session';
 import { APP_BRAND_NAME } from '@/data/app-branding';
+import { describeEngineStatus } from '@/data/engine-status';
 import { textPoseOptions, textPoseSource } from '@/data/ipa-pose-source';
 import { recentToolIds, type RecentToolId } from '@/data/recent-tools';
 import { selectWorkbenchNav, WORKBENCH_NAV_ITEMS } from '@/data/workbench-nav';
 import { workspaceIconUrl } from '@/data/workspace-images';
 import { useWorkbenchStore } from '@/stores/workbench';
+import { mix } from '@/styles/themes';
 
 interface HomeToolEntry {
   id: RecentToolId;
@@ -21,7 +23,6 @@ interface HomeToolEntry {
 
 interface HomeToolGroup {
   code: string;
-  tone: 'accent' | 'teal' | 'violet';
   label: string;
   icon: string;
   entries: readonly HomeToolEntry[];
@@ -30,10 +31,24 @@ interface HomeToolGroup {
 const store = useWorkbenchStore();
 const navMap = new Map(WORKBENCH_NAV_ITEMS.map((item) => [item.id, item]));
 
+// Map sprite luminance to the current palette while keeping the original alpha and shading.
+const homeArtworkRamp = computed(() => {
+  const palette = store.activePalette.value;
+  const accent = palette['--accent'];
+  const dark = store.resolvedColorMode.value === 'dark';
+  const colors = [
+    mix(accent, palette['--text'], dark ? 0.60 : 0.72),
+    accent,
+    mix(accent, palette['--panel'], dark ? 0.66 : 0.69),
+  ];
+  return [1, 3, 5].map((offset) => colors
+    .map((color) => (Number.parseInt(color.slice(offset, offset + 2), 16) / 255).toFixed(4))
+    .join(' '));
+});
+
 const TOOL_GROUPS: readonly HomeToolGroup[] = [
   {
     code: '01',
-    tone: 'accent',
     label: '发音与重建',
     icon: 'phonetics-group',
     entries: [
@@ -56,7 +71,6 @@ const TOOL_GROUPS: readonly HomeToolGroup[] = [
   },
   {
     code: '02',
-    tone: 'teal',
     label: '调控与实验',
     icon: 'experiment-group',
     entries: [
@@ -79,7 +93,6 @@ const TOOL_GROUPS: readonly HomeToolGroup[] = [
   },
   {
     code: '03',
-    tone: 'violet',
     label: '编曲与导出',
     icon: 'production-group',
     entries: [
@@ -118,7 +131,7 @@ function toolArtwork(id: RecentToolId): string {
 
 function launchTool(id: RecentToolId): void {
   if (id === 'card') {
-    openCardStudio('main');
+    openCardStudio('home');
     return;
   }
   const tool = navMap.get(id);
@@ -142,22 +155,25 @@ const starterEntries = computed(() =>
 );
 
 const engineBadge = computed(() => {
-  const status = store.engineStatus.value;
-  if (status === 'python-vtl') {
-    return { tone: 'ok', text: 'VTL 2.4 本地物理引擎已就绪' };
-  }
-  if (status === 'wasm-vtl') {
-    return { tone: 'ok', text: 'VTL 2.4 浏览器引擎已就绪' };
-  }
-  if (status === 'checking') {
-    return { tone: 'checking', text: '正在探测物理声道引擎…' };
-  }
-  return { tone: 'warn', text: '离线预渲染模式' };
+  const info = describeEngineStatus(store.engineStatus.value);
+  return { tone: info.tone, text: info.label };
 });
 </script>
 
 <template>
   <main class="home-view" aria-labelledby="home-title">
+    <svg class="home-artwork-filter" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="voxfigura-home-artwork-theme" color-interpolation-filters="sRGB">
+          <feColorMatrix type="saturate" values="0" />
+          <feComponentTransfer>
+            <feFuncR type="table" :tableValues="homeArtworkRamp[0]" />
+            <feFuncG type="table" :tableValues="homeArtworkRamp[1]" />
+            <feFuncB type="table" :tableValues="homeArtworkRamp[2]" />
+          </feComponentTransfer>
+        </filter>
+      </defs>
+    </svg>
     <div class="home-stage">
       <!-- Hero Welcome Header -->
       <header class="home-hero">
@@ -213,7 +229,7 @@ const engineBadge = computed(() => {
         </div>
 
         <div class="home-synthesis-grid">
-          <article class="synth-card" data-tone="accent" data-tour="home-synth-speaker">
+          <article class="synth-card" data-tour="home-synth-speaker">
             <header class="synth-card-head">
               <span class="synth-badge" aria-hidden="true">
                 <NavArtwork item="m27" class="tool-art" />
@@ -228,14 +244,14 @@ const engineBadge = computed(() => {
             </div>
           </article>
 
-          <article class="synth-card" data-tone="teal" data-tour="home-synth-pose">
+          <article class="synth-card" data-tour="home-synth-pose">
             <header class="synth-card-head">
               <span class="synth-badge" aria-hidden="true">
                 <NavArtwork item="research" class="tool-art" />
               </span>
               <div class="synth-copy">
                 <strong class="synth-title">音标转声道</strong>
-                <small class="synth-sub">切换 IPA 构型库或 IPA2Tract-Lite</small>
+                <small class="synth-sub">推荐自动切换：文本用模型，[IPA] 用构型库</small>
               </div>
             </header>
             <div class="synth-card-ctrl">
@@ -245,11 +261,12 @@ const engineBadge = computed(() => {
                 size="sm"
                 class="synth-full-sel"
                 aria-label="音标转声道构型来源"
+                title="推荐使用自动切换：输入文本时使用模型默认构型，输入 [IPA] 时使用当前 IPA 构型，混排句子自动按段切换"
               />
             </div>
           </article>
 
-          <article class="synth-card" data-tone="violet" data-tour="home-synth-render">
+          <article class="synth-card" data-tour="home-synth-render">
             <header class="synth-card-head">
               <span class="synth-badge" aria-hidden="true">
                 <NavArtwork item="engine" class="tool-art" />
@@ -278,7 +295,6 @@ const engineBadge = computed(() => {
             v-for="group in TOOL_GROUPS"
             :key="group.code"
             class="tool-group"
-            :data-tone="group.tone"
             :aria-label="group.label"
           >
             <header class="group-header">
@@ -373,7 +389,7 @@ const engineBadge = computed(() => {
         </button>
 
         <button type="button" class="guide-banner" @click="store.openOverlay('model-report')">
-          <span class="banner-icon banner-icon-teal" aria-hidden="true">
+          <span class="banner-icon" aria-hidden="true">
             <NavArtwork item="model-matrix" />
           </span>
           <span class="banner-copy">
@@ -397,18 +413,31 @@ const engineBadge = computed(() => {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   scrollbar-width: thin;
   animation: vcViewFadeIn 220ms var(--ease-out-expo, cubic-bezier(0.22, 1, 0.36, 1));
 }
 
+.home-artwork-filter {
+  position: absolute;
+}
+
+.home-view :deep(.nav-art) {
+  filter: url("#voxfigura-home-artwork-theme");
+}
+
 .home-stage {
-  max-width: 1460px;
-  margin: 0 auto;
-  padding: clamp(20px, 2.6vw, 40px) clamp(20px, 3vw, 44px) 26px;
+  width: 100%;
+  max-width: min(1520px, 100%);
+  min-height: min(100%, 960px);
+  margin: auto;
+  padding: clamp(20px, 3vh, 44px) clamp(20px, 3.2vw, 48px) clamp(22px, 3vh, 42px);
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  justify-content: space-between;
+  gap: clamp(18px, 2.8vh, 36px);
 }
 
 .home-synthesis {
@@ -419,7 +448,7 @@ const engineBadge = computed(() => {
 .home-synthesis-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: clamp(14px, 1.35vw, 22px);
   align-items: stretch;
 }
 
@@ -427,33 +456,22 @@ const engineBadge = computed(() => {
   --card-accent: var(--accent);
   --card-tint: color-mix(in srgb, var(--accent) 11%, transparent);
   min-width: 0;
-  border-radius: calc(var(--r-panel, 9px) + 3px);
+  border-radius: var(--r-panel);
   padding: 13px 15px 14px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 11px;
-  background: linear-gradient(155deg, var(--card-tint), transparent 55%),
-    color-mix(in srgb, var(--panel) calc(var(--glass-alpha, 66%) * 0.86), transparent);
+  background: linear-gradient(155deg, var(--card-tint), transparent 55%), var(--panel-bg);
   backdrop-filter: var(--glass-backdrop);
   -webkit-backdrop-filter: var(--glass-backdrop);
-  border: var(--border-w, 1px) solid var(--panel-border);
+  border: var(--border-w) solid var(--panel-border);
   box-shadow: var(--panel-shadow);
-  transition: border-color var(--dur-fast, 165ms) var(--ease-out-expo);
+  transition: border-color var(--dur-fast) var(--ease-out-expo);
 }
 
 .synth-card:hover {
   border-color: color-mix(in srgb, var(--card-accent) 44%, var(--panel-border));
-}
-
-.synth-card[data-tone="teal"] {
-  --card-accent: var(--teal);
-  --card-tint: color-mix(in srgb, var(--teal) 12%, transparent);
-}
-
-.synth-card[data-tone="violet"] {
-  --card-accent: var(--violet);
-  --card-tint: color-mix(in srgb, var(--violet) 12%, transparent);
 }
 
 .synth-card-head {
@@ -509,15 +527,24 @@ const engineBadge = computed(() => {
   flex: 1 1 auto;
 }
 
-/* Shared translucent frosted-card surface so default/custom backdrop breathes through */
+.synth-card-ctrl :deep(.vc-sel-btn:not(:disabled)) {
+  background: var(--themed-button-bg);
+  border-color: var(--themed-button-border);
+}
+
+.synth-card-ctrl :deep(.vc-sel-btn:not(:disabled):is(:hover, :focus-visible, [aria-expanded="true"])) {
+  background: var(--themed-button-hover-bg);
+}
+
+/* Shared skin-aware card surface so all 8 skins & custom backdrops stay consistent */
 .tool-group,
 .recent-panel,
 .guide-banner,
 .hero-pill {
-  background: color-mix(in srgb, var(--panel) calc(var(--glass-alpha, 66%) * 0.86), transparent);
+  background: var(--panel-bg);
   backdrop-filter: var(--glass-backdrop);
   -webkit-backdrop-filter: var(--glass-backdrop);
-  border: var(--border-w, 1px) solid var(--panel-border);
+  border: var(--border-w) solid var(--panel-border);
   box-shadow: var(--panel-shadow);
 }
 
@@ -542,14 +569,12 @@ const engineBadge = computed(() => {
   width: clamp(60px, 4.8vw, 74px);
   height: clamp(60px, 4.8vw, 74px);
   flex: none;
-  border-radius: 20px;
+  border-radius: var(--r-panel);
   padding: 4px;
-  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  background: var(--panel-bg);
   backdrop-filter: var(--glass-backdrop);
-  border: 1px solid color-mix(in srgb, var(--panel-border) 90%, #ffffff);
-  box-shadow:
-    0 10px 26px -10px color-mix(in srgb, var(--shadow-ink) 28%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  border: var(--border-w) solid var(--panel-border);
+  box-shadow: var(--panel-shadow);
   display: grid;
   place-items: center;
 }
@@ -558,7 +583,7 @@ const engineBadge = computed(() => {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  border-radius: 16px;
+  border-radius: max(0px, calc(var(--r-panel) - 3px));
   display: block;
 }
 
@@ -579,7 +604,7 @@ const engineBadge = computed(() => {
 
 .hero-title {
   margin: 0;
-  font-family: "VC Noto Serif SC", "VC Lora", var(--font-ui);
+  font-family: var(--font-ui);
   font-size: clamp(1.95rem, 2.3vw, 2.45rem);
   font-weight: 700;
   letter-spacing: -0.015em;
@@ -616,17 +641,17 @@ const engineBadge = computed(() => {
   gap: 7px;
   height: 30px;
   padding: 0 12px;
-  border-radius: calc(var(--r-ctrl, 6px) + 2px);
+  border-radius: var(--r-ctrl);
   color: var(--text);
   font-size: 0.94rem;
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
   transition:
-    border-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    background-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    color var(--dur-fast, 165ms) var(--ease-out-expo),
-    transform var(--dur-fast, 165ms) var(--ease-out-expo);
+    border-color var(--dur-fast) var(--ease-out-expo),
+    background-color var(--dur-fast) var(--ease-out-expo),
+    color var(--dur-fast) var(--ease-out-expo),
+    transform var(--dur-fast) var(--ease-out-expo);
 }
 
 .hero-pill:hover,
@@ -635,6 +660,11 @@ const engineBadge = computed(() => {
   background: color-mix(in srgb, var(--selected) 68%, var(--panel));
   color: var(--accent);
   transform: translateY(-1px);
+}
+
+.action-pill {
+  background: var(--themed-button-bg);
+  border-color: var(--themed-button-border);
 }
 
 .engine-pill {
@@ -696,7 +726,7 @@ const engineBadge = computed(() => {
 .tool-groups {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: clamp(14px, 1.35vw, 22px);
   align-items: stretch;
 }
 
@@ -704,20 +734,10 @@ const engineBadge = computed(() => {
   --group-accent: var(--accent);
   --group-tint: color-mix(in srgb, var(--accent) 11%, transparent);
   min-width: 0;
-  border-radius: calc(var(--r-panel, 9px) + 3px);
+  border-radius: var(--r-panel);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-}
-
-.tool-group[data-tone="teal"] {
-  --group-accent: var(--teal);
-  --group-tint: color-mix(in srgb, var(--teal) 12%, transparent);
-}
-
-.tool-group[data-tone="violet"] {
-  --group-accent: var(--violet);
-  --group-tint: color-mix(in srgb, var(--violet) 12%, transparent);
 }
 
 .group-header {
@@ -778,7 +798,7 @@ const engineBadge = computed(() => {
   padding: 12px 8px;
   border: 0;
   border-radius: calc(var(--r-ctrl, 6px) + 2px);
-  background: transparent;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
   color: var(--text);
   text-align: left;
   cursor: pointer;
@@ -800,7 +820,7 @@ const engineBadge = computed(() => {
 
 .tool-row:hover,
 .tool-row:focus-visible {
-  background: color-mix(in srgb, var(--group-accent) 10%, color-mix(in srgb, var(--panel) 72%, transparent));
+  background: var(--themed-button-hover-bg);
 }
 
 .tool-row:hover::before,
@@ -813,16 +833,16 @@ const engineBadge = computed(() => {
 .tool-badge {
   width: 38px;
   height: 38px;
-  border-radius: 10px;
+  border-radius: var(--r-ctrl);
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, var(--group-accent) 8%, color-mix(in srgb, var(--panel) 84%, transparent));
-  border: 1px solid color-mix(in srgb, var(--group-accent) 18%, var(--border));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  background: var(--themed-button-bg);
+  border: var(--border-w) solid var(--themed-button-border);
+  box-shadow: var(--ctrl-shadow);
   transition:
-    transform var(--dur-fast, 165ms) var(--ease-out-expo),
-    border-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    background-color var(--dur-fast, 165ms) var(--ease-out-expo);
+    transform var(--dur-fast) var(--ease-out-expo),
+    border-color var(--dur-fast) var(--ease-out-expo),
+    background-color var(--dur-fast) var(--ease-out-expo);
 }
 
 .tool-art {
@@ -882,7 +902,7 @@ const engineBadge = computed(() => {
 
 /* Recently Used Panel */
 .recent-panel {
-  border-radius: calc(var(--r-panel, 9px) + 3px);
+  border-radius: var(--r-panel);
   padding: 14px 18px 16px;
 }
 
@@ -917,18 +937,18 @@ const engineBadge = computed(() => {
   gap: 7px;
   height: 32px;
   padding: 0 11px;
-  border-radius: calc(var(--r-ctrl, 6px) + 2px);
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  border-radius: var(--r-ctrl);
+  border: var(--border-w) solid var(--themed-button-border);
+  background: var(--themed-button-bg);
   color: var(--text);
   font-size: 0.95rem;
   font-weight: 520;
   cursor: pointer;
   transition:
-    border-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    background-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    color var(--dur-fast, 165ms) var(--ease-out-expo),
-    transform var(--dur-fast, 165ms) var(--ease-out-expo);
+    border-color var(--dur-fast) var(--ease-out-expo),
+    background-color var(--dur-fast) var(--ease-out-expo),
+    color var(--dur-fast) var(--ease-out-expo),
+    transform var(--dur-fast) var(--ease-out-expo);
 }
 
 .recent-chip:hover,
@@ -969,14 +989,15 @@ const engineBadge = computed(() => {
   gap: 12px;
   width: 100%;
   padding: 12px 16px;
-  border-radius: calc(var(--r-panel, 9px) + 2px);
+  border-radius: var(--r-panel);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-bg));
   color: var(--text);
   text-align: left;
   cursor: pointer;
   transition:
-    border-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    background-color var(--dur-fast, 165ms) var(--ease-out-expo),
-    transform var(--dur-fast, 165ms) var(--ease-out-expo);
+    border-color var(--dur-fast) var(--ease-out-expo),
+    background-color var(--dur-fast) var(--ease-out-expo),
+    transform var(--dur-fast) var(--ease-out-expo);
 }
 
 .guide-banner:hover,
@@ -997,10 +1018,6 @@ const engineBadge = computed(() => {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.banner-icon-teal {
-  color: var(--teal);
-  background: color-mix(in srgb, var(--teal) 13%, transparent);
-}
 
 .banner-copy {
   min-width: 0;
@@ -1039,19 +1056,6 @@ const engineBadge = computed(() => {
 .guide-banner:hover .banner-action,
 .guide-banner:focus-visible .banner-action {
   transform: translateX(2px);
-}
-
-/* Dark theme polish: crisp glass edge and deeper luminance balance */
-:global(:root[data-theme="dark"]) .hero-icon-frame {
-  background: color-mix(in srgb, var(--panel) 62%, transparent);
-  border-color: rgba(255, 255, 255, 0.14);
-  box-shadow:
-    0 12px 28px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-}
-
-:global(:root[data-theme="dark"]) .tool-badge {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 /* Responsive container queries */

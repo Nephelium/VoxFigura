@@ -61,8 +61,9 @@ const deepSeekAsrKey = computed(() =>
 
 const hasAudio = computed(() => Boolean(props.primaryAudio?.file));
 const canAlignDual = computed(() => Boolean(props.primaryAudio?.file && props.secondaryAudio?.file));
+const transcribingMode = ref<'local' | 'cloud' | null>(null);
 const localAsr = useLocalAsrSetup(
-  computed(() => hasAudio.value && !deepSeekAsrKey.value),
+  computed(() => hasAudio.value),
   store.localWhisperModel,
   store.setLocalWhisperModel,
 );
@@ -78,13 +79,14 @@ const alignDisabled = computed(
 
 watch([transcribing, aligning], ([t, a]) => emit('busy', t || a));
 watch(deepSeekAsrKey, () => {
-  if (transcribing.value) cancelTranscription();
+  if (transcribing.value && transcribingMode.value === 'cloud') cancelTranscription();
 });
 
 function cancelTranscription() {
   asrAbort?.abort();
   asrAbort = null;
   transcribing.value = false;
+  transcribingMode.value = null;
 }
 
 function parseGuidedAlignment(textgrid: string): TextGridDocument {
@@ -103,31 +105,33 @@ function parseGuidedAlignment(textgrid: string): TextGridDocument {
   return cleanTextGridWordLabels(parsed.value);
 }
 
-async function runTranscribe() {
+async function runTranscribe(mode: 'local' | 'cloud' = 'local') {
   const file = props.primaryAudio?.file;
   if (!file || actionBlocked.value) return;
-  const key = deepSeekAsrKey.value;
+  const key = mode === 'cloud' ? deepSeekAsrKey.value : '';
   cancelTranscription();
   const req = new AbortController();
   asrAbort = req;
   transcribing.value = true;
+  transcribingMode.value = mode;
   statusFailed.value = false;
-  statusMessage.value = key ? '正在通过 DeepSeek API 识别文本…' : '正在使用本地 Whisper 识别文本…';
+  statusMessage.value = mode === 'cloud' ? '正在通过 DeepSeek API 识别文本…' : '正在使用本地 SenseVoice-Small 识别文本…';
   try {
     const result = await requestTranscription(file, lang.value, req.signal, {
+      mode,
       deepSeekKey: key,
       model: store.localWhisperModel.value,
     });
     if (asrAbort !== req || props.primaryAudio?.file !== file) return;
     emit('update:modelValue', result.text);
-    statusMessage.value = key
-      ? 'DeepSeek 已转写文本，可微调后点击「按原文对齐」'
-      : `已识别${result.lang === 'zh' ? '普通话' : '英语'}文本，可校对后按原文对齐`;
+    statusMessage.value = mode === 'cloud'
+      ? 'DeepSeek API 已转写文本，可微调后点击「按原文对齐」'
+      : 'SenseVoice-Small 已转写文本，可校对后按原文对齐';
   } catch (err) {
     if (asrAbort === req && props.primaryAudio?.file === file) {
       statusFailed.value = true;
       statusMessage.value = '自动识别未完成：' + (err instanceof Error ? err.message : String(err));
-      if (!key) void localAsr.refresh();
+      if (mode === 'local') void localAsr.refresh();
     }
   } finally {
     if (asrAbort === req) cancelTranscription();
@@ -220,11 +224,13 @@ onBeforeUnmount(() => {
         :cloud="!!deepSeekAsrKey"
         :blocked="actionBlocked"
         :transcribing="transcribing"
+        :transcribing-mode="transcribingMode"
         :install="localAsrStatus"
         :install-message="localAsrMessage"
         :pending-model="localAsrPending"
         @transcribe="runTranscribe"
         @choose="localAsr.choose"
+        @remove="localAsr.remove"
         @refresh="localAsr.refresh"
       />
     </div>
@@ -267,11 +273,11 @@ onBeforeUnmount(() => {
       <span v-else class="tree-tag">DeepSeek ASR</span>
     </div>
 
-    <p v-if="statusMessage || (localAsrMessage && !deepSeekAsrKey)" class="mx-align-note" :class="{ failed: statusFailed }" role="status">
+    <p v-if="statusMessage || localAsrMessage" class="mx-align-note" :class="{ failed: statusFailed }" role="status">
       {{ statusMessage || localAsrMessage }}
     </p>
     <p v-else class="mx-align-note">
-      可手写文本或配置 DeepSeek API 转写，再用 <code>Vox2Align-Lite v2</code> 按原文对齐。
+      可手写文本、点击「本地自动转文字」（SenseVoice-Small）或配置 DeepSeek API 转写，再用 <code>Vox2Align-Lite v2</code> 按原文对齐。
     </p>
   </div>
 </template>

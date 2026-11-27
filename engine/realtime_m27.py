@@ -12,6 +12,7 @@ from collections import OrderedDict
 import ctypes as C
 import hashlib
 import io
+from pathlib import Path
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,7 @@ from onnx_inference import (
     load_speaker_profile_embedding,
     run_vox2tract_chunk,
 )
+from validation import validate_scalar_range, validation_error
 
 SAMPLE_RATE_16K = 16000
 HOP_16K = 320  # 20 ms @ 16 kHz (50 Hz control grid)
@@ -43,6 +45,32 @@ VOCODER_MAX_LEFT_CONTEXT_FRAMES = 28
 VOCODER_MAX_RIGHT_CONTEXT_FRAMES = 18
 SILENCE_RMS_THRESHOLD = 0.0075
 SPEECH_RMS_FULL = 0.028
+DEFAULT_LECTURE_MEDIAN_F0_HZ = 165.0
+
+
+def _estimate_speaker_median_f0_hz(wav_16k: np.ndarray) -> Optional[float]:
+    """Estimate robust voiced median F0 (Hz) of a speaker reference clip via SwiftF0."""
+    x = np.asarray(wav_16k, dtype=np.float32).reshape(-1)
+    n_frames = len(x) // HOP_16K
+    if n_frames < 5:
+        return None
+    try:
+        f0_hz, voiced = extract_swift_f0_50hz(x, fmin=55.0, fmax=650.0, num_frames=n_frames)
+    except Exception:
+        return None
+    frames = x[: n_frames * HOP_16K].reshape(n_frames, HOP_16K)
+    rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+    base_mask = np.asarray(voiced, dtype=bool) & np.isfinite(f0_hz) & (f0_hz >= 55.0) & (f0_hz <= 650.0)
+    if int(np.count_nonzero(base_mask)) < 5:
+        return None
+    med_rms = float(np.median(rms[base_mask]))
+    energy_floor = max(0.008, 0.15 * med_rms)
+    strong_mask = base_mask & (rms >= energy_floor)
+    use_mask = strong_mask if int(np.count_nonzero(strong_mask)) >= 5 else base_mask
+    med_f0 = float(np.median(f0_hz[use_mask]))
+    if not np.isfinite(med_f0) or med_f0 <= 0.0:
+        return None
+    return round(float(np.clip(med_f0, 75.0, 420.0)), 1)
 
 
 class _RealtimeSessionState:
@@ -51,6 +79,8 @@ class _RealtimeSessionState:
         "has_audio_predecessor",
         "self_spk_emb",
         "self_speech_buf",
+        "self_f0_ref_hz",
+        "emitted_frame_cursor",
         "updated_at",
     )
 
@@ -59,6 +89,8 @@ class _RealtimeSessionState:
         self.has_audio_predecessor = False
         self.self_spk_emb: Optional[np.ndarray] = None
         self.self_speech_buf: list[np.ndarray] = []
+        self.self_f0_ref_hz: Optional[float] = None
+        self.emitted_frame_cursor: int = 0
         self.updated_at: float = time.monotonic()
 
 
@@ -76,9 +108,165 @@ class RealtimeM27Service:
         self._infer_lock = threading.Lock()
         self._sessions: OrderedDict[str, _RealtimeSessionState] = OrderedDict()
         self._spk_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._spk_f0_cache: Dict[str, Optional[float]] = {}
         self._default_spk: Optional[np.ndarray] = None
         self._neutral_anim_cache: Optional[Dict[str, Any]] = None
         self._tract3d_topology_cache: Optional[List[Dict[str, Any]]] = None
+        self._preset_store: Any = None
+        self._preset_cache_mtime_ns: Optional[int] = None
+        self._preset_cache: Optional[Dict[str, Dict[str, Any]]] = None
+
+    def _get_phonation_presets(self) -> Dict[str, Dict[str, Any]]:
+        """Load built-in + custom VoQS phonation presets (mtime-cached, pure NumPy)."""
+        ensure_pure_numpy_imports()
+        from m27_voice_morph.presets import CustomPresetStore
+
+        preset_path = Path(__file__).resolve().parents[1] / ".cache" / "voice-morph" / "presets.json"
+        try:
+            mtime_ns: Optional[int] = preset_path.stat().st_mtime_ns if preset_path.is_file() else -1
+        except OSError:
+            mtime_ns = -1
+        with self._lock:
+            if self._preset_cache is not None and self._preset_cache_mtime_ns == mtime_ns:
+                return self._preset_cache
+            if self._preset_store is None:
+                self._preset_store = CustomPresetStore(preset_path)
+            loaded = self._preset_store.load_all()
+            self._preset_cache = loaded
+            self._preset_cache_mtime_ns = mtime_ns
+            return loaded
+
+    def _resolve_live_speaker_target_f0_hz(
+        self,
+        *,
+        speaker_pitch_match: bool,
+        use_timbre_model: bool,
+        speaker_key: str,
+        speaker_wav_b64: str,
+        speaker_mode: str,
+    ) -> Optional[float]:
+        """Resolve target speaker's natural median F0 (Hz) for register matching (None for self/input voice)."""
+        if not speaker_pitch_match:
+            return None
+        if not use_timbre_model or speaker_mode == "lecture":
+            return DEFAULT_LECTURE_MEDIAN_F0_HZ
+        if speaker_mode == "input":
+            return None
+        if speaker_key:
+            with self._lock:
+                cached_f0 = self._spk_f0_cache.get(speaker_key)
+            if cached_f0 is not None and cached_f0 > 0.0:
+                return float(cached_f0)
+        if speaker_wav_b64:
+            prep = self.prepare_speaker({"speaker_wav_base64": speaker_wav_b64})
+            if prep.get("ok") and prep.get("median_f0_hz"):
+                return float(prep["median_f0_hz"])
+        return None
+
+    @staticmethod
+    def _apply_speaker_pitch_match(
+        m27_dpa_full: np.ndarray,
+        f0_voiced: Optional[np.ndarray],
+        *,
+        target_f0_hz: Optional[float],
+        session: _RealtimeSessionState,
+    ) -> Tuple[np.ndarray, float]:
+        """Proportionally shift speaker's natural F0 toward target speaker median F0 (preserving intonation contour)."""
+        ensure_pure_numpy_imports()
+        from m27_voice_morph.curves import compute_voicing_and_speech_gates
+
+        phys = np.asarray(m27_dpa_full, dtype=np.float32)
+        n_frames = phys.shape[0]
+        if n_frames == 0:
+            return phys.copy(), 1.0
+
+        voiced_f = (
+            np.asarray(f0_voiced, dtype=np.float32).reshape(-1)[:n_frames]
+            if f0_voiced is not None
+            else None
+        )
+        voiced_gate, _ = compute_voicing_and_speech_gates(phys, f0_voiced=voiced_f, fps=50.0)
+        nat_voiced = (voiced_gate >= 0.5) & np.isfinite(phys[:, 17]) & (phys[:, 17] > 40.0)
+        n_nat = int(np.count_nonzero(nat_voiced))
+        if n_nat >= 3:
+            win_med = float(np.median(phys[nat_voiced, 17]))
+            if session.self_f0_ref_hz is None:
+                session.self_f0_ref_hz = win_med
+            else:
+                session.self_f0_ref_hz = 0.75 * session.self_f0_ref_hz + 0.25 * win_med
+
+        if target_f0_hz is None or not np.isfinite(target_f0_hz) or target_f0_hz <= 0.0:
+            return phys.copy(), 1.0
+
+        ref_hz = session.self_f0_ref_hz
+        if ref_hz is None and n_nat >= 1:
+            ref_hz = float(np.median(phys[nat_voiced, 17]))
+        if ref_hz is None or ref_hz <= 1e-3:
+            return phys.copy(), 1.0
+
+        ratio = float(np.clip(float(target_f0_hz) / ref_hz, 0.40, 2.50))
+        if abs(ratio - 1.0) <= 1e-3:
+            return phys.copy(), 1.0
+
+        out = phys.copy()
+        valid = np.isfinite(out[:, 17]) & (out[:, 17] > 0.0)
+        if np.any(valid):
+            out[valid, 17] = np.maximum(20.0, out[valid, 17] * ratio).astype(np.float32)
+        return out, ratio
+
+    @staticmethod
+    def _apply_realtime_phonation(
+        m27_dpa_full: np.ndarray,
+        f0_voiced: Optional[np.ndarray],
+        *,
+        preset_id: Optional[str],
+        preset: Optional[Dict[str, Any]],
+        strength: float,
+        f0_coupling: Optional[bool],
+        creak_irregularity: Optional[float],
+    ) -> np.ndarray:
+        """Delegate realtime phonation modulation directly to Voice Morph Studio's finished morpher."""
+        phys_in = np.asarray(m27_dpa_full, dtype=np.float32)
+        n_frames = phys_in.shape[0]
+        if n_frames == 0 or preset is None or not preset_id or strength <= 1e-4:
+            return phys_in.copy()
+
+        ensure_pure_numpy_imports()
+        from m27_voice_morph.morpher import (
+            PresetMorphConfig,
+            apply_preset_phonation_morph,
+            normalize_m27_phys,
+        )
+
+        use_f0 = bool(preset.get("default_f0_coupling", False)) if f0_coupling is None else bool(f0_coupling)
+        eff_irreg = (
+            float(preset.get("default_creak_irregularity", 0.30))
+            if creak_irregularity is None
+            else float(creak_irregularity)
+        )
+        voiced_f = (
+            np.asarray(f0_voiced, dtype=np.float32).reshape(-1)[:n_frames]
+            if f0_voiced is not None
+            else None
+        )
+        config = PresetMorphConfig(
+            preset_id=preset_id,
+            knots=[{"t": 0.0, "v": float(strength)}, {"t": 1.0, "v": float(strength)}],
+            interp_mode="linear",
+            enable_voicing_gate=True,
+            smooth_ms=0.0,
+            enable_f0_coupling=use_f0,
+            creak_irregularity=eff_irreg,
+            fps=50.0,
+            output_f0_range_hz=None,
+        )
+        res = apply_preset_phonation_morph(
+            normalize_m27_phys(phys_in),
+            config,
+            preset_dict=preset,
+            f0_voiced=voiced_f,
+        )
+        return np.asarray(res["m27_phys"], dtype=np.float32)
 
     def _get_default_speaker(self) -> np.ndarray:
         with self._lock:
@@ -114,15 +302,17 @@ class RealtimeM27Service:
                 self._spk_cache.move_to_end(key)
             return vec
 
-    def _put_cached_speaker(self, key: str, vec: np.ndarray) -> None:
+    def _put_cached_speaker(self, key: str, vec: np.ndarray, median_f0_hz: Optional[float] = None) -> None:
         with self._lock:
             self._spk_cache[key] = np.ascontiguousarray(vec, dtype=np.float32)
+            self._spk_f0_cache[key] = median_f0_hz
             self._spk_cache.move_to_end(key)
             while len(self._spk_cache) > 24:
-                self._spk_cache.popitem(last=False)
+                old_k, _ = self._spk_cache.popitem(last=False)
+                self._spk_f0_cache.pop(old_k, None)
 
     def prepare_speaker(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Pre-extract and cache a 512-dim speaker embedding once before starting realtime synthesis."""
+        """Pre-extract and cache a 512-dim speaker embedding + natural median F0 once before synthesis."""
         if not isinstance(payload, dict):
             return {"ok": False, "error": {"code": "validation_error", "hint": "请求体须为 JSON 对象"}}
         wav_b64 = payload.get("speaker_wav_base64") or payload.get("speaker_ref_wav_base64")
@@ -132,7 +322,15 @@ class RealtimeM27Service:
         ver = LOCAL_MODEL_MANAGER.model_version_key("Vox2Spk-Lite")
         key = hashlib.blake2b(f"{ver}|{wav_b64.strip()}".encode("utf-8"), digest_size=12).hexdigest()
         if self._get_cached_speaker(key) is not None:
-            return {"ok": True, "speaker_key": key, "cached": True, "extract_ms": 0.0}
+            with self._lock:
+                cached_f0 = self._spk_f0_cache.get(key)
+            return {
+                "ok": True,
+                "speaker_key": key,
+                "cached": True,
+                "extract_ms": 0.0,
+                "median_f0_hz": cached_f0,
+            }
 
         t0 = time.perf_counter()
         try:
@@ -148,12 +346,14 @@ class RealtimeM27Service:
             emb, _ = extract_speaker_embedding(clip, device="cpu")
         except ModelUnloadedError as exc:
             return {"ok": False, "error": {"code": exc.code, "model": exc.model_name, "hint": exc.hint}}
-        self._put_cached_speaker(key, emb)
+        median_f0 = _estimate_speaker_median_f0_hz(clip)
+        self._put_cached_speaker(key, emb, median_f0_hz=median_f0)
         return {
             "ok": True,
             "speaker_key": key,
             "cached": False,
             "extract_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "median_f0_hz": median_f0,
         }
 
     def _extract_anim_fast(self, m27_50hz_dpa: np.ndarray, *, fps: int = 25) -> Dict[str, Any]:
@@ -355,6 +555,44 @@ class RealtimeM27Service:
         speaker_key = str(payload.get("speaker_key") or "").strip()
         speaker_wav_b64 = str(payload.get("speaker_wav_base64") or "").strip()
         speaker_mode = str(payload.get("speaker_mode") or "input").strip()
+
+        raw_speaker_pitch_match = payload.get("speaker_pitch_match", True)
+        if not isinstance(raw_speaker_pitch_match, bool):
+            return validation_error("speaker_pitch_match", "speaker_pitch_match 须为布尔值")
+        speaker_pitch_match: bool = raw_speaker_pitch_match
+
+        raw_phonation = payload.get("phonation_preset")
+        phonation_id: Optional[str] = None
+        phonation_preset_dict: Optional[Dict[str, Any]] = None
+        if raw_phonation is not None:
+            if not isinstance(raw_phonation, str):
+                return validation_error("phonation_preset", "phonation_preset 须为字符串预设标识")
+            pid = raw_phonation.strip()
+            if pid and pid.lower() != "none":
+                presets = self._get_phonation_presets()
+                preset_obj = presets.get(pid)
+                if preset_obj is None:
+                    return validation_error("phonation_preset", f"未知发声类型预设: {pid}")
+                phonation_id = pid
+                phonation_preset_dict = preset_obj
+
+        raw_strength = payload.get("phonation_strength", 0.85)
+        if err := validate_scalar_range("phonation_strength", raw_strength, 0.0, 1.0, "ratio", tol=0):
+            return err
+        phonation_strength = float(raw_strength)
+
+        raw_f0_coupling = payload.get("phonation_f0_coupling", None)
+        if raw_f0_coupling is not None and not isinstance(raw_f0_coupling, bool):
+            return validation_error("phonation_f0_coupling", "phonation_f0_coupling 须为布尔值或省略")
+        phonation_f0_coupling: Optional[bool] = raw_f0_coupling
+
+        raw_creak_irreg = payload.get("phonation_creak_irregularity", None)
+        phonation_creak_irreg: Optional[float] = None
+        if raw_creak_irreg is not None:
+            if err := validate_scalar_range("phonation_creak_irregularity", raw_creak_irreg, 0.0, 1.0, "ratio", tol=0):
+                return err
+            phonation_creak_irreg = float(raw_creak_irreg)
+
         if not warmup and payload.get("reset_session") is True:
             with self._lock:
                 self._sessions.pop(session_id, None)
@@ -384,6 +622,7 @@ class RealtimeM27Service:
                 prev[23] = 0.0
                 emitted_dpa[k] = prev
             session.last_m27_dpa = emitted_dpa[-1].copy()
+            session.emitted_frame_cursor += n_emit
 
             emitted_pa = emitted_dpa.copy()
             emitted_pa[:, 18] /= 10.0
@@ -396,6 +635,9 @@ class RealtimeM27Service:
                 "pr_pa": 0.0,
                 "voiced": False,
                 "timbre_status": "idle",
+                "phonation_preset": phonation_id or "none",
+                "speaker_f0_ratio": 1.0,
+                "speaker_target_f0_hz": None,
                 "compute_ms": round((time.perf_counter() - t0) * 1000.0, 1),
             }
             if include_tract_geometry:
@@ -421,10 +663,19 @@ class RealtimeM27Service:
         ensure_pure_numpy_imports()
         from kf_ipa_synth.m27_contract import denormalize_m27, normalize_f0_m27, normalize_m27
 
+        applied_spk_f0_ratio = 1.0
+        target_spk_f0_hz = self._resolve_live_speaker_target_f0_hz(
+            speaker_pitch_match=speaker_pitch_match,
+            use_timbre_model=use_timbre_model,
+            speaker_key=speaker_key,
+            speaker_wav_b64=speaker_wav_b64,
+            speaker_mode=speaker_mode,
+        )
+
         try:
             with self._infer_lock:
-                # 1. Pitch track on the 50 Hz control grid
-                f0_hz, _ = extract_swift_f0_50hz(wav_16k, fmin=40.0, fmax=600.0, num_frames=n_frames)
+                # 1. Pitch track on the 50 Hz control grid (SwiftF0 0.3.0 full native range)
+                f0_hz, f0_voiced = extract_swift_f0_50hz(wav_16k, fmin=46.875, fmax=2093.75, num_frames=n_frames)
                 f0_norm = normalize_f0_m27(f0_hz)
 
                 # 2. Vox2Tract-Lite inversion with left context and lookahead
@@ -446,14 +697,38 @@ class RealtimeM27Service:
                 m27_dpa_full[:, :17] = g * m27_dpa_full[:, :17] + (1.0 - g) * REST_M27_PHYS[None, :17]
                 m27_dpa_full[:, 18:] = g * m27_dpa_full[:, 18:] + (1.0 - g) * REST_M27_PHYS[None, 18:]
 
+                # 3a. Proportional F0 register matching to the selected target speaker (same order as synthesis page)
+                m27_dpa_full, applied_spk_f0_ratio = self._apply_speaker_pitch_match(
+                    m27_dpa_full,
+                    f0_voiced,
+                    target_f0_hz=target_spk_f0_hz,
+                    session=session,
+                )
+
+                # 3b. Delegate VoQS phonation modulation directly to Voice Morph Studio's finished morpher
+                m27_dpa_full = self._apply_realtime_phonation(
+                    m27_dpa_full,
+                    f0_voiced,
+                    preset_id=phonation_id,
+                    preset=phonation_preset_dict,
+                    strength=phonation_strength,
+                    f0_coupling=phonation_f0_coupling,
+                    creak_irregularity=phonation_creak_irreg,
+                )
+
                 # Smooth continuity across step boundary with previous emitted frame (first 2 frames only)
                 emitted_dpa = m27_dpa_full[emit_a:emit_b].copy()
                 prev = session.last_m27_dpa
-                for k, w_prev in enumerate((0.45, 0.20)):
+                for k, (w_prev, w_f0) in enumerate(((0.45, 0.35), (0.20, 0.15))):
                     if k < len(emitted_dpa):
                         emitted_dpa[k, :17] = w_prev * prev[:17] + (1.0 - w_prev) * emitted_dpa[k, :17]
                         emitted_dpa[k, 18:] = w_prev * prev[18:] + (1.0 - w_prev) * emitted_dpa[k, 18:]
+                        if prev[18] > 1500.0 and emitted_dpa[k, 18] > 1500.0 and prev[17] > 20.0 and emitted_dpa[k, 17] > 20.0:
+                            emitted_dpa[k, 17] = float(
+                                np.exp(w_f0 * np.log(float(prev[17])) + (1.0 - w_f0) * np.log(float(emitted_dpa[k, 17])))
+                            )
                 session.last_m27_dpa = emitted_dpa[-1].copy()
+                session.emitted_frame_cursor += n_emit
                 m27_dpa_full[emit_a:emit_b] = emitted_dpa
 
                 # 4. Optional realtime neural audio synthesis via Tract2Vox-Lite
@@ -520,6 +795,9 @@ class RealtimeM27Service:
             "pr_pa": round(float(last_row[18]), 1),
             "voiced": bool(last_row[18] > 150.0 and last_row[23] > 0.12),
             "timbre_status": timbre_status,
+            "phonation_preset": phonation_id or "none",
+            "speaker_f0_ratio": round(float(applied_spk_f0_ratio), 3),
+            "speaker_target_f0_hz": round(float(target_spk_f0_hz), 1) if target_spk_f0_hz is not None else None,
         }
         if include_tract_geometry:
             out["tract_glottis_anim"] = self._extract_anim_fast(emitted_dpa, fps=fps)

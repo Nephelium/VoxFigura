@@ -7,6 +7,7 @@ export interface SelectOption<T extends string | number = string> {
   value: T;
   label: string;
   badge?: string;
+  group?: string;
   disabled?: boolean;
 }
 
@@ -206,31 +207,53 @@ onBeforeUnmount(() => {
         role="listbox"
         :style="menuStyle"
       >
-        <button
-          v-for="(opt, idx) in options"
-          :key="String(opt.value)"
-          type="button"
-          class="vc-sel-opt"
-          :class="{
-            active: opt.value === modelValue,
-            highlighted: idx === highlightIndex,
-          }"
-          :disabled="opt.disabled"
-          role="option"
-          :aria-selected="opt.value === modelValue"
-          @pointerenter="highlightIndex = idx"
-          @click="pick(opt)"
-        >
-          <span>{{ opt.label }}</span>
-          <span v-if="opt.badge" class="mono muted" style="font-size: 0.833333rem">{{ opt.badge }}</span>
-          <IconSvg v-else-if="opt.value === modelValue" name="check" :size="12" />
-        </button>
+        <template v-for="(opt, idx) in options" :key="String(opt.value)">
+          <div
+            v-if="opt.group && (idx === 0 || options[idx - 1]?.group !== opt.group)"
+            class="vc-sel-group"
+            role="presentation"
+          >
+            {{ opt.group }}
+          </div>
+          <button
+            type="button"
+            class="vc-sel-opt"
+            :class="{
+              active: opt.value === modelValue,
+              highlighted: idx === highlightIndex,
+            }"
+            :disabled="opt.disabled"
+            role="option"
+            :aria-selected="opt.value === modelValue"
+            @pointerenter="highlightIndex = idx"
+            @click="pick(opt)"
+          >
+            <span>{{ opt.label }}</span>
+            <span v-if="opt.badge" class="mono muted" style="font-size: 0.833333rem">{{ opt.badge }}</span>
+            <IconSvg v-else-if="opt.value === modelValue" name="check" :size="12" />
+          </button>
+        </template>
       </div>
     </Teleport>
   </div>
 </template>
 
 <style scoped>
+.vc-sel-group {
+  padding: 5px 9px 2px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  user-select: none;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.vc-sel-group:first-child {
+  border-top: 0;
+  margin-top: 0;
+}
 .vc-sel-labelled {
   border-color: color-mix(in srgb, var(--text) 68%, var(--accent));
   background: color-mix(in srgb, var(--accent) 11%, var(--panel));

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { computeDesktopViewportSize, getSkin, listBackdrops } from '@/styles/skin-registry';
-import { paletteShortName, paletteTokens } from '@/styles/themes';
-import { artworkHueShift, colorHue, sampleImageHue } from '@/styles/artwork-hue';
+import { backdropArtworkUrl, computeDesktopViewportSize, getSkin, listBackdrops } from '@/styles/skin-registry';
+import { paletteShortName } from '@/styles/themes';
+import { artworkHueShift, colorHue, sampleArtworkImage, toolbarArtworkTokens, type ArtworkImageColors } from '@/styles/artwork-hue';
 import { APP_WINDOW_TITLE } from '@/data/app-branding';
+import { describeEngineStatus } from '@/data/engine-status';
 import { activeWorkspaceBackground, activeWorkspaceIcon, loadWorkspaceImages, workspaceIconUrl } from '@/data/workspace-images';
+import { setDesktopWindowIcon } from '@/utils/desktop-window';
 import { useWorkbenchStore } from '@/stores/workbench';
 import { initializeSpeakerReferences } from '@/data/synthesis-speaker';
 import TechBackdrop from '@/components/common/TechBackdrop.vue';
@@ -15,12 +17,14 @@ import StartupSplash from '@/components/common/StartupSplash.vue';
 import SpotlightTourOverlay from '@/components/onboarding/SpotlightTourOverlay.vue';
 import UpdateModal from '@/components/modals/UpdateModal.vue';
 import ToastHost from '@/components/common/ToastHost.vue';
+import TooltipHost from '@/components/common/TooltipHost.vue';
 import { cancelUpdateCheck, checkForAppUpdate, closeUpdateModal, updateModalOpen } from '@/data/app-update';
 import { startupBootCompleted } from '@/data/startup-splash';
 import { useOnboardingStore } from '@/stores/onboarding';
 import AiDrawer from '@/components/ai/AiDrawer.vue';
 import ExportModal from '@/components/modals/ExportModal.vue';
 import ReferencesModal from '@/components/modals/ReferencesModal.vue';
+import { cardDemoNoticeOpen, cardStudioOpen } from '@/components/phonetic-card/session';
 import { ExploreWorkspace, EditionCardModal } from '@vocalcut/edition';
 import {
   WORKBENCH_NAV_ITEMS,
@@ -39,29 +43,46 @@ const ModuleGuideModal = defineAsyncComponent(() => import('@/components/guide/M
 
 const store = useWorkbenchStore();
 const onboarding = useOnboardingStore();
-const imageHue = ref<number>();
+const imageColors = ref<ArtworkImageColors>();
 let autoTourTimer: number | undefined;
 let autoUpdateTimer: number | undefined;
 let startupUpdateChecked = false;
 
-watch(() => activeWorkspaceBackground.value?.url, async (url, _, onCleanup) => {
-  imageHue.value = undefined;
+const backdropColorSource = computed(() => activeWorkspaceBackground.value?.url
+  ?? backdropArtworkUrl(store.backdropId.value, store.resolvedColorMode.value, true));
+watch(backdropColorSource, async (url, _, onCleanup) => {
+  imageColors.value = undefined;
   if (!url) return;
   let active = true;
   onCleanup(() => { active = false; });
-  const hue = await sampleImageHue(url);
-  if (active) imageHue.value = hue;
+  const colors = await sampleArtworkImage(url);
+  if (active) imageColors.value = colors;
 }, { immediate: true });
 
 const artworkHue = computed(() => {
   const accent = store.paletteId.value === 'custom'
     ? store.customAccentHex.value
-    : paletteTokens(store.paletteId.value, store.resolvedColorMode.value)['--accent'];
+    : store.activePalette.value['--accent'];
   const materialHue = store.backdropColorScheme.value === 'theme'
     ? undefined
-    : store.backdropCustomColors.value.map(colorHue).find((hue) => hue !== undefined);
-  const backgroundHue = activeWorkspaceBackground.value ? imageHue.value : materialHue;
-  return artworkHueShift(store.surfaceStyle.value, colorHue(accent), backgroundHue, store.bgSat.value / 100);
+    : store.backdropActiveColors.value.map(colorHue).find((hue) => hue !== undefined);
+  const backgroundHue = activeWorkspaceBackground.value ? imageColors.value?.hue : materialHue;
+  return artworkHueShift(
+    store.surfaceStyle.value, colorHue(accent), backgroundHue, store.backdropTreatment.value.saturationPct / 100,
+  );
+});
+const toolbarArt = computed(() => {
+  const overrides = store.styleOverrides.value;
+  return toolbarArtworkTokens(store.activePalette.value, {
+    mode: store.resolvedColorMode.value,
+    backdrop: store.backdropId.value,
+    tintColors: store.backdropActiveColors.value,
+    imageColor: imageColors.value?.average,
+    customImage: !!activeWorkspaceBackground.value,
+    saturation: store.backdropTreatment.value.saturationPct / 100,
+    coverage: overrides.bgCov ?? store.bgCov.value,
+    surfaceOpacity: (overrides.glassAlpha ?? store.glassAlpha.value) / 100,
+  });
 });
 
 // A 16:10 or wider viewport fits completely without outer scrollbars; narrower viewports scroll horizontally.
@@ -81,6 +102,7 @@ const shellSize = computed(() => ({
   width: `${desktop.value.width / store.pageScale.value}px`,
   height: `${desktop.value.height / store.pageScale.value}px`,
   '--nav-art-hue': artworkHue.value ? `hue-rotate(${artworkHue.value}deg)` : undefined,
+  ...toolbarArt.value,
 }));
 
 const skinLabel = computed(() => getSkin(store.surfaceStyle.value)?.shortName ?? store.surfaceStyle.value);
@@ -90,12 +112,7 @@ const backdropLabel = computed(
 );
 const isOverlayDock = computed(() => store.aiDrawerDockMode.value === 'overlay');
 
-const engineStatusLabel = computed(() => {
-  if (store.engineStatus.value === 'python-vtl') return 'VTL 2.4 本地物理引擎已就绪';
-  if (store.engineStatus.value === 'wasm-vtl') return 'VTL 2.4 浏览器 WASM 已就绪';
-  if (store.engineStatus.value === 'checking') return '正在探测物理声道引擎…';
-  return '离线工作 · VTL 预渲染样本';
-});
+const engineStatusLabel = computed(() => describeEngineStatus(store.engineStatus.value).label);
 
 function isEditingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -129,11 +146,12 @@ function onGlobalKeyDown(e: KeyboardEvent): void {
   // Alt+, -> Toggle Settings
   if (e.altKey && e.key === ',') {
     e.preventDefault();
-    store.openOverlay('settings');
+    if (store.activeOverlay.value === 'settings') store.closeOverlay();
+    else store.openOverlay('settings');
     return;
   }
 
-  // Escape -> Close modals / overlays cleanly
+  // Escape -> Close top-most modals / overlays cleanly (ordered by z-index)
   if (e.key === 'Escape') {
     if (updateModalOpen.value) {
       closeUpdateModal();
@@ -147,16 +165,16 @@ function onGlobalKeyDown(e: KeyboardEvent): void {
       store.closeModuleGuide();
       return;
     }
-    if (store.aiDrawerOpen.value) {
-      store.aiDrawerOpen.value = false;
+    if (cardStudioOpen.value) {
+      window.dispatchEvent(new Event('vocalcut:request-close-card-studio'));
+      return;
+    }
+    if (store.exportModalWorkspace.value) {
+      window.dispatchEvent(new Event('vocalcut:request-close-export'));
       return;
     }
     if (store.referencesModalOpen.value) {
       store.referencesModalOpen.value = false;
-      return;
-    }
-    if (store.exportModalWorkspace.value) {
-      store.closeExportModal();
       return;
     }
     if (store.styleLabOpen.value) {
@@ -167,10 +185,23 @@ function onGlobalKeyDown(e: KeyboardEvent): void {
       store.closeOverlay();
       return;
     }
+    if (store.aiDrawerOpen.value) {
+      store.aiDrawerOpen.value = false;
+      return;
+    }
   }
 
-  // Undo / Redo (when not typing inside text inputs)
-  if (mod && !e.altKey && (!isEditingTarget(e.target) || (
+  // Undo / Redo (blocked while modals/overlays are open so exports cannot be aborted by stray Ctrl+Z)
+  const modalBlockingUndo = Boolean(
+    cardStudioOpen.value
+    || store.exportModalWorkspace.value
+    || store.activeOverlay.value !== 'none'
+    || store.activeModuleGuide.value
+    || store.referencesModalOpen.value
+    || store.styleLabOpen.value
+    || updateModalOpen.value,
+  );
+  if (!modalBlockingUndo && mod && !e.altKey && (!isEditingTarget(e.target) || (
     e.target instanceof HTMLInputElement && ['range', 'checkbox', 'radio'].includes(e.target.type)
   ))) {
     if (key === 'z' && !e.shiftKey) {
@@ -188,7 +219,12 @@ function onGlobalKeyDown(e: KeyboardEvent): void {
   // Single-key transport shortcuts disabled inside inputs
   if (isEditingTarget(e.target) || mod || e.altKey) return;
 
-  if (store.activeOverlay.value !== 'none' || store.exportModalWorkspace.value || store.activeWorkspace.value === 'studio') return;
+  if (
+    cardStudioOpen.value
+    || store.activeOverlay.value !== 'none'
+    || store.exportModalWorkspace.value
+    || store.activeWorkspace.value === 'studio'
+  ) return;
   if (
     store.activeWorkspace.value === 'research' &&
     store.researchTab.value === 'main' &&
@@ -238,10 +274,11 @@ watch(workspaceIconUrl, (icon) => {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (link) {
     if (activeWorkspaceIcon.value) link.removeAttribute('type');
-    else link.type = 'image/svg+xml';
+    else link.type = 'image/png';
     link.href = icon;
   }
-});
+  void setDesktopWindowIcon(icon);
+}, { immediate: true });
 
 onBeforeUnmount(() => {
   window.clearTimeout(autoTourTimer);
@@ -274,6 +311,8 @@ watch(
     () => store.exportModalWorkspace.value,
     () => store.referencesModalOpen.value,
     () => store.styleLabOpen.value,
+    () => cardStudioOpen.value,
+    () => cardDemoNoticeOpen.value,
   ],
   ([booted]) => {
     window.clearTimeout(autoTourTimer);
@@ -338,7 +377,7 @@ watch(
             :title="item.title"
             @click="selectWorkbenchNav(store, item)"
           >
-            <NavArtwork :item="item.artwork" />
+            <NavArtwork :item="item.artwork" toolbar />
             <span v-if="item.sidebarLines" class="act-label">
               <span v-for="(line, idx) in item.sidebarLines" :key="idx">{{ line }}</span>
             </span>
@@ -351,7 +390,7 @@ watch(
             aria-label="将导航按钮移至顶部"
             @click="store.setLayoutPrefs({ navPlacement: 'top' })"
           >
-            <NavArtwork item="dock-toggle" />
+            <NavArtwork item="dock-toggle" toolbar />
           </button>
         </aside>
         <component :is="ExploreWorkspace" v-if="ExploreWorkspace && store.activeWorkspace.value === 'explore'" />
@@ -410,6 +449,7 @@ watch(
     <UpdateModal />
     <component :is="EditionCardModal" v-if="EditionCardModal" />
     <ToastHost />
+    <TooltipHost />
   </div>
 </template>
 

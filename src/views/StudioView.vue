@@ -9,8 +9,10 @@ const store = useWorkbenchStore();
 <template>
   <div class="studio-shell">
     <section class="studio-stage-host">
-      <StudioStageView v-if="store.studioTab.value === 'stage'" />
-      <StudioArrangerView v-else />
+      <KeepAlive>
+        <StudioStageView v-if="store.studioTab.value === 'stage'" />
+      </KeepAlive>
+      <StudioArrangerView v-if="store.studioTab.value === 'arranger'" />
     </section>
   </div>
 </template>

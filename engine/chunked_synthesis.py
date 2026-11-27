@@ -353,6 +353,22 @@ def _hash_ipa_chunk(
     return h.hexdigest()
 
 
+def _adapt_ipa_cond_dim(c: np.ndarray, expected_dim: int) -> np.ndarray:
+    """Adapt `cond` last dim cleanly between legacy 111-ch (22d phon) and v4 121-ch (32d phon).
+
+    Layout: [0:88 geometry/f0/phase/events] + [88:88+P phon_feat] + [88+P has_phon].
+    """
+    cur_dim = int(c.shape[-1])
+    if cur_dim == expected_dim:
+        return c
+    if cur_dim == 111 and expected_dim == 121:
+        pad = np.zeros(c.shape[:-1] + (10,), dtype=np.float32)
+        return np.ascontiguousarray(np.concatenate([c[..., :110], pad, c[..., 110:111]], axis=-1), dtype=np.float32)
+    if cur_dim == 121 and expected_dim == 111:
+        return np.ascontiguousarray(np.concatenate([c[..., :110], c[..., 120:121]], axis=-1), dtype=np.float32)
+    return c
+
+
 def predict_ipa2tract_chunked(
     cond_111: np.ndarray,
     x_base_26: np.ndarray,
@@ -372,6 +388,9 @@ def predict_ipa2tract_chunked(
 
     bsz, n_frames, _ = c.shape
     sess, _ = LOCAL_MODEL_MANAGER.require_session("IPA2Tract-Lite", device="cpu")
+    cond_shape = sess.get_inputs()[0].shape
+    if len(cond_shape) >= 3 and isinstance(cond_shape[2], int) and cond_shape[2] in (111, 121):
+        c = _adapt_ipa_cond_dim(c, int(cond_shape[2]))
     model_ver = LOCAL_MODEL_MANAGER.model_version_key("IPA2Tract-Lite")
     a_arr = np.array([float(alpha)], dtype=np.float32)
 
