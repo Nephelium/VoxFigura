@@ -34,6 +34,43 @@ extern "system" {
     fn CloseHandle(h_object: *mut c_void) -> i32;
 }
 
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: *mut c_void,
+        lp_operation: *const u16,
+        lp_file: *const u16,
+        lp_parameters: *const u16,
+        lp_directory: *const u16,
+        n_show_cmd: i32,
+    ) -> isize;
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    let parsed = tauri::Url::parse(trimmed).map_err(|e| format!("无效链接: {e}"))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err("仅允许打开 http/https 外部链接".to_string());
+    }
+    let op: Vec<u16> = OsStr::new("open").encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = OsStr::new(parsed.as_str()).encode_wide().chain(Some(0)).collect();
+    let rc = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    if rc <= 32 {
+        return Err(format!("无法拉起系统浏览器 (ShellExecuteW={rc})"));
+    }
+    Ok(())
+}
+
 struct SingleInstanceGuard {
     handle: *mut c_void,
 }
@@ -898,6 +935,7 @@ fn main() {
     let ui_for_setup = Arc::clone(&ui_state);
 
     let app = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![open_external_url])
         .on_page_load(move |webview, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
                 let url_str = payload.url().as_str();

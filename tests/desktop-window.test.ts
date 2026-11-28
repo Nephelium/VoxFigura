@@ -5,6 +5,7 @@ import {
   getDesktopWindowMaximized,
   isDesktopWindow,
   minimizeDesktopWindow,
+  openExternalUrl,
   setDesktopWindowFullscreen,
   setDesktopWindowIcon,
   toggleMaximizeDesktopWindow,
@@ -93,5 +94,24 @@ describe('desktop-window bridge', () => {
     // Repeated identical URL is skipped without redundant IPC
     await expect(setDesktopWindowIcon('/icons/app-icon-blue.png')).resolves.toBe(false);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens http(s) URLs via Tauri command in desktop shell and blocks non-http schemes', async () => {
+    const invoke = vi.fn(async () => undefined);
+    const open = vi.fn();
+    stubWindow({ __TAURI_INTERNALS__: { invoke }, open });
+
+    await expect(openExternalUrl('https://www.phonetictoolbox.com/voxfigura/downloads/test.exe')).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith('open_external_url', {
+      url: 'https://www.phonetictoolbox.com/voxfigura/downloads/test.exe',
+    });
+    expect(open).not.toHaveBeenCalled();
+
+    await expect(openExternalUrl('javascript:alert(1)')).resolves.toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    stubWindow({ open });
+    await expect(openExternalUrl('https://github.com/Nephelium/VoxFigura')).resolves.toBe(true);
+    expect(open).toHaveBeenCalledWith('https://github.com/Nephelium/VoxFigura', '_blank', 'noopener,noreferrer');
   });
 });

@@ -4,6 +4,7 @@ import { editionDisplayLabel } from '@vocalcut/edition';
 import { renderMarkdown } from '@/components/ai/markdown-render';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { copyTextToClipboard } from '@/components/common/clipboard';
+import { openExternalUrl } from '@/utils/desktop-window';
 import { APP_BRAND_NAME, APP_VERSION } from '@/data/app-branding';
 import {
   checkForAppUpdate,
@@ -108,7 +109,18 @@ const checkedTimeLabel = computed(() => {
 
 function openDownload(): void {
   if (!downloadHref.value) return;
-  window.open(downloadHref.value, '_blank', 'noopener,noreferrer');
+  void openExternalUrl(downloadHref.value);
+}
+
+function onNotesClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const anchor = target.closest('a[href]');
+  if (!(anchor instanceof HTMLAnchorElement)) return;
+  const href = anchor.getAttribute('href')?.trim() ?? '';
+  if (!/^https?:\/\//i.test(href)) return;
+  event.preventDefault();
+  void openExternalUrl(href);
 }
 
 async function copyDownloadUrl(): Promise<void> {
@@ -238,7 +250,7 @@ async function copyDownloadUrl(): Promise<void> {
                 <div class="vc-upd-notes-head">
                   <span class="vc-upd-notes-title">更新说明</span>
                 </div>
-                <div class="vc-upd-notes-scroll md-body selectable" v-html="releaseNotesHtml" />
+                <div class="vc-upd-notes-scroll md-body selectable" v-html="releaseNotesHtml" @click="onNotesClick" />
               </div>
 
               <div v-if="latestRelease.sha256" class="vc-upd-sha mono selectable">
@@ -259,7 +271,7 @@ async function copyDownloadUrl(): Promise<void> {
                 <div class="vc-upd-notes-head">
                   <span class="vc-upd-notes-title">当前版本更新说明</span>
                 </div>
-                <div class="vc-upd-notes-scroll md-body selectable" v-html="releaseNotesHtml" />
+                <div class="vc-upd-notes-scroll md-body selectable" v-html="releaseNotesHtml" @click="onNotesClick" />
               </div>
             </div>
           </div>

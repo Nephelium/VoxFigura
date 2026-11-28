@@ -129,3 +129,27 @@ export async function setDesktopWindowIcon(iconUrl: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Open an http(s) URL in the user's default system browser when inside the Tauri
+ * desktop shell (where WebView2 silently drops `window.open(..., '_blank')`),
+ * falling back to `window.open` in standard web browsers.
+ */
+export async function openExternalUrl(url: string): Promise<boolean> {
+  const trimmed = url.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return false;
+  const invoke = getTauriInvoke();
+  if (invoke) {
+    try {
+      await invoke('open_external_url', { url: trimmed });
+      return true;
+    } catch {
+      // Fall through to window.open if running against an older desktop shell
+    }
+  }
+  if (typeof window !== 'undefined' && typeof window.open === 'function') {
+    window.open(trimmed, '_blank', 'noopener,noreferrer');
+    return true;
+  }
+  return false;
+}
