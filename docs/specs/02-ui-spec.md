@@ -2,11 +2,11 @@
 
 > **真源声明（2026-11-26 修订）**：本文档记录 UI 视觉意图、布局标尺与组件约定；**全部 CSS Design Token 的实时真源为 [`src/styles/tokens.css`](../../src/styles/tokens.css)**（运行时配色覆盖见 `src/styles/themes.ts`，皮肤与背景注册表见 `src/styles/skin-registry.ts` 与 `src/styles/skins.css`，共享类见 `src/styles/base.css` 与 `src/styles/workstation.css`，共享组件见 `src/components/common/`）。若本文档数值与代码真源存在差异，一律以 `src/styles/tokens.css` 等代码文件为准，并遵守 [AGENTS.md §5](../../AGENTS.md)。
 
-> **2026-11-23 实施决议**　公开版仅包含科研、剪辑和自配 API Key 的 AI 助手。参赛版通过独立入口增加知乎探索、内容接口及赛事素材，两版助手均走用户选择的平台。仓库保留参赛素材，公开前端只分发 `dist-public/`。两套本地环境可并行，公开前端/代理使用 5173/3001，参赛版使用 5174/3002（群友版使用 5175/3003 → `dist-friends/`）。
+> **当前版本边界（2026-11-28）**　开源版合并原群友版功能，前端/代理使用 5173/3001，产物为 `dist-public/`。参赛版单独增加知乎探索、内容接口及赛事素材，前端/代理使用 5174/3002，产物为 `dist-hackathon/`。两版助手均使用用户选择的平台。 [系统架构](../ARCHITECTURE.md)
 >
-> 桌面以 2560×1600 为基准，低分屏按同一比例缩放，缩窗保留画布密度并允许横纵滚动。M27 声道重建与关键帧 IPA 合成沿用独立模块接口（本地已接入 `Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）。
+> 桌面以 2560×1600 为基准。工作区宽高比 ≥16:10 时完整显示，窄于 16:10 时允许横向滚动。M27 声道重建和 IPA 合成的模型流程见 [模型接口规范](../MODEL_INTERFACE_SPEC.md)。
 >
-> 此决议优先于下方历史版本中关于赛事默认入口、知乎直答与视口适配的条款。其余功能分期仍按实际接入情况验收。
+> 下方保留设计阶段的版本说明。赛事入口、视口适配与模型接入以现行规范和对应实现为准。
 
 > 版本：1.6 · 日期：2026-11-22（系统梳理定稿版，面向高密度全面工程实现）
 > 1.6 修订（对齐 `01-design-spec` v1.6 与 `PhoneticToolbox_v3` 真实模块基线）：

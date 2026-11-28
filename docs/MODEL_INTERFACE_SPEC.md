@@ -1,7 +1,7 @@
 # VoxFigura 模型接入与接口规范（MODEL_INTERFACE_SPEC）
 
-> 版本 1.2 · 2026-11-26
-> 适用范围：`packages/model-adapters/`、`engine/`、公共代理 `server/proxy.mjs` 及三版/便携入口（`server/index.mjs`、`server/hackathon.mjs`、`server/friends.mjs`、`server/portable.mjs`）与 VoxFigura Core 本地推理
+> 版本 1.2 · 更新于 2026-11-28
+> 适用范围：`packages/model-adapters/`、`engine/`、公共代理 `server/proxy.mjs`、开源版及参赛版入口（`server/index.mjs`、`server/hackathon.mjs`）、便携入口 `server/portable.mjs` 与 VoxFigura Core 本地推理
 
 ## 0. 全局单位、时间网格、物理边界与安全契约
 
@@ -58,12 +58,12 @@
 
 ---
 
-## 2. `Vox2Tract-Lite` 与 `Vox2Align-Lite v2`（声道反演与引导对齐，已就绪）
+## 2. 声道反演、引导对齐与转写
 
 ### 2.1 来源与零 PyTorch 懒加载隔离
-- 模型权重（纯 ONNX Runtime）：`engine/model_bundle/models/Vox2Tract-Lite/vox2tract_lite.onnx` 与 `models/Vox2Align-Lite/vox2align_lite_v2.onnx`（原始 `.pt` 权重文件仅作离线备份保留，运行时零 PyTorch 导入）。
-- 声学前端：`engine/onnx_frontends.py` 提供纯 NumPy/SciPy 的 `PureLogMel50Hz`（16 kHz，Slaney 80-Mel，`n_fft=1024`，`win=640`，`hop=320`，逐句归一化 + 一阶差分 + 3 维能量 + 3 维发声态线索）+ `SwiftF0` ONNX（46.875..2093.75 Hz）。超过 `9.6 s` 的音频经 `plan_silence_chunks` 按静音分块推理拼接，再送 `Vox2Align-Lite v2` 完成音素/音节强制对齐与静音门控。
-- **懒加载与热插拔隔离**：全套 9 个模型由 `engine/model_registry_runtime.py`（`LocalModelManager`）统一按需创建和释放 `onnxruntime.InferenceSession`；首次调用 `/vtl/*`（未触发神经模块）不加载 ONNX 会话。卸载中的模型被调用时返回 `503` `{ "ok": false, "error": { "code": "model_unloaded", "model": "...", "hint": "..." } }`。
+- 便携版将 Batch-2 联合权重组入 `engine/model_bundle/models/Vox2Tract-Lite/vox2tract_lite.onnx`，由 `Vox2TractAlign v4` 对齐头完成普通话、英语引导对齐。`Vox2Align-Lite v2` 为独立兼容槽位，允许挂载方言或其他语种的外置模型。权重使用 ONNX Runtime 推理。 [入包锁文件](../scripts/portable/inputs.lock.json)
+- 声学前端：`engine/onnx_frontends.py` 提供纯 NumPy/SciPy 的 `PureLogMel50Hz`（16 kHz，Slaney 80-Mel，`n_fft=1024`，`win=640`，`hop=320`，逐句归一化 + 一阶差分 + 3 维能量 + 3 维发声态线索）+ `SwiftF0` ONNX（46.875..2093.75 Hz）。超过 `9.6 s` 的音频经 `plan_silence_chunks` 按静音分块，推理后拼接结果。联合权重在同一次前向中给出反演轨迹与对齐头，启用外置独立对齐模型时由外置槽位接管对齐。
+- **懒加载与热插拔隔离**：8 个核心槽位和 1 个独立兼容槽位由 `engine/model_registry_runtime.py`（`LocalModelManager`）统一按需创建和释放 `onnxruntime.InferenceSession`；首次调用 `/vtl/*`（未触发神经模块）不加载 ONNX 会话。卸载中的模型被调用时返回 `503` `{ "ok": false, "error": { "code": "model_unloaded", "model": "...", "hint": "..." } }`。
 
 ### 2.2 HTTP JSON Schema
 - `POST /m27/reconstruct`：传入 `wav_base64`、`text?`、`lang?`、`alignment_mode?`、`synth_mode`、`device`，返回 50 Hz `m27_50hz_pa`（`PR` 已换算为 `Pa`）、`tract_glottis_anim`、`vtl_48k_wav_base64`、`neural_16k_wav_base64` 与 `alignment`。
@@ -71,14 +71,16 @@
 - `POST /m27/realtime-speaker`：传入 `speaker_wav_base64`（或 `speaker_ref_wav_base64`），基于 `Vox2Spk-Lite` 预提取并缓存 512 维音色嵌入，同时用 `SwiftF0` 估算参考音色的有效浊音中位基频，返回 `{ ok: true, speaker_key, cached, extract_ms, median_f0_hz }`（无法提取时 `median_f0_hz` 为 `null`）。
 - `POST /m27/realtime-step`：低延迟滑窗实时声道反演与神经音色合成单步接口；接收滑窗 16 kHz PCM 音频、`session_id`、`speaker_key?`、`include_tract_geometry`、`use_timbre_model`、`synthesize_audio` 与可选预热标记 `warmup`（`warmup_window_frames` 12..100），输出 50 Hz 控制帧、可选 2D/3D 声道几何及带 15 ms 交叉淡入重叠加长的 16 kHz 音频块。
 - `POST /m27/align`：传入 `wav_base64` 与原文 `text`，返回 `alignment`（TextGrid 与音素/音节区间）。
-- `POST /m27/transcribe`（**仅开发态显式启用可用**）：默认关闭；仅当环境变量 `VOCALCUT_ENABLE_LOCAL_ASR=1` 且未设 `VOCALCUT_DISABLE_LOCAL_ASR=1` 时挂载。传入 `wav_base64`（80 ms–60 s）、`lang?: "auto" | "zh" | "en"`、`model?: "tiny" | "large-v3-turbo" | "large-v3" | "base"`、`device?: "cpu"`，返回 `{ ok, text, lang, model, device_effective, duration_s }`。缺少本地运行时或权重时返回 `503 model_unavailable`，无语音时返回 `400 no_speech`。Windows 免安装与安装包强制设置 `VOCALCUT_DISABLE_LOCAL_ASR=1` 且不含任何权重与依赖。
+- `POST /m27/transcribe` 使用本地 SenseVoice-Small。请求含 `wav_base64`（80 ms–60 s）、可选 `lang`（`auto`、`zh`、`en`、`ja`、`ko`、`yue`）、`model`（`sensevoice-small`）及 `device`（`cpu`）。成功返回 `{ ok, text, lang, model, device_effective, duration_s }`。缺少运行库或权重时返回 `503 model_unavailable`，无语音时返回 `400 no_speech`，另有识别任务运行时返回 `409 asr_busy`。
 - `POST /api/ai/deepseek-asr`：Node 代理接收 `audio/wav` 与本页 AI 助手的 DeepSeek BYOK 请求头，调用 [DeepSeek 语音识别接口](https://api-docs.deepseek.com/zh-cn/guides/asr/) 并返回 `{ ok, text }`。在设置中启用后，点击「自动识别文本」发送当前录音的 16 kHz 单声道 PCM WAV。DeepSeek 自动判断语种，单次上限为 120 秒、8 MiB。
 
-### 2.3 安装本地语音识别（仅开发态门控）
+### 2.3 按需安装本地语音识别
 
-> **门控与打包边界**：`engine/server.py` 默认关闭本地 ASR（`LOCAL_ASR_ENABLED = (VOCALCUT_ENABLE_LOCAL_ASR == "1" and VOCALCUT_DISABLE_LOCAL_ASR != "1")`）。Windows 免安装与安装包由 `server/portable.mjs` 显式设置 `VOCALCUT_DISABLE_LOCAL_ASR=1` 关闭相关路由，且不装入任何本地转写权重、下载入口、faster-whisper、CTranslate2 或专用 PyAV 解码依赖（见 `AGENTS.md §4.3`）。
+开发态和 Windows 便携版默认开放 SenseVoice-Small 下载与转写路由。开发时可在引擎环境设 `VOCALCUT_DISABLE_LOCAL_ASR=1` 关闭。便携版复用包内 NumPy 与 ONNX Runtime，模型及词表由用户按需下载。 [Windows 打包规范](./PACKAGING_WINDOWS.md)
 
-仅在研发态显式设置 `VOCALCUT_ENABLE_LOCAL_ASR=1` 后，方可使用 `POST /m27/asr-install`（接收 `{ model }` 后台安装）与 `GET /m27/asr-install?model=...`（返回 `{ state, model, models, installing_model?, hint? }`，状态为 `missing` / `installing` / `ready` / `failed`）；命令行可执行 `npm run setup:asr`（或 `-- --model large-v3-turbo`）预安装。安装器按公网出口自动在 HF-Mirror 与 Hugging Face 间择优并校验固定版本 SHA-256，权重存于 `.cache/asr/faster-whisper-<model>/`，运行库存于 `.cache/asr/python/`，支持 `VOCALCUT_ASR_DOWNLOAD_HOST` 与 `VOCALCUT_ASR_MODEL_DIR` 覆盖，运行时以 CPU INT8 执行并在 `GET /health` 的 `speech_to_text` 汇报状态。
+- `GET /m27/asr-install?model=sensevoice-small` 返回模型列表及 `missing`、`installing`、`ready` 或 `failed` 状态，可附下载进度和提示。前端经 `/api/m27/asr-install` 调用，`GET /health` 的 `speech_to_text` 字段亦报告可用状态。
+- `POST /m27/asr-install` 接收 `{ model?, action? }`，默认模型为 `sensevoice-small`，默认动作 `install`。后台下载返回 `202`，已经就绪返回 `200`。`action: "remove"` 移除缓存中的模型，下载期间返回 `409`。
+- 下载器按地区在 HF-Mirror、ModelScope 与 Hugging Face 间切换，并校验文件大小和 SHA-256。权重与词表存到 `VOCALCUT_ASR_CACHE_DIR` 下的 `sensevoice-small/`，开发态默认为 `.cache/asr/`，便携版默认为 `%LOCALAPPDATA%/VoxFigura/ASR/`。研发可执行 `npm run setup:asr` 预下载，引擎支持 `VOCALCUT_ASR_DOWNLOAD_HOST` 与 `VOCALCUT_ASR_MODEL_DIR` 覆盖下载源和已有模型目录。
 
 ---
 
@@ -102,10 +104,10 @@
 ### 4.1 架构与物理护栏对齐
 - 模型权重（ONNX）：`models/IPA2Tract-Lite/ipa2tract_lite.onnx` 与 `models/IPA2Tract-Lite/tract2area_proxy.onnx`。
 - **输入张量**：
-  - `cond_111: (B, T, 111)` float32 @ 50 Hz（含 26 维 3 阶 qTA 异步基线 `x_base_26`、掩码目标 `g_masked`、26 维器官锁 `w_mask`、对数 `f0_norm`、5 维相位含显式 `is_sil`、4 维阻塞事件、22 维通用音标构音特征 `PHON_FEAT_DIM = 22`、`has_phon`）。
+  - `cond` 为 float32 @ 50 Hz，Batch-2 v4 形状为 `(B, T, 121)`，旧版权重为 `(B, T, 111)`（含 26 维 3 阶 qTA 异步基线 `x_base_26`、掩码目标 `g_masked`、26 维器官锁 `w_mask`、对数 `f0_norm`、5 维相位含显式 `is_sil`、4 维阻塞事件、音标构音特征（v4 为 32 维，旧版为 22 维）、`has_phon`）。
   - `x_base_26: (B, T, 26)` float32（`M27` 剔除只读 `F0` 列 17）与协同强度 `alpha`（`0..1`）。
 - **`Tract2Area-Proxy`**：输入 `tract17_norm: (..., 17)`，输出 `log1p(area_cm2)` 6 区预测。
-- **链路 B 调用约定与兼容路由**：`/vtl/synthesize`（开启 `predict_articulation`）和 `POST /models/ipa-default-poses` 使用同一 `PoseBank`。采用当前 IPA 构型的片段通过 `pose_source: "custom"` 和 `articulation_spans[].pose_target_19` 传入编辑器保存的 19 维目标。引擎在音段中心对主要发音器官应用余弦过渡，对塞音优先使用实录闭塞及释放相位，并用 `Tract2Area-Proxy` 检查局部收窄。模型默认值和显式编辑分别沿用默认相位目标及手动约束。`GET /models/kf2tract`（探测权重就绪）与 `POST /models/kf2tract`（直接暴露 111 维条件推理与 `Tract2Area-Proxy` 截面积代理结果）均为 **`IPA2Tract-Lite` 的历史兼容路由名**。
+- **链路 B 调用约定与兼容路由**：`/vtl/synthesize`（开启 `predict_articulation`）和 `POST /models/ipa-default-poses` 使用同一 `PoseBank`。采用当前 IPA 构型的片段通过 `pose_source: "custom"` 和 `articulation_spans[].pose_target_19` 传入编辑器保存的 19 维目标。引擎在音段中心对主要发音器官应用余弦过渡，对塞音优先使用实录闭塞及释放相位，并用 `Tract2Area-Proxy` 检查局部收窄。模型默认值和显式编辑分别沿用默认相位目标及手动约束。`GET /models/kf2tract`（探测权重就绪）与 `POST /models/kf2tract`（使用历史字段名 `cond_111`，接受 111 或 121 维条件帧，返回协同构音和 `Tract2Area-Proxy` 截面积结果）均为 **`IPA2Tract-Lite` 的历史兼容路由名**。
 
 ---
 
@@ -140,14 +142,14 @@
 ## 5.5 本地 ONNX 模型热插拔与外置权重装载接口
 
 - `GET /health`：返回引擎运行状态（`vtl`、`m27`、`speech_to_text` 与本地模型就绪信息）。
-- `GET /models/local`：返回 9 个内置模型槽位的体积、参数量、装载状态（`loaded`、`in_memory`）、外置来源标记（`is_external`、`external_label`）及 ONNX Runtime 运行时信息。
+- `GET /models/local`：返回 9 个模型注册槽位的体积、参数量、装载状态（`loaded`、`in_memory`）、外置来源标记（`is_external`、`external_label`）及 ONNX Runtime 运行时信息。
 - `POST /models/local/load`：接收 `{ "name": string, "eager"?: boolean, "device"?: "cpu" | "cuda" }` 或 `{ "all": true }`，启用并按需立即载入 `InferenceSession`。
 - `POST /models/local/unload`：接收 `{ "name": string }` 或 `{ "all": true }`，立即释放内存中的 `InferenceSession` 并停用该槽位。
 - `POST /models/local/mount`：接收 `{ "name"?: string, "path"?: string, "folder_path"?: string, "eager"?: boolean }`，校验目标 `.onnx` 张量输入输出契约后挂载单个外置文件或批量扫描整个文件夹。
 - `POST /models/local/mount-binary`：接收原始 `.onnx` 二进制请求体（查询参数 `name`、`filename`、`eager`），校验契约并持久化至 `.cache/custom-models/` 后热切换。
 - `POST /models/local/reset`：接收 `{ "name": string }` 或 `{ "all": true }`，恢复默认内置 ONNX 模型。
 
-> 注：全部 7 个核心自研模型（`Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）及 `DPDFNet2`、`SwiftF0` 共 9 个 ONNX 槽位已全部正式上线；早期预留的 `501` 扩展空槽（`/models/browser-light-m27`、`/models/speaker` 及 `packages/model-adapters/src/reserved-slots.ts`）已清理移除。`/models/kf2tract` 保留作为 `IPA2Tract-Lite` 的历史兼容路由名（见 §4.1）。
+> 注册表维护 8 个核心 ONNX 槽位和独立 `Vox2Align-Lite v2` 兼容槽位。Windows 便携包只内置 8 个核心槽位的权重。早期 `501` 扩展空槽已清理，`/models/kf2tract` 保留为 `IPA2Tract-Lite` 的历史兼容路由名（见 §4.1）。
 
 ---
 
@@ -155,7 +157,7 @@
 
 为保护已验收的国际音标与神经语音合成听感形态，以下接口扩展与冻结约束与 [AGENTS.md §6](../AGENTS.md) 保持单一真源同步，未经授权禁止回退或破坏：
 
-- **`Vox2Tract-Lite` 联合单次前向契约**：`engine/model_registry_runtime.py` 同时接受传统 4 输出与 Batch-2 联合 11 输出（在 `tract17 / pr1 / glot8 / h_backbone` 基础上附带 7 路对齐头）；挂载联合权重时 `engine/onnx_inference.py` 单次前向直接完成声道反演与对齐（`model_meta.version` 返回 `joint-v3` 或 `joint-v4`），恢复内置旧权重时自动退回双模型接力。
+- **`Vox2Tract-Lite` 联合单次前向契约**：`engine/model_registry_runtime.py` 同时接受传统 4 输出与 Batch-2 联合 11 输出（在 `tract17 / pr1 / glot8 / h_backbone` 基础上附带 7 路对齐头）；使用联合权重时，`engine/onnx_inference.py` 可在单次前向中完成声道反演与对齐。旧四输出权重的引导对齐需要可用的独立槽位。联合输出的 `model_meta.version` 按文件名标记，含 `v4` 时为 `joint-v4`，否则为 `joint-v3`。包内文件名统一为 `vox2tract_lite.onnx`，核对实际权重版本时查 [入包锁文件](../scripts/portable/inputs.lock.json)。
 - **`IPA2Tract-Lite` 121ch / 32d 与窄标构型库联动**：挂载 121 通道外置权重时，`engine/keyframe_lite.py` 自动加载同目录 `canonical_ipa_poses_narrow.json`（293 键）并启用 32 维特征，严禁与旧 78 键构型或 22 维特征混用。
 - **`Text2Prosody-Lite` 32d 与无标调 `[IPA]` 韵律直通**：支持 `LANG_IPA=3`（32 维特征输入）及可选 `base_f0` 参数；前端将无显式声调记号的 `[IPA]` 片段按 VoQS 作用域切分送入自然韵律预测。
 - **参考音色自动匹配基频与 VoQS 假声叠加顺序**：前端按 `speechRegisterRatio = effectiveSpeakerBaseF0Hz / referenceHz` 在 `evaluateControlPitch` 的 `applyVoqsRegister` 之前执行一次性平移，仅作用于神经语音合成（不对歌唱轨、实录反演参考轨与 VTL 物理合成生效）；`isAutomaticProsodyPin` 同时兼容单句与多句前缀 `s<n>_prosody`。

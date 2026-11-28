@@ -1,6 +1,6 @@
 # VoxFigura 系统架构规范
 
-> 文档版本：1.2 · 2026-11-26
+> 文档版本：1.2 · 更新于 2026-11-28
 > 适用范围：全仓前后端模块、Node 代理（含免安装入口）、Python 推理引擎与独立包
 > **品牌与内部代号边界**：面向用户的界面与正式文档统一使用 **VoxFigura**；`VocalCut` 仅作为内部工程代号保留于包别名（`@vocalcut/*`）、事件名（`vocalcut:*`）、环境变量（`VOCALCUT_*`）与代理服务名（`vocalcut-node-proxy`）。
 
@@ -28,7 +28,8 @@ flowchart TD
   end
 
   subgraph Core["VoxFigura Core & VTL 2.4"]
-    Models["Vox2Tract-Lite / Tract2Vox-Lite / IPA2Tract-Lite / Tract2Area-Proxy / Vox2Spk-Lite / Text2Prosody-Lite / Vox2Align-Lite v2"]
+    Models["8 core ONNX slots, including Vox2Tract-Lite with Vox2TractAlign v4"]
+    Aligner["Optional Vox2Align-Lite v2 slot"]
     VTL["VTL 2.4 Native DLL (JD2 / W02 / JD2-2D / W02-2D / M01)"]
   end
 
@@ -44,6 +45,7 @@ flowchart TD
   LinkB --> ModelPool
   VtlScope --> VTL
   ModelPool --> Models
+  ModelPool --> Aligner
 ```
 
 ## 2. VoxFigura Core 官方模型清单与运行参数
@@ -52,17 +54,17 @@ flowchart TD
 
 | 官方名称 | 职责与定位 | 引擎模块与 ONNX 权重路径（相对于 `engine/model_bundle/`） | 采样率 / 控制帧率 | 运行设备 |
 | --- | --- | --- | --- | --- |
-| `Vox2Tract-Lite` | 语音反演 27 维声道与发声态轨迹 | `onnx_inference.py` + `models/Vox2Tract-Lite/vox2tract_lite.onnx` | 输入 16 kHz / 输出 50 Hz（hop 320） | ORT CPU / CUDA |
-| `Vox2Align-Lite v2` | 双语原文引导对齐与静音门控（共享反演主干） | `onnx_inference.py` + `models/Vox2Align-Lite/vox2align_lite_v2.onnx` | 输入 16 kHz / 50 Hz 帧与音素边界 | ORT CPU / CUDA |
+| `Vox2Tract-Lite` | 反演 27 维声道与发声态轨迹，Batch-2 版本集成 `Vox2TractAlign v4` | `onnx_inference.py` + `models/Vox2Tract-Lite/vox2tract_lite.onnx` | 输入 16 kHz / 输出 50 Hz（hop 320） | ORT CPU / CUDA |
+| `Vox2Align-Lite v2` | 独立兼容槽位，供外置对齐模型或旧反演权重配套使用 | `onnx_inference.py` + `models/Vox2Align-Lite/vox2align_lite_v2.onnx` | 输入 16 kHz / 50 Hz 帧与音素边界 | ORT CPU / CUDA |
 | `Tract2Vox-Lite` | 27 维声道轨迹 + 512 维音色向量神经赋声 | `m27_bridge.py` + `models/Tract2Vox-Lite/tract2vox_lite.onnx` | 控制 50 Hz / 生成 16 kHz（密轨路径升至 48 kHz） | ORT CPU / CUDA |
 | `Vox2Spk-Lite` | 语音提取 512 维 L2 归一化音色向量 | `onnx_inference.py` + `models/Vox2Spk-Lite/vox2spk_lite.onnx` | 输入 16 kHz / 80-Mel CMN | ORT CPU / CUDA |
-| `IPA2Tract-Lite` | 音标关键帧协同动腔残差轨迹规划 | `keyframe_lite.py` + `models/IPA2Tract-Lite/ipa2tract_lite.onnx` | 输入 111 维条件 @ 50 Hz / 输出 26 维 | ORT CPU / CUDA |
+| `IPA2Tract-Lite` | 音标关键帧协同动腔残差轨迹规划 | `keyframe_lite.py` + `models/IPA2Tract-Lite/ipa2tract_lite.onnx` | Batch-2 v4 输入 121 维条件 @ 50 Hz / 输出 26 维 | ORT CPU / CUDA |
 | `Tract2Area-Proxy` | 17 维声道预测 6 区截面积物理守卫 | `keyframe_lite.py` + `models/IPA2Tract-Lite/tract2area_proxy.onnx` | 50 Hz 逐帧 | ORT CPU / CUDA |
-| `Text2Prosody-Lite` | 中英混排文本时长、相对半音 F0 与停顿预测 | `prosody_bridge.py` + `models/Text2Prosody-Lite/text2prosody_lite.onnx` | 输出音素帧与 F0 knots（50–550 Hz） | ORT CPU / CUDA |
+| `Text2Prosody-Lite` | 中英混排文本与无显式标调 IPA 的时长、相对半音 F0 与停顿预测 | `prosody_bridge.py` + `models/Text2Prosody-Lite/text2prosody_lite.onnx` | 输出音素帧与正有限基频控制点 | ORT CPU / CUDA |
 | `DPDFNet` | 48 kHz 分声道实时降噪（ONNX） | `dpdf_audio.py` + `ptb/resources/neural/dpdfnet2_48khz_hr.onnx` | 保持 48 kHz | ORT CPU |
 | `SwiftF0` | 50 Hz 基频提取（方言与反演前端，ONNX） | `swift_pitch.py` + `ptb/resources/neural/swift-f0-0.3.0.onnx` | 输入 16 kHz / 输出 50 Hz | ORT CPU |
 
-> 全部 9 个本地模型均由 `engine/model_registry_runtime.py`（`LocalModelManager`）基于纯 ONNX Runtime（零 PyTorch 运行时依赖）管理，支持按需热插拔装载/卸载及外置 `.onnx` 文件夹/单文件校验替换；原始 `.pt` 权重暂作离线备份保留。旗舰大模型参考：`Vox2Tract-Large`、`Vox2Tract-PR`、`Tract2Feat-Proxy`、`Tract2Vox-Large` 位于上游训练目录（只读参考，不随本仓库本地推理权重包运行）。
+> `LocalModelManager` 统一管理表中的 9 个注册槽位，使用 ONNX Runtime 按需装卸并校验外置 `.onnx`。开源免安装包携带 8 个核心槽位的权重，独立 `Vox2Align-Lite v2` 留作兼容与扩展。表中路径是本地槽位的相对路径。包内发布权重按 [入包锁文件](../scripts/portable/inputs.lock.json) 核对，外置权重配对见 [模型接口规范](./MODEL_INTERFACE_SPEC.md)。原始 `.pt` 权重为离线备份。`Vox2Tract-Large`、`Vox2Tract-PR`、`Tract2Feat-Proxy` 与 `Tract2Vox-Large` 位于上游只读训练目录。
 
 ## 2.5 核心内核语义与模型适配器边界
 
@@ -82,7 +84,7 @@ flowchart TD
 ## 3. 五条核心工作流数据流
 
 1. **链路 A · 录音声道重建与重合成**：
-   前端录音/导入音频 → `M27Adapter.reconstruct` → `/api/m27/reconstruct` → `Vox2Tract-Lite` + `Vox2Align-Lite v2`（>9.6 s 按静音分块，SwiftF0 取 46.875–2093.75 Hz）→ `50 Hz` M27（`Pa` 单位）+ 矢状面动画 + VTL 2.4（48 kHz）+ `Tract2Vox-Lite`（16 kHz）。
+   前端录音/导入音频 → `M27Adapter.reconstruct` → `/api/m27/reconstruct` → `Vox2Tract-Lite` 联合 `Vox2TractAlign v4`（普通话与英语引导对齐，>9.6 s 按静音分块，SwiftF0 取 46.875–2093.75 Hz）→ `50 Hz` M27（`Pa` 单位）+ 矢状面动画 + VTL 2.4（48 kHz）+ `Tract2Vox-Lite`（16 kHz）。
 2. **链路 B · 文字与标注协同构音合成**：
    前端歌词/TextGrid → `Text2Prosody-Lite`（保留显式 `sil` 与 F0 knots）+ `@vocalcut/g2p` → `buildAnnotationSynthesis`（`200 Hz` 控制轨、显式静音、构型目标与手动锁定）→ `/api/vtl/synthesize` → `keyframe_lite.apply_annotation_trajectory`（`PoseBank` 相位目标、所选 IPA 构型的主发音器官约束）→ `IPA2Tract-Lite` → VTL 2.4（48 kHz）或 `Tract2Vox-Lite`（48 kHz）。
 3. **链路 C · 单构型、连续统与持音试听**：
@@ -96,7 +98,7 @@ flowchart TD
 
 - 开源版入口：`src/editions/public.ts`（`npm run dev` 5173 + `npm run server` 3001 → `dist-public/`）。默认进入首页，整合原群友版特性，保留本地作者卡片署名与通用科研导出（`check-edition.mjs` 显式白名单仅允许 `./hackathon/branded-card`，并在缺失本地私有录音时自动回退预热样本以保障 GitHub Actions CI 构建）。
 - 参赛版入口：`src/editions/hackathon/index.ts`（`npm run dev:hackathon` 5174 + `npm run server:hackathon` 3002 → `dist-hackathon/`），单独挂载知乎内容路由（`server/contest-routes.mjs`）与刘看山素材。
-- **免安装桌面版入口（`server/portable.mjs` + `server/portable-cache.mjs`）**：由 Tauri 2 原生壳（`src-tauri/`）隐藏控制台拉起；按 `bundle-manifest.json` 监听固定回环端口（开源版 `26751`，兼顾历史 `friends` 缓存端口 `26752`）并同时托管静态网页与 `/api/*` 代理；自动以 `ENGINE_PORT=0`、`VOCALCUT_CPU_ONLY=1`、`VOCALCUT_DISABLE_LOCAL_ASR=1`、`VOCALCUT_ENGINE_TOKEN`、`VOCALCUT_ENGINE_PARENT_PIPE=1` 启动包内嵌入式 Python 引擎。发音卡与剪辑媒体编码分别由 `server/card-encoding.mjs`、`server/studio-encoding.mjs` 提供。`server/portable-cache.mjs` 仅在便携态开放 `/api/portable/cache*`（非便携态返回 404），执行白名单清理、`.voxfigura-cache-root` 专属子目录保护与 `.lock` 持锁检测。
+- **免安装桌面版入口（`server/portable.mjs` + `server/portable-cache.mjs`）**：由 Tauri 2 原生壳（`src-tauri/`）隐藏控制台拉起；按 `bundle-manifest.json` 监听固定回环端口（开源版 `26751`，兼顾历史 `friends` 缓存端口 `26752`）并同时托管静态网页与 `/api/*` 代理；自动以 `ENGINE_PORT=0`、`VOCALCUT_CPU_ONLY=1`、`VOCALCUT_ENGINE_TOKEN`、`VOCALCUT_ENGINE_PARENT_PIPE=1` 启动包内嵌入式 Python 引擎，并设置 `VOCALCUT_ASR_CACHE_DIR` 保存用户按需下载的 SenseVoice-Small 权重。发音卡与剪辑媒体编码分别由 `server/card-encoding.mjs`、`server/studio-encoding.mjs` 提供。`server/portable-cache.mjs` 仅在便携态开放 `/api/portable/cache*`（非便携态返回 404），执行白名单清理、`.voxfigura-cache-root` 专属子目录保护与 `.lock` 持锁检测。
 - 两版共用 `src/components/phonetic-card/` 的卡片组件。PNG 由浏览器生成，MP4 与 GIF 由代理调用 FFmpeg；开源版在本地含演示音频时优先使用演示音频，云端构建或未随仓附带时回退 `public/prewarm/` 资源。
 - 自定义工作区背景和应用图标按应用地址保存在浏览器 IndexedDB，上次选中项由本地偏好恢复。切回预设背景或默认图标后，已保存图片仍可在设置中选取。
 - 公共代码（`src/` 其余目录、`packages/`、`server/index.mjs`、`server/proxy.mjs`、`server/portable.mjs`）严禁直接导入 `src/editions/hackathon/`，统一经 `@vocalcut/edition` 别名解析。
@@ -121,8 +123,9 @@ flowchart TD
 | `VOCALCUT_ENGINE_LOCK_TIMEOUT_S` | `engine/dense_channel.py` | `30.0` | 按说话人获取 VTL 引擎锁的最大等待秒数，超时返回 HTTP `503` `engine_busy` |
 | `VOCALCUT_ENGINE_PARENT_PIPE` | `server/portable.mjs`、`engine/server.py` | 未设置（便携态 `1`） | 启用后监听父进程 stdin 管道，父进程关闭时自动终止引擎 |
 | `VOCALCUT_CPU_ONLY` | `server/portable.mjs`、`engine/` | 未设置（便携态 `1`） | 强制纯 CPU ONNX Runtime 推理 |
-| `VOCALCUT_ENABLE_LOCAL_ASR` / `VOCALCUT_DISABLE_LOCAL_ASR` | `engine/server.py`、`server/portable.mjs` | 默认关闭 | 仅研发态显式设 `VOCALCUT_ENABLE_LOCAL_ASR=1` 且未设 `VOCALCUT_DISABLE_LOCAL_ASR=1` 时启用本地 Whisper；便携版强制 `VOCALCUT_DISABLE_LOCAL_ASR=1` |
-| `VOCALCUT_ASR_DOWNLOAD_HOST` / `VOCALCUT_ASR_MODEL_DIR` | `engine/asr_models.py`、`speech_to_text.py` | 自动选源 / `.cache/asr/` | 仅开发态本地 ASR 启用时指定镜像源或本地 CTranslate2 权重目录 |
+| `VOCALCUT_DISABLE_LOCAL_ASR` | `engine/server.py` | 未设置（本地 ASR 路由启用） | 直接启动引擎时设为 `1` 可关闭本地 SenseVoice-Small 转写与下载路由 |
+| `VOCALCUT_ASR_CACHE_DIR` | `engine/asr_models.py`、`server/portable.mjs` | 开发态 `.cache/asr/`，便携态 `%LOCALAPPDATA%/VoxFigura/ASR` | 指定用户下载权重的缓存根目录 |
+| `VOCALCUT_ASR_DOWNLOAD_HOST` / `VOCALCUT_ASR_MODEL_DIR` | `engine/asr_install.py`、`engine/speech_to_text.py` | 自动选源 / 使用缓存目录 | 引擎可指定下载源或已有的 SenseVoice-Small ONNX 权重与词表目录 |
 | `VOCALCUT_FFMPEG` | `server/{portable,card-encoding,studio-encoding}.mjs`、`engine/` | 系统 `ffmpeg` | 指定锁定的 FFmpeg 可执行文件路径 |
 | `VOCALCUT_PORTABLE` / `VOCALCUT_PORTABLE_ROOT` / `VOCALCUT_PORTABLE_ACTIVE` / `VOCALCUT_LAUNCHER_CONFIG` | `src-tauri/`、`server/portable.mjs`、`server/portable-cache.mjs` | 便携态自动注入 | 标识便携模式、用户缓存根目录、活动版本目录与启动器配置文件路径 |
 | `VOXFIGURA_UPDATE_URL` | `server/proxy.mjs` | 官方 HTTPS `latest.json` | 覆盖更新检查清单 URL（仅接受白名单域名的 HTTPS 地址） |

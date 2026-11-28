@@ -85,3 +85,19 @@ __pycache__/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# AI 助手规范、交接记录、内部计划与审阅文档（仅保留本地，不上传远端）
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.agents/
+.codex/
+.claude/
+.gemini/
+/docs/HANDOFF.md
+/docs/PROGRESS.md
+/docs/devlog/
+/docs/plans/
+/docs/review/
+/docs/reviews/
+/docs/工作台改版验收清单.md

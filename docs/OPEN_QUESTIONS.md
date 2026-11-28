@@ -1,6 +1,6 @@
 # 架构未决问题与当前默认策略（OPEN_QUESTIONS）
 
-> 记录截至 2026-11-22 核查出的 5 项关键工程与合规问题及其当前默认落地策略。
+> 保存 2026-11-22 起记录的工程与合规决策。近期变更及待验事项见 [当前交接](./HANDOFF.md)。
 
 ## 1. Emscripten SDK 缺失与双传输层策略
 
@@ -11,9 +11,9 @@
   - 断网或引擎未启动时，自动回落至 `/prewarm/` 真实 VTL 预渲染结果并明确标注状态。
 - **后续动作**：在具备 Emscripten 4.0.9 的环境重建 `vocal-runtime.zip` 并置于 `public/vocal-wasm/` 后，前端零改动即可自动切入纯浏览器 Wasm 运行。
 
-## 2. 核心本地模型已全部就绪（早期 501 扩展预留空槽已清理）
+## 2. 核心模型槽位与早期扩展空槽
 
-- **核查事实**：全部 7 个核心自研模型（`Vox2Tract-Lite`、`Tract2Vox-Lite`、`IPA2Tract-Lite`、`Tract2Area-Proxy`、`Vox2Spk-Lite`、`Text2Prosody-Lite`、`Vox2Align-Lite v2`）及 `DPDFNet2`、`SwiftF0` 共 9 个 ONNX 槽位已全部训练导出并正式接入本地引擎（`engine/model_bundle/models/`）；兼容路由 `/models/kf2tract` 已正式暴露 `IPA2Tract-Lite` 推理，零样本音色转换已由 `Vox2Spk-Lite` + `Tract2Vox-Lite` 在 `/m27/reconstruct` 与 `/m27/resynthesize` 实现。
+- **当前默认方案**　开源免安装包内置 8 个核心 Batch-2 ONNX 槽位的权重。默认引导对齐由 `Vox2Tract-Lite` 的联合对齐头完成，独立 `Vox2Align-Lite v2` 保留为兼容与外置扩展槽位。兼容路由 `/models/kf2tract` 使用 `IPA2Tract-Lite` 推理。`/m27/reconstruct` 与 `/m27/resynthesize` 通过 `Vox2Spk-Lite` 和 `Tract2Vox-Lite` 支持零样本音色转换。 [模型接口规范](./MODEL_INTERFACE_SPEC.md) · [Windows 打包规范](./PACKAGING_WINDOWS.md)
 - **已落定处置**：早期遗留的 `501` 扩展空槽（`packages/model-adapters/src/reserved-slots.ts` 与 `engine/server.py` 的 `/models/browser-light-m27`、`/models/speaker` 路由）已于 2026-11-26 经审批清理移除（详见 [DEAD_CODE_AUDIT_VERIFICATION.md §8](./review/DEAD_CODE_AUDIT_VERIFICATION.md)），本议题关闭。
 
 ## 3. `.env.local` 仅配置知乎 Secret 时的 LLM 降级与 BYOK 策略
