@@ -6,6 +6,8 @@ import CustomSelect from '@/components/common/CustomSelect.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { isDeepSeekApiBase } from '@/data/deepseek';
 import { readTextGridFile } from '@/data/textgrid-alignment';
+import { synthesisGainMode } from '@/data/voice-renderer';
+import { createVoicePlaybackBus, voicePlaybackGain } from '@/data/voice-playback-gain';
 import { useWorkbenchStore } from '@/stores/workbench';
 import ReconstructionTranscriptionActions from './ReconstructionTranscriptionActions.vue';
 import { useLocalAsrSetup } from './reconstruction-asr-setup';
@@ -701,6 +703,8 @@ function onWavePointerUp() {
   }
 }
 
+let playVoiceBus: ReturnType<typeof createVoicePlaybackBus> | null = null;
+
 function stopPlayback() {
   window.cancelAnimationFrame(playRaf);
   playRaf = 0;
@@ -712,6 +716,10 @@ function stopPlayback() {
       // ignore
     }
     playSource = null;
+  }
+  if (playVoiceBus) {
+    playVoiceBus.dispose();
+    playVoiceBus = null;
   }
   playing.value = false;
   playheadSec.value = null;
@@ -729,7 +737,14 @@ async function playRange(fromSec: number, toSec?: number) {
     const end = toSec !== undefined ? Math.max(start + 0.02, Math.min(buf.duration, toSec)) : buf.duration;
     const src = audioCtx.createBufferSource();
     src.buffer = buf;
-    src.connect(audioCtx.destination);
+    if (synthesisGainMode.value === 'peak') {
+      const bus = createVoicePlaybackBus(audioCtx);
+      bus.input.gain.value = voicePlaybackGain(buf);
+      src.connect(bus.input);
+      playVoiceBus = bus;
+    } else {
+      src.connect(audioCtx.destination);
+    }
     playSource = src;
     playStartCtxTime = audioCtx.currentTime;
     playOffsetSec = start;

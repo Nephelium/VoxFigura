@@ -27,6 +27,7 @@ import { getCurrentPageScale } from '@/styles/skin-registry';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { sendWorkspaceAudio } from '@/data/workspace-transfer';
 import { textPoseSource } from '@/data/ipa-pose-source';
+import { synthesisGainMode } from '@/data/voice-renderer';
 import { evaluateControlPitch, setUnmarkedIpaPitchMode, unmarkedIpaPitchMode } from './control-pitch';
 import { isSegmentVoicedAt } from '@/data/speech-timing';
 import { buildF0CurvePaths, type F0CurvePoint } from './f0-curve-paths';
@@ -3377,7 +3378,13 @@ async function playSelection(): Promise<void> {
     const offsetSeconds = Math.max(0, (startSmp - audioOffset) / SAMPLE_RATE_HZ);
     const durationSeconds = Math.min(source.duration, Math.max(0, (endSmp - audioOffset) / SAMPLE_RATE_HZ)) - offsetSeconds;
     if (durationSeconds > 0) {
-      await store.playAudioBuffer(source, { gain, offsetSeconds, durationSeconds, playheadStartSmp: startSmp });
+      await store.playAudioBuffer(source, {
+        gain,
+        offsetSeconds,
+        durationSeconds,
+        playheadStartSmp: startSmp,
+        voiceAutoGain: synthesisGainMode.value === 'peak',
+      });
     }
     return;
   }
@@ -3992,7 +3999,7 @@ onBeforeUnmount(() => {
           <div
             class="rt-lane rt-lane-phon phon-lane-canvas sci-plane"
             :style="{ height: `${effPhonHeight}px` }"
-            title="单击定位播放头 · 折叠态拖拽可框选时间区间 · 双击或点轨头展开 5 泳道"
+            :title="`单击定位播放头 · 折叠态拖拽可框选时间区间 · 双击或点轨头展开 ${SYNTHESIS_VOQS_PROFILES.length} 泳道`"
             @pointerdown="onPhonLanePointerDown"
             @click="onPhonLaneClick"
             @dblclick="toggleSpecialTrack('phon')"

@@ -55,7 +55,7 @@ import {
 } from '@vocalcut/core';
 import {
   IPA_LONG_PAUSE_MS,
-  IPA_SPACE_PAUSE_MS,
+  japaneseKanjiReadingsFor,
   loadCmu,
   reviewText, japaneseReadingsFor, type KanaLexicon,
   mappingStandards,
@@ -1517,50 +1517,43 @@ async function compileRuleSentence(
 ): Promise<CompiledSentenceData | null> {
   const voqsParsed = parseVoqsScopedText(sentenceText);
   const scopedRows: Array<{ row: ReadingRow; voqsState: ActiveVoqsState | null }> = [];
-  let pendingIpaSpace = false;
   for (const chunk of voqsParsed.chunks) {
     if (!chunk.text.trim()) {
-      if (!chunk.syntheticSpace && /\s/u.test(chunk.text) && scopedRows.at(-1)?.row.language === 'ipa') {
-        pendingIpaSpace = true;
-      }
       continue;
     }
-    const chunkRows = reviewText(chunk.text, opts.activeZhStd, cmuLexicon.value, opts.personalMap, opts.activeKana);
+    const hasKanaAndHan =
+      !/^\s*[\[［]/u.test(chunk.text) &&
+      /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(chunk.text) &&
+      /\p{Script=Han}/u.test(chunk.text);
+    const chunkJaKanji = hasKanaAndHan ? await japaneseKanjiReadingsFor(chunk.text).catch(() => undefined) : undefined;
+    const chunkRows = reviewText(
+      chunk.text,
+      opts.activeZhStd,
+      cmuLexicon.value,
+      opts.personalMap,
+      opts.activeKana,
+      chunkJaKanji?.size ? { primaryLang: 'ja', jaKanji: chunkJaKanji } : undefined,
+    );
     const valid = chunkRows.filter((r) => r.word.trim().length > 0);
     if (valid.length === 0) {
-      if (/[,，、：:;；.·!?。！？…]/u.test(chunk.text) && scopedRows.length > 0) {
+      if (/[,，、：:;；.·!?。！？…|‖]/u.test(chunk.text) && scopedRows.length > 0) {
         const prev = scopedRows[scopedRows.length - 1].row;
         if (!prev.linkedToNext) {
-          const pMs = /[.·!?。！？…]/u.test(chunk.text) ? IPA_LONG_PAUSE_MS : 180;
+          const pMs = /[.·!?。！？…‖]/u.test(chunk.text) ? IPA_LONG_PAUSE_MS : 180;
           prev.pause = Math.max(prev.pause, pMs);
           prev.phraseEnd = true;
         }
-        pendingIpaSpace = false;
       }
       continue;
     }
     const prevRow = scopedRows.at(-1)?.row;
-    if (prevRow && !prevRow.linkedToNext) {
-      if (valid[0].leadingPause) {
-        prevRow.pause = Math.max(prevRow.pause, valid[0].leadingPause);
-        prevRow.phraseEnd = true;
-      } else if (
-        pendingIpaSpace &&
-        prevRow.language === 'ipa' &&
-        valid[0].language === 'ipa'
-      ) {
-        prevRow.pause = Math.max(prevRow.pause, IPA_SPACE_PAUSE_MS);
-      }
+    if (prevRow && !prevRow.linkedToNext && valid[0].leadingPause) {
+      prevRow.pause = Math.max(prevRow.pause, valid[0].leadingPause);
+      prevRow.phraseEnd = true;
     }
     for (const r of valid) {
       scopedRows.push({ row: r, voqsState: chunk.state });
     }
-    const lastRow = valid[valid.length - 1];
-    pendingIpaSpace =
-      lastRow.language === 'ipa' &&
-      !lastRow.linkedToNext &&
-      !lastRow.phraseEnd &&
-      /\s[\]］]?$/u.test(chunk.text);
   }
 
   if (scopedRows.length === 0) {
@@ -2484,7 +2477,7 @@ function quickIpaTitle(item: QuickIpaItem): string {
   const segment = primarySelectedEntry.value?.seg;
   if (segment) {
     const action = item.category === 'diacritic' ? `叠加到 [${segment.ipa}]` : `替换选中 [${segment.ipa}]`;
-    return `${item.display ?? item.symbol} · ${item.nameZh}（点击${action}；Ctrl+点击复制符号）`;
+    return `${item.display ?? item.symbol} · ${item.nameZh}（点击${action}并复制；Ctrl+点击仅复制）`;
   }
   return `${item.display ?? item.symbol} · ${item.nameZh}（点击复制符号）`;
 }
@@ -2569,10 +2562,11 @@ function replaceSelectedWithIpa(item: QuickIpaItem, e?: MouseEvent): void {
     payload: { clip: cloned },
   });
   if (res.ok) {
+    void copyTextToClipboard(item.symbol);
     store.pushToast(
       isMark
-        ? `已为 ${targets.size} 个选中音素叠加 [${item.display ?? item.symbol}]`
-        : `已将 ${targets.size} 个选中音素替换为 [${item.display ?? item.symbol}]`,
+        ? `已为 ${targets.size} 个选中音素叠加 [${item.display ?? item.symbol}] 并复制`
+        : `已将 ${targets.size} 个选中音素替换为 [${item.display ?? item.symbol}] 并复制`,
       'success',
       2000,
     );
@@ -5431,7 +5425,7 @@ onBeforeUnmount(() => {
               class="inp rm-g2p-inp notranslate"
               translate="no"
               placeholder="输入中/英/日、[IPA¹²³ / ˥˩]（国际音标须加方括号，已支持多数附加符号、少部分待适配）或 {3V̤ ... 3V̤}"
-              title='国际音标必须放在方括号 [...] 中（目前已支持大多数附加符号，尚有少部分待适配）；VoQS 内的英语原词用双引号包住，例如 [a {F "falsetto" F}]'
+              title='国际音标必须放在方括号 [...] 中（目前已支持大多数附加符号，尚有少部分待适配）；VoQS 内若要输入中/英/日原词而非国际音标，可用英文双引号包住，例如 [a {F "falsetto" F}]、[a {F "你好" F}]、[a {F "こんにちは" F}]'
               @keydown.enter="compileG2pToTrack"
             />
           </div>

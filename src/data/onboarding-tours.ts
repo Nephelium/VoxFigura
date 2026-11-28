@@ -143,7 +143,7 @@ export const BASE_TOUR_DEFINITIONS: Record<Exclude<TourPageId, 'explore'>, TourD
         id: 'main-g2p-demo',
         selector: '[data-tour="main-g2p-bar"]',
         title: '3/11 · 通栏编译条：中英日与 IPA/VoQS 混排一键试听',
-        body: '在底栏输入框填入 今天天气真好。What a gorgeous day! 今日はいい天気ですね。 [ˈnɔ˞məl ˈvɔɪs. {F fɔlˈsɛtʰoʊ F}. {W ˈwɪspʰəɹʷi W}] 后点右侧「编译入轨」再点「播放」（或直接点击下方按钮一键体验），即可按句独立合成中文、英文、日语与常态浊声、假声 {F ... F}、耳语 {W ... W} 切换；[IPA] 内空格为 175 ms 短停顿、句尾 . / · 为 350 ms 长停顿，VoQS 内英语原词可用双引号包住。载入录音后，左侧自动出现「原音 / DPDFNet 降噪 / 编辑音频 / 重合成」与「声道重建并对齐」按钮。',
+        body: '在底栏输入框填入 今天天气真好。What a gorgeous day! 今日はいい天気ですね。 [ˈnɔ˞məl ˈvɔɪs. {F fɔlˈsɛtʰoʊ F}. {W ˈwɪspʰəɹʷi W}] 后点右侧「编译入轨」再点「播放」（或直接点击下方按钮一键体验），即可按句独立合成中文、英文、日语与常态浊声、假声 {F ... F}、耳语 {W ... W} 切换；[IPA] 内空格与标调连写自动 0 ms 切音节衔接，停顿用 , / |（180 ms）或 . / · / ‖（350 ms），VoQS 内中/英/日原词可用英文双引号包住。载入录音后，左侧自动出现「原音 / DPDFNet 降噪 / 编辑音频 / 重合成」与「声道重建并对齐」按钮。',
         tip: '点击下方按钮会自动填入这段混排例句、分句编译入轨并合成播放，同时联动上方声道剖面与四联声学图。',
         placement: 'top',
         padding: 8,

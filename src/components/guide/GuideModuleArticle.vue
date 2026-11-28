@@ -912,7 +912,7 @@ function buildCardExportBudgetChart(t: ChartThemeTokens): EChartsCoreOption {
               <span class="m27-lane-badge tone-success mono">VoQS</span>
               <div>
                 <strong>发声类型锚点与 1×–6× 精编</strong>
-                <p>展开 5 轨可直接拖移或 Delete 删除；点击「放大发声类型」可在缩放画布上写入 14 类实录 VoQS 与 10 维声门。</p>
+                <p>展开 9 轨可直接拖移或 Delete 删除；点击「放大发声类型」可在缩放画布上精编各实录 VoQS 与 10 维声门。</p>
               </div>
             </div>
             <div class="ipa-legend-item">

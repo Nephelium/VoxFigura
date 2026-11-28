@@ -162,17 +162,26 @@ describe('IPA multi-syllable, tone sandhi, VoQS braces & English MOP syllabifica
     });
   });
 
-  it('reads quoted English as words inside IPA and preserves each VoQS scope', () => {
+  it('reads quoted Chinese, English, and Japanese words inside IPA and preserves each VoQS scope', () => {
     const cmu = parseCmu('FALSETTO  F AO0 L S EH1 T OW2\nWITH  W IH1 TH\n');
     const read = (text: string) => reviewText(text, 'Standard Chinese (Beijing)', cmu, new Map());
-    const input = '[a {F"falsetto"F} {L̝ W “with” W L̝} {F with F} i]';
+    const input = '[a {F"falsetto"F} {C "你好" C} {W "こんにちは" W} {L̝ W “with” W L̝} {F with F} i]';
     const parsed = parseVoqsScopedText(input);
     const voicedRows = parsed.chunks.flatMap(chunk => read(chunk.text).map(row => ({ row, state: chunk.state })));
     expect(read(parsed.plainText)).toEqual(voicedRows.map(({ row }) => row));
-    expect(voicedRows.map(({ row }) => row.language)).toEqual(['ipa', 'en', 'en', 'en', 'en', 'ipa', 'ipa']);
+    expect(voicedRows.map(({ row }) => row.language)).toEqual([
+      'ipa',
+      'en', 'en', 'en',
+      'zh', 'zh',
+      'ja', 'ja', 'ja', 'ja', 'ja',
+      'en',
+      'ipa', 'ipa',
+    ]);
     expect(voicedRows[1].state?.phonation?.symbol).toBe('F');
-    expect(voicedRows[4]).toMatchObject({ row: { ipa: 'ˈwɪθ' }, state: { phonation: { symbol: 'W' }, larynxHeightCm: 0.5 } });
-    expect(voicedRows[5].row.ipa).toBe('with');
+    expect(voicedRows[4]).toMatchObject({ row: { word: '你', language: 'zh' }, state: { phonation: { symbol: 'C' } } });
+    expect(voicedRows[6]).toMatchObject({ row: { language: 'ja' }, state: { phonation: { symbol: 'W' } } });
+    expect(voicedRows[11]).toMatchObject({ row: { ipa: 'ˈwɪθ' }, state: { phonation: { symbol: 'W' }, larynxHeightCm: 0.5 } });
+    expect(voicedRows[12].row.ipa).toBe('with');
     expect(() => parseVoqsScopedText('[a {F "falsetto F}]')).toThrow('成对的双引号');
   });
 
@@ -392,11 +401,16 @@ describe('IPA multi-syllable, tone sandhi, VoQS braces & English MOP syllabifica
       unified: false,
     });
 
-    expect(SYNTHESIS_VOQS_PROFILES.map((p) => p.symbol)).toEqual(['V͈', 'V', 'V̤', 'W', 'F']);
-    expect(SYNTHESIS_VOQS_GROUPS.flatMap((g) => g.profiles.map((p) => p.symbol))).toEqual(['V͈', 'V', 'V̤', 'W', 'F']);
+    const expectedLanes = ['V͈', 'V', 'V̤', 'W', 'V̥', 'V̰', 'C', 'V̰̣', 'F'];
+    expect(SYNTHESIS_VOQS_PROFILES.map((p) => p.symbol)).toEqual(expectedLanes);
+    expect(SYNTHESIS_VOQS_GROUPS.flatMap((g) => g.profiles.map((p) => p.symbol))).toEqual(expectedLanes);
     expect(VOQS_PROFILES.length).toBe(14);
     expect(voqsSynthesisLaneIndex('V')).toBe(1);
-    expect(voqsSynthesisLaneIndex({ regime: 'creaky', voqs: { symbol: 'V̰', source_id: 'old', t_s: 0 } })).toBe(1);
+    expect(voqsSynthesisLaneIndex('V̥')).toBe(4);
+    expect(voqsSynthesisLaneIndex('V̰')).toBe(5);
+    expect(voqsSynthesisLaneIndex('C')).toBe(6);
+    expect(voqsSynthesisLaneIndex('V̰̣')).toBe(7);
+    expect(voqsSynthesisLaneIndex({ regime: 'creaky', voqs: { symbol: 'V̰', source_id: 'old', t_s: 0 } })).toBe(5);
 
     expect(resolveBrandIconVariant('#0969da', 'light')).toBe('blue');
     expect(resolveBrandIconVariant('#0969da', 'dark')).toBe('midnight');

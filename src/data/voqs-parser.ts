@@ -72,7 +72,7 @@ const DEGREE_HEIGHT_CM: Record<VoqsDegree, number> = {
 
 const CJK_LETTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー\uff66-\uff9f]/u;
 const CJK_RUN = /([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー\uff66-\uff9f\u3099\u309a]+)/u;
-const ENGLISH_QUOTE_RUN = /("[^"“”]*"|“[^"“”]*”)/u;
+const QUOTED_WORD_RUN = /("[^"“”]*"|“[^"“”]*”)/u;
 const VOQS_TAG_BOUNDARY = /[\s{}\[\]［］"“”]/u;
 
 /** Canonicalize combining-mark ordering so V̰̣ and Ṿ̰ both match `voqs-recordings.json`. */
@@ -231,14 +231,14 @@ export function parseVoqsScopedText(source: string): VoqsParseResult {
         if (part !== ipaClose) throw new Error('请检查 IPA 方括号是否成对');
         ipaClose = '';
       } else {
-        const spans = tagged ? part.split(ENGLISH_QUOTE_RUN) : [part];
+        const spans = tagged ? part.split(QUOTED_WORD_RUN) : [part];
         for (const [index, span] of spans.entries()) {
           if (index % 2 === 1) {
-            const english = span.slice(1, -1).trim();
-            if (english) chunks.push({ text: ` ${english} `, state });
+            const quoted = span.slice(1, -1).trim();
+            if (quoted) chunks.push({ text: ` ${quoted} `, state });
             continue;
           }
-          if (tagged && /["“”]/u.test(span)) throw new Error('请用成对的双引号圈住 VoQS 内的英语文本');
+          if (tagged && /["“”]/u.test(span)) throw new Error('请用成对的双引号圈住 VoQS 内的中/英/日原词');
           const runs = tagged ? span.split(CJK_RUN) : [span];
           for (const run of runs) {
             if (!run) continue;

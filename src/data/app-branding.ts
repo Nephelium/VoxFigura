@@ -11,7 +11,7 @@ export const APP_BRAND_TAGLINE = '物理声道驱动的语音实验、标注与�
 export const APP_WINDOW_TITLE = 'VoxFigura · 语音实验与声乐编曲';
 export const APP_REPO_SLUG = 'Nephelium/VoxFigura';
 export const APP_REPO_URL = 'https://github.com/Nephelium/VoxFigura';
-export const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.2';
+export const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.2.3';
 export const APP_EDITION: 'public' | 'friends' | 'hackathon' =
   typeof __APP_EDITION__ !== 'undefined' ? __APP_EDITION__ : 'public';
 

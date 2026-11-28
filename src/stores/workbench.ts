@@ -3162,7 +3162,8 @@ function createWorkbenchStore(): WorkbenchStore {
     gainNode.gain.value = opts.gain ?? 1;
 
     src.connect(gainNode);
-    if (opts.voiceAutoGain) {
+    const useAutoGain = opts.voiceAutoGain ?? (synthesisGainMode.value === 'peak');
+    if (useAutoGain) {
       const bus = activeVoiceGainBus = { ...createVoicePlaybackBus(ctx), measured: true };
       bus.input.gain.value = voicePlaybackGain(target);
       gainNode.connect(bus.input);

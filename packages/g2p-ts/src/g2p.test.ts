@@ -174,23 +174,43 @@ describe('@vocalcut/g2p pure runtime', () => {
     ).toEqual(['ˈswɪt͡ʃʰ', 'ɪz', 'ˈpʰɪt͡ʃʰt']);
   });
 
-  it('maps IPA [...] whitespace to 175 ms short pause and dot (. / ·) to 350 ms long pause without breaking syllable dots or plain text', () => {
+  it('splits tone-marked IPA syllables automatically, keeps [...] whitespace at 0 ms, and maps , / | to 180 ms and . / · / ‖ to 350 ms', () => {
     const read = (text: string) => reviewText(text, 'Standard Chinese (Beijing)', new Map(), new Map());
 
-    // Space inside [...] -> 175 ms short pause (half of 350 ms), phraseEnd stays falsy
+    // Space inside [...] stays 0 ms (visual word/syllable boundary, not an artificial silence)
     const spaced = read('[ˈnɔməl ˈvɔɪs]');
     expect(spaced.map((r) => ({ ipa: r.ipa, pause: r.pause, phraseEnd: Boolean(r.phraseEnd) }))).toEqual([
-      { ipa: 'ˈnɔməl', pause: 175, phraseEnd: false },
+      { ipa: 'ˈnɔməl', pause: 0, phraseEnd: false },
       { ipa: 'ˈvɔɪs', pause: 0, phraseEnd: false },
     ]);
 
-    // Trailing `.`, standalone `.`, and middle dot `·` -> 350 ms long pause + phraseEnd
-    for (const sample of ['[ˈnɔməl. ˈvɔɪs]', '[ˈnɔməl . ˈvɔɪs]', '[ˈnɔməl · ˈvɔɪs]', '[ˈnɔməl·ˈvɔɪs]']) {
+    // Both spaced and contiguous tone-marked narrow IPA split cleanly into 4 toned syllables with 0 ms gaps
+    for (const sample of ['[kʰɛ˥ ɕin˥ tɕjəʊ˦˩ xaʊ˨˩]', '[kʰɛ˥ɕin˥tɕjəʊ˦˩xaʊ˨˩]', 'kʰɛ˥ ɕin˥ tɕjəʊ˦˩ xaʊ˨˩']) {
+      const rows = read(sample);
+      expect(rows.map((r) => ({ ipa: r.ipa, pause: r.pause })), sample).toEqual([
+        { ipa: 'kʰɛ˥', pause: 0 },
+        { ipa: 'ɕin˥', pause: 0 },
+        { ipa: 'tɕjəʊ˦˩', pause: 0 },
+        { ipa: 'xaʊ˨˩', pause: 0 },
+      ]);
+    }
+
+    // Superscript tones and parenthesized sandhi contours also split cleanly without breaking inside a contour
+    expect(read('[jɜu¹¹jɜt⁴⁵]').map((r) => r.ipa)).toEqual(['jɜu¹¹', 'jɜt⁴⁵']);
+    expect(read('[a˧˧(˦˥˦꜓꜓)b˥]').map((r) => r.ipa)).toEqual(['a˧˧(˦˥˦꜓꜓)', 'b˥']);
+
+    // Trailing `.`, standalone `.`, middle dot `·`, and major break `‖` -> 350 ms long pause + phraseEnd
+    for (const sample of ['[ˈnɔməl. ˈvɔɪs]', '[ˈnɔməl . ˈvɔɪs]', '[ˈnɔməl · ˈvɔɪs]', '[ˈnɔməl·ˈvɔɪs]', '[ˈnɔməl ‖ ˈvɔɪs]']) {
       const rows = read(sample);
       expect(rows.map((r) => ({ ipa: r.ipa, pause: r.pause, phraseEnd: Boolean(r.phraseEnd) })), sample).toEqual([
         { ipa: 'ˈnɔməl', pause: 350, phraseEnd: true },
         { ipa: 'ˈvɔɪs', pause: 0, phraseEnd: false },
       ]);
+    }
+
+    // Comma and minor prosodic break `|` -> 180 ms phrase pause
+    for (const sample of ['[ˈnɔməl, ˈvɔɪs]', '[ˈnɔməl | ˈvɔɪs]']) {
+      expect(read(sample)[0], sample).toMatchObject({ pause: 180, phraseEnd: true });
     }
 
     // Word-internal tight `.` remains a 0 ms syllable break; `‿` remains 0 ms linked liaison
@@ -206,9 +226,7 @@ describe('@vocalcut/g2p pure runtime', () => {
       { ipa: 'ˈvɔɪs', pause: 0, linkedToNext: false },
     ]);
 
-    // Comma keeps 180 ms phrase pause; orphan diacritic after space never adds a pause
-    const comma = read('[ˈnɔməl, ˈvɔɪs]');
-    expect(comma[0]).toMatchObject({ pause: 180, phraseEnd: true });
+    // Orphan diacritic after space attaches cleanly without adding a pause
     expect(read('[a ◌̹]')).toMatchObject([{ ipa: 'a̹', pause: 0 }]);
 
     // Non-IPA Chinese/English spaces stay 0 ms

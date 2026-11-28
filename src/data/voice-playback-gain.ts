@@ -1,6 +1,6 @@
-const ACTIVE_RMS_TARGET = .16;
-const MIN_FRAME_POWER = .001 ** 2;
-const MAX_MAKEUP_GAIN = 12;
+export const TARGET_VOICED_PEAK = .58;
+export const SILENCE_PEAK_GATE = .003;
+export const MAX_MAKEUP_GAIN = 3;
 const gainCache = new WeakMap<AudioBuffer, number>();
 const ceilingCurve = Float32Array.from({ length: 2049 }, (_, index) => softLimitVoiceSample(index / 1024 - 1));
 
@@ -9,34 +9,39 @@ export function softLimitVoiceSample(sample: number): number {
   return magnitude <= .8 ? sample : Math.sign(sample) * (.8 + .18 * Math.tanh((magnitude - .8) / .18));
 }
 
-/** Estimate one makeup gain from active audio, with silence excluded. */
+/**
+ * Estimate a bounded makeup gain from active 40 ms windows.
+ * - Silence / noise floor below SILENCE_PEAK_GATE stays at 1x.
+ * - Normal voiced speech is scaled toward TARGET_VOICED_PEAK (~0.58).
+ * - Quiet voiceless segments are capped by MAX_MAKEUP_GAIN (3x) so natural
+ *   voiced/voiceless loudness contrast is preserved.
+ */
 export function measureVoicePlaybackGain(channels: readonly Float32Array[], sampleRate: number): number | undefined {
   if (!channels.length) return;
   const window = Math.max(1, Math.round(sampleRate * .04));
-  const frames: number[] = [];
-  let strongest = 0;
+  const peaks: number[] = [];
+  let maxPeak = 0;
   const length = channels[0].length;
   for (let start = 0; start < length; start += window) {
     const end = Math.min(length, start + window);
-    let energy = 0;
+    let winPeak = 0;
     for (const channel of channels) {
-      for (let i = start; i < end; i++) energy += channel[i] * channel[i];
+      for (let i = start; i < end; i++) {
+        const a = Math.abs(channel[i]);
+        if (a > winPeak) winPeak = a;
+      }
     }
-    const power = energy / ((end - start) * channels.length);
-    if (!Number.isFinite(power)) continue;
-    frames.push(power);
-    strongest = Math.max(strongest, power);
+    if (!Number.isFinite(winPeak)) continue;
+    peaks.push(winPeak);
+    if (winPeak > maxPeak) maxPeak = winPeak;
   }
-  if (strongest < MIN_FRAME_POWER) return;
-  const gate = Math.max(MIN_FRAME_POWER, strongest * .025);
-  let power = 0;
-  let count = 0;
-  for (const frame of frames) {
-    if (frame < gate) continue;
-    power += frame;
-    count++;
-  }
-  return Math.max(1, Math.min(MAX_MAKEUP_GAIN, ACTIVE_RMS_TARGET / Math.sqrt(power / count)));
+  if (maxPeak < SILENCE_PEAK_GATE) return;
+  const gate = Math.max(SILENCE_PEAK_GATE, maxPeak * .1);
+  const active = peaks.filter((p) => p >= gate).sort((a, b) => a - b);
+  if (!active.length) return;
+  const refPeak = active[Math.min(active.length - 1, Math.floor((active.length - 1) * .9))];
+  if (!Number.isFinite(refPeak) || refPeak < SILENCE_PEAK_GATE) return;
+  return Math.max(1, Math.min(MAX_MAKEUP_GAIN, TARGET_VOICED_PEAK / refPeak));
 }
 
 export function voicePlaybackGain(buffer: AudioBuffer): number {

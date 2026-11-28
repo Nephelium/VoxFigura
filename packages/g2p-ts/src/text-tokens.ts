@@ -1,12 +1,29 @@
 import {tr} from './shims.ts';
 
-export const pauseMark=/^[,，、：:;；.·!?。！？…\r\n]+$/u;
-export const longPause=/[.·!?。！？…\n]/u;
+export const pauseMark=/^[,，、：:;；.·!?。！？…|‖\r\n]+$/u;
+export const longPause=/[.·!?。！？…‖\n]/u;
 export const IPA_SPACE_PAUSE_MS = 175;
 export const IPA_LONG_PAUSE_MS = 350;
-/** Internal token emitted inside `[...]` only when `preserveSpacePause` is enabled. */
+/** Internal token emitted inside `[...]` only when `preserveSpacePause` is explicitly enabled. */
 export const IPA_SPACE_PAUSE_TOKEN = '\u2420';
 export const startsIpa=(word:string)=>word.startsWith('[')||word.startsWith('［');
+
+/**
+ * Split a contiguous IPA syllable run right after a trailing tone contour cluster
+ * (Chao bars `˥˦˧˨˩`, left-stem sandhi bars `꜒-꜖`, superscript tone digits `⁰-⁹`,
+ * and optional parenthesized sandhi contour) whenever another phonetic segment immediately follows.
+ * Example: `kʰɛ˥ɕin˥tɕjəʊ˦˩xaʊ˨˩` -> `['kʰɛ˥', 'ɕin˥', 'tɕjəʊ˦˩', 'xaʊ˨˩']`.
+ */
+const TONE_CONTOUR_SPLIT_RE =
+  /(?<=[^\s˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹()‿])((?:[˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?)|(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\)))(?=[^\s˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹()‿])/gu;
+
+function splitByToneContours(syl: string): string[] {
+  if (!/[˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]/u.test(syl)) return [syl];
+  return syl
+    .replace(TONE_CONTOUR_SPLIT_RE, '$1\0')
+    .split('\0')
+    .filter(Boolean);
+}
 
 /**
  * Characters that unambiguously mark bare phonetic/IPA notation (never ordinary English orthography):
@@ -45,11 +62,11 @@ export function splitIpaSpanTokens(
     .replace(/(?<=[^\s,，、：:;；·!?。！？….\u25cc])\u25cc(?=[\p{M}ʰʱʷʲˠˤ˞ʼⁿˡːˑ˘˔˕˖˗˓˒])/gu, '');
   if (!trimmed) return out;
 
-  // Match parenthesized sandhi contours like `(˦˥˦꜓꜓)` attached to a syllable, pause punctuation,
-  // whitespace runs, or non-space phonetic runs
+  // Match parenthesized sandhi contours like `(˦˥˦꜓꜓)` attached to a syllable, pause punctuation
+  // (including IPA prosodic breaks `|` and `‖`), whitespace runs, or non-space phonetic runs
   const pieces =
     trimmed.match(
-      /(?:[^\s,，、：:;；·!?。！？…]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?)|[,，、：:;；·!?。！？…]+|\s+/gu,
+      /(?:[^\s,，、：:;；·!?。！？…|‖]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?)|[,，、：:;；·!?。！？…|‖]+|\s+/gu,
     ) ?? [];
 
   let pendingSpace = false;
@@ -109,14 +126,17 @@ export function splitIpaSpanTokens(
     }
 
     for (const wordChunk of mergedLiaison) {
-      // Split on explicit syllable dot `.` inside IPA word (e.g. `nɔ˞.məl`, zero pause)
+      // Split on explicit syllable dot `.` inside IPA word (e.g. `nɔ˞.məl`, zero pause),
+      // then split adjacent tone-marked syllables (e.g. `kʰɛ˥ɕin˥tɕjəʊ˦˩xaʊ˨˩`, zero pause).
       const dotSyllables = wordChunk.split('.').map((s) => s.trim()).filter(Boolean);
-      for (const syl of dotSyllables) {
-        // Plain ASCII digits standing alone remain plain digit tokens (read as numbers, not IPA)
-        if (/^\d+$/u.test(syl)) {
-          out.push(syl);
-        } else {
-          out.push(`[${syl}]`);
+      for (const dotSyl of dotSyllables) {
+        for (const syl of splitByToneContours(dotSyl)) {
+          // Plain ASCII digits standing alone remain plain digit tokens (read as numbers, not IPA)
+          if (/^\d+$/u.test(syl)) {
+            out.push(syl);
+          } else {
+            out.push(`[${syl}]`);
+          }
         }
       }
     }
@@ -139,7 +159,7 @@ export function splitIpaSpanTokens(
 export function tokens(text: string): string[] {
   const rawRuns =
     text.match(
-      /\p{Script=Han}|\d+|[^\s\p{Script=Han},，、：:;；!?。！？…\[\]［］"“”‘’《》「」]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?|\r?\n|[^\s]/gu,
+      /\p{Script=Han}|\d+|[^\s\p{Script=Han},，、：:;；!?。！？…|‖\[\]［］"“”‘’《》「」]+(?:\([˥˦˧˨˩꜒꜓꜔꜕꜖⁰¹²³⁴⁵⁶⁷⁸⁹]+\))?|\r?\n|[^\s]/gu,
     ) ?? [];
 
   // Heuristic: if ≥40% of multi-char runs in this chunk contain unambiguous IPA markers,

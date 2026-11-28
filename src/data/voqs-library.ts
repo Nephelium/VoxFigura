@@ -38,11 +38,45 @@ function buildVoqsGroups(profiles: readonly VoqsProfile[]): VoqsGroup[] {
 }
 export const VOQS_GROUPS: readonly VoqsGroup[] = buildVoqsGroups(VOQS_PROFILES);
 
-export const SYNTHESIS_VOQS_SYMBOLS = ['V͈', 'V', 'V̤', 'W', 'F'] as const;
-const synthesisSymbolSet = new Set<string>(SYNTHESIS_VOQS_SYMBOLS);
-export const SYNTHESIS_VOQS_PROFILES: readonly VoqsProfile[] = VOQS_PROFILES.filter(profile =>
-  synthesisSymbolSet.has(profile.symbol),
-);
+export const SYNTHESIS_VOQS_SYMBOLS = ['V͈', 'V', 'V̤', 'W', 'V̥', 'V̰', 'C', 'V̰̣', 'F'] as const;
+
+const VOICELESS_SYNTHESIS_PROFILE: VoqsProfile = {
+  symbol: 'V̥',
+  label: '清化',
+  group: 'closure',
+  group_label: '声门压紧、周期振动与漏气',
+  legacy: 'whisper',
+  takes: [
+    {
+      id: 'preset-voiceless',
+      file: '',
+      frame: 0,
+      t_s: 0,
+      tagged: false,
+      candidate_frames: 1,
+      glottis: {
+        f0_hz: 165,
+        pr_pa: 520,
+        xb_cm: 0.22,
+        xt_cm: 0.22,
+        ca_cm2: 0.14,
+        lag_rad: 1.22,
+        ra: 0,
+        ps: 0.5,
+        fl: 0,
+        shim: 0,
+      },
+    },
+  ],
+};
+
+const ALL_LOOKUP_PROFILES: readonly VoqsProfile[] = [...VOQS_PROFILES, VOICELESS_SYNTHESIS_PROFILE];
+
+export const SYNTHESIS_VOQS_PROFILES: readonly VoqsProfile[] = SYNTHESIS_VOQS_SYMBOLS.map((sym) => {
+  const found = ALL_LOOKUP_PROFILES.find((profile) => normalize(profile.symbol) === normalize(sym));
+  if (!found) throw new Error(`Missing synthesis VoQS profile for ${sym}`);
+  return found;
+});
 export const SYNTHESIS_VOQS_GROUPS: readonly VoqsGroup[] = buildVoqsGroups(SYNTHESIS_VOQS_PROFILES);
 
 const synthesisRegimeFallback: Record<PhonationRegime, string> = {
@@ -50,7 +84,7 @@ const synthesisRegimeFallback: Record<PhonationRegime, string> = {
   modal: 'V',
   breathy: 'V̤',
   whisper: 'W',
-  creaky: 'V',
+  creaky: 'V̰',
   falsetto: 'F',
 };
 
@@ -71,7 +105,7 @@ const legacyVoqs: Record<PhonationRegime, string> = {
 };
 
 export function voqsProfile(symbol: string): VoqsProfile | undefined {
-  return VOQS_PROFILES.find(profile => normalize(profile.symbol) === normalize(symbol));
+  return ALL_LOOKUP_PROFILES.find(profile => normalize(profile.symbol) === normalize(symbol));
 }
 
 export function voqsLane(anchor: Pick<PhonationAnchor, 'regime' | 'voqs'>): string {

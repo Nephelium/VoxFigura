@@ -11,6 +11,7 @@ import CustomSelect from '@/components/common/CustomSelect.vue';
 import IconSvg from '@/components/common/IconSvg.vue';
 import { denoiseFile } from '@/data/denoise';
 import { applyPeakAudioGain, synthesisGainMode } from '@/data/voice-renderer';
+import { createVoicePlaybackBus, voicePlaybackGain } from '@/data/voice-playback-gain';
 import { studioAudioContext } from '@/components/studio/studio-media';
 import { detectLeadingTrailingSilence } from './audio-cut';
 import {
@@ -182,6 +183,8 @@ function setStatus(text: string, kind: 'info' | 'warn' = 'info'): void {
   statusKind.value = kind;
 }
 
+let playVoiceBus: ReturnType<typeof createVoicePlaybackBus> | null = null;
+
 function stopPlayback(): void {
   cancelAnimationFrame(playRaf);
   playRaf = 0;
@@ -194,6 +197,10 @@ function stopPlayback(): void {
     }
     playSource.disconnect();
     playSource = null;
+  }
+  if (playVoiceBus) {
+    playVoiceBus.dispose();
+    playVoiceBus = null;
   }
   playing.value = false;
   playheadSec.value = null;
@@ -581,7 +588,14 @@ async function togglePlay(useSelection: boolean): Promise<void> {
 
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(ctx.destination);
+  if (synthesisGainMode.value === 'peak') {
+    const bus = createVoicePlaybackBus(ctx);
+    bus.input.gain.value = voicePlaybackGain(buf);
+    src.connect(bus.input);
+    playVoiceBus = bus;
+  } else {
+    src.connect(ctx.destination);
+  }
   playSource = src;
   playStartOffset = start;
   playStopOffset = end;

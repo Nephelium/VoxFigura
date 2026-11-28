@@ -85,10 +85,10 @@ watch(profile, current => {
       </label>
       <div class="voqs-actions">
         <button type="button" class="btn xs primary" :disabled="!validHeight" @click="emit('apply', profile, take, pickedHeight)">写入声门锚点</button>
-        <button v-if="!mediaOwned" type="button" class="btn xs" :aria-expanded="showAudio" @click="showAudio = !showAudio">参考录音</button>
+        <button v-if="!mediaOwned && take.file" type="button" class="btn xs" :aria-expanded="showAudio" @click="showAudio = !showAudio">参考录音</button>
       </div>
-      <audio v-if="showAudio" :key="take.id" :src="voqsAudioUrl(take)" controls preload="none" aria-label="VoQS 实录音频" />
-      <small class="muted">{{ take.id }} · 第 {{ take.frame + 1 }} 帧 · {{ take.glottis.pr_pa.toFixed(0) }} Pa</small>
+      <audio v-if="showAudio && take.file" :key="take.id" :src="voqsAudioUrl(take)" controls preload="none" aria-label="VoQS 实录音频" />
+      <small class="muted">{{ take.file ? `${take.id} · 第 ${take.frame + 1} 帧` : '物理声门预设' }} · {{ take.glottis.pr_pa.toFixed(0) }} Pa</small>
       <small v-if="profile.group === 'height' && !mediaOwned" class="muted">声门参数取自实录。喉位控制量由此输入，单位 cm。</small>
       <small v-if="!mediaOwned" class="muted">锚点参数保持至下一发声类型锚点。</small>
     </template>

@@ -16,6 +16,7 @@ import CompactSlider from '@/components/common/CompactSlider.vue';
 import { getActiveSplitterValue } from '@/data/splitter-layout';
 import VoiceRenderSelect from '@/components/common/VoiceRenderSelect.vue';
 import { applyPeakAudioGain, normalizeAudioFile, synthesisGainMode, voiceRenderLabels, voiceRenderMode } from '@/data/voice-renderer';
+import { createVoicePlaybackBus, voicePlaybackGain } from '@/data/voice-playback-gain';
 import IconSvg from '@/components/common/IconSvg.vue';
 import ModuleGuideButton from '@/components/guide/ModuleGuideButton.vue';
 import SplitPane from '@/components/common/SplitPane.vue';
@@ -804,6 +805,7 @@ let observer: ResizeObserver | null = null;
 // Dedicated Web Audio context & decoded cache for local ±windowMs audition (T-49)
 let auditionCtx: AudioContext | null = null;
 let auditionNode: AudioBufferSourceNode | null = null;
+let auditionVoiceBus: ReturnType<typeof createVoicePlaybackBus> | null = null;
 const decodedBlobCache = new WeakMap<Blob, Promise<AudioBuffer>>();
 
 const safeReason = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -829,6 +831,10 @@ function stopAuditionWindow() {
       // ignore stopped node
     }
     auditionNode = null;
+  }
+  if (auditionVoiceBus) {
+    auditionVoiceBus.dispose();
+    auditionVoiceBus = null;
   }
   auditioningWindow.value = false;
 }
@@ -1979,11 +1985,22 @@ async function auditionWindowAtPlayhead() {
     const node = ctx.createBufferSource();
     node.buffer = windowed;
     node.playbackRate.value = speed.value;
-    node.connect(ctx.destination);
+    if (synthesisGainMode.value === 'peak') {
+      const bus = createVoicePlaybackBus(ctx);
+      bus.input.gain.value = voicePlaybackGain(decoded);
+      node.connect(bus.input);
+      auditionVoiceBus = bus;
+    } else {
+      node.connect(ctx.destination);
+    }
     auditionNode = node;
     node.onended = () => {
       if (auditionNode === node) {
         auditionNode = null;
+        if (auditionVoiceBus) {
+          auditionVoiceBus.dispose();
+          auditionVoiceBus = null;
+        }
         auditioningWindow.value = false;
       }
     };

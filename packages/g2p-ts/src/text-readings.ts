@@ -442,7 +442,7 @@ export function reviewText(
     const list=phraseIndex.get(parts[0])??[];list.push({parts,choices});phraseIndex.set(parts[0],list);
   }
   for(const list of phraseIndex.values())list.sort((a,b)=>b.parts.length-a.parts.length);
-  const words=typeof text==='string'?mixedSpeechTokens(text, { preserveSpacePause: true }):text;
+  const words=typeof text==='string'?mixedSpeechTokens(text):text;
   const hasLatinContext = words.some((w) => !startsIpa(w) && /\p{Script=Latin}/u.test(w));
 
   for(let i=0;i<words.length;i++){
