@@ -48,7 +48,7 @@ html:root[data-style="neumorphism"][data-theme="dark"] {
     inset 0 -1px 0 rgba(255, 255, 255, 0.05);
 }
 
-html:root[data-style="neumorphism"] .work-header .header-tools > button {
+html:root[data-style="neumorphism"] .work-header :is(.header-tools, .hdr-menu-anchor) > button {
   border-radius: 7px;
   border: 1px solid var(--ctrl-border);
   box-shadow: var(--ctrl-shadow);
@@ -203,7 +203,7 @@ html:root[data-style="minimal"] .panel > .p-head {
   box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--accent) 36%, var(--border));
 }
 
-html:root[data-style="minimal"] .work-header .header-tools > button {
+html:root[data-style="minimal"] .work-header :is(.header-tools, .hdr-menu-anchor) > button {
   border-radius: var(--r-ctrl);
   border: 1px solid var(--ctrl-border);
   background: color-mix(in srgb, var(--accent) 4%, var(--instrument-panel));
@@ -270,7 +270,7 @@ html:root[data-style="bauhaus"][data-theme="dark"] {
   --panel-shadow: 2px 2px 0 rgba(0, 0, 0, 0.68);
   --ctrl-shadow: 1.5px 1.5px 0 rgba(0, 0, 0, 0.68);
 }
-html:root[data-style="bauhaus"] .work-header .header-tools > button {
+html:root[data-style="bauhaus"] .work-header :is(.header-tools, .hdr-menu-anchor) > button {
   border-radius: var(--r-ctrl);
 }
 
@@ -297,7 +297,7 @@ html:root[data-style="brutal"][data-theme="dark"] {
   --ctrl-shadow: 2px 2px 0 rgba(0, 0, 0, 0.82);
   --ctrl-inset: inset 2px 2px 0 rgba(0, 0, 0, 0.55);
 }
-html:root[data-style="brutal"][data-theme="dark"] :is(.work-header, .actbar, .set-nav, .work-header .header-tools > button) {
+html:root[data-style="brutal"][data-theme="dark"] :is(.work-header, .actbar, .set-nav, .work-header .header-tools > button, .work-header .hdr-menu-anchor > button) {
   border-color: var(--panel-border);
   box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.82);
 }

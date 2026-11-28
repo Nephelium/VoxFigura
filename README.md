@@ -6,7 +6,7 @@
 
 **物理声道驱动的实验语音学、发音标注、声道重建与声乐编曲工作台**
 
-[![Version](https://img.shields.io/badge/version-v0.2.1-2563eb.svg)](https://github.com/Nephelium/VoxFigura)
+[![Version](https://img.shields.io/badge/version-v0.2.2-2563eb.svg)](https://github.com/Nephelium/VoxFigura)
 [![Live Demo](https://img.shields.io/badge/Online%20Preview-GitHub%20Pages-6366f1.svg)](https://nephelium.github.io/VoxFigura/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL--3.0--or--later-10b981.svg)](./LICENSE)
 [![Frontend](https://img.shields.io/badge/Frontend-Vue%203%20%2B%20TypeScript%20%2B%20Three.js-42b883.svg)](./package.json)

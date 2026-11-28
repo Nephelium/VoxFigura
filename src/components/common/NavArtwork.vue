@@ -61,11 +61,12 @@ const updateArtworkCells: Readonly<Record<string, number>> = {
 const densities = [1, 2, 4];
 const actionIndex = computed(() => actions.indexOf(props.item));
 const isUpdateAction = computed(() => props.item === 'check-updates');
+const isStorageArtwork = computed(() => props.item === 'storage');
 const artworkSkin = computed(() => {
   const requested = props.skin ?? appliedSkin.value ?? 'minimal';
   return BUILTIN_SKINS.some(({ id }) => id === requested) ? requested : 'minimal';
 });
-const toolbarIcon = computed(() => props.toolbar
+const toolbarIcon = computed(() => (props.toolbar && !isStorageArtwork.value)
   ? resolveToolbarArtwork(props.item, artworkSkin.value)
   : undefined);
 const isLineArtwork = computed(() => lineArtwork[artworkSkin.value]?.includes(props.item));
@@ -74,6 +75,14 @@ const hasTopBleed = computed(() =>
 );
 
 const art = computed(() => {
+  if (isStorageArtwork.value) {
+    return {
+      backgroundImage: `url("${import.meta.env.BASE_URL}nav-art/storage/storage-cache-${artworkSkin.value}.png")`,
+      backgroundPosition: 'center',
+      backgroundSize: 'contain',
+    };
+  }
+
   if (isUpdateAction.value) {
     const cell = updateArtworkCells[artworkSkin.value] ?? updateArtworkCells.minimal;
     return {

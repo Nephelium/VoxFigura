@@ -1252,41 +1252,131 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
     fetchOnboardingAudioFile(CONTINUUM_REAL_PAIR_SAMPLES.sideB.relativeUrl, CONTINUUM_REAL_PAIR_SAMPLES.sideB.filename, signal),
   ]);
 
-  const durA = Number(suan.duration_s || 0.85);
-  const durB = Number(swan.duration_s || 0.85);
+  const audios: Record<string, ArrayBuffer> = {};
+  if (recA.ok) audios.endpointA = await recA.file.arrayBuffer();
+  if (recB.ok) audios.endpointB = await recB.file.arrayBuffer();
+
+  const fileToWavB64 = async (file: File): Promise<{ b64: string; name: string }> => {
+    const decoder = new OfflineAudioContext(1, 1, SAMPLE_RATE_HZ);
+    const decoded = await decoder.decodeAudioData(await file.arrayBuffer());
+    const wave = encodeWavFromAudioBuffer(decoded);
+    return {
+      b64: arrayBufferToBase64(await wave.arrayBuffer()),
+      name: file.name.replace(/\.[^./]+$/, '.wav'),
+    };
+  };
+
+  // Match ContinuumView onboarding tour: invert both real recordings via Vox2Tract-Lite when available
+  let reconRowsA: number[][] | null = null;
+  let reconRowsB: number[][] | null = null;
+  let spkRefB64: string | undefined;
+  let spkRefName: string | undefined;
+  if (recA.ok && recB.ok) {
+    try {
+      const [wavA, wavB] = await Promise.all([fileToWavB64(recA.file), fileToWavB64(recB.file)]);
+      spkRefB64 = wavA.b64;
+      spkRefName = wavA.name;
+      const [rA, rB] = await Promise.all([
+        postM27Reconstruct(
+          {
+            wav_base64: wavA.b64,
+            filename: wavA.name,
+            text: '',
+            lang: 'zh',
+            alignment_mode: 'none',
+            synth_mode: 'neural',
+            audio_gain: 'original',
+            device: 'cpu',
+            fps: 25,
+          },
+          signal,
+        ),
+        postM27Reconstruct(
+          {
+            wav_base64: wavB.b64,
+            filename: wavB.name,
+            text: '',
+            lang: 'en',
+            alignment_mode: 'none',
+            synth_mode: 'neural',
+            audio_gain: 'original',
+            device: 'cpu',
+            fps: 25,
+          },
+          signal,
+        ),
+      ]);
+      if (rA.status < 400 && rA.data.ok !== false && Array.isArray(rA.data.m27_50hz_pa) && rA.data.m27_50hz_pa.length >= 4) {
+        reconRowsA = rA.data.m27_50hz_pa;
+      }
+      if (rB.status < 400 && rB.data.ok !== false && Array.isArray(rB.data.m27_50hz_pa) && rB.data.m27_50hz_pa.length >= 4) {
+        reconRowsB = rB.data.m27_50hz_pa;
+      }
+    } catch {
+      // Fall back to prewarm trajectories if local neural reconstruction is unavailable
+    }
+  }
+
+  const m27RowToPose19 = (row: readonly number[]): number[] => [
+    ...row.slice(0, 14),
+    0,
+    0,
+    row[14] ?? 0,
+    row[15] ?? 0,
+    row[16] ?? 0,
+  ];
+
+  const durA = reconRowsA ? reconRowsA.length / 50 : Number(suan.duration_s || 0.85);
+  const durB = reconRowsB ? reconRowsB.length / 50 : Number(swan.duration_s || 0.85);
   const buildEndpointWorkspace = (
     id: string,
     durSec: number,
     frames: readonly PrewarmFrame[],
     nucIpa: string,
     recRes: Awaited<ReturnType<typeof fetchOnboardingAudioFile>>,
+    m27Override: number[][] | null,
   ): WorkspaceAudio => {
     const endSmp = msToSamples(durSec * 1000);
     const bounds = [0, 0.2, 0.4, 0.65, 1].map((u) => Math.round(u * endSmp));
+    const samplePoseAtU = (u: number): number[] => {
+      if (m27Override && m27Override.length) {
+        const idx = Math.max(0, Math.min(m27Override.length - 1, Math.round(u * (m27Override.length - 1))));
+        return m27RowToPose19(m27Override[idx]);
+      }
+      return samplePrewarmAtTime(frames, durSec * u).params19;
+    };
     const segSpecs = [
-      { ipa: 's', role: 'onset' as const, voiced: false, pose: samplePrewarmAtTime(frames, durSec * 0.12).params19 },
-      { ipa: 'w', role: 'onset' as const, voiced: true, pose: samplePrewarmAtTime(frames, durSec * 0.30).params19 },
-      { ipa: nucIpa, role: 'nucleus' as const, voiced: true, pose: samplePrewarmAtTime(frames, durSec * 0.54).params19 },
-      { ipa: 'n', role: 'coda' as const, voiced: true, pose: samplePrewarmAtTime(frames, durSec * 0.82).params19 },
+      { ipa: 's', role: 'onset' as const, voiced: false, pose: samplePoseAtU(0.12) },
+      { ipa: 'w', role: 'onset' as const, voiced: true, pose: samplePoseAtU(0.3) },
+      { ipa: nucIpa, role: 'nucleus' as const, voiced: true, pose: samplePoseAtU(0.54) },
+      { ipa: 'n', role: 'coda' as const, voiced: true, pose: samplePoseAtU(0.82) },
     ];
     const sylId = `${id}_syl`;
-    const m27Count = Math.max(2, Math.round(durSec * 50));
-    const m27RowsPa = Array.from({ length: m27Count }, (_, i) => {
-      const s = samplePrewarmAtTime(frames, ((i + 0.5) / 50));
-      return [
-        ...s.params19.slice(0, 14),
-        s.params19[16] ?? 0,
-        s.params19[17] ?? 0,
-        s.params19[18] ?? 0,
-        s.f0,
-        s.pr,
-        ...s.glottis,
-      ];
-    });
-    const normFrames = frames.map((f) => ({
-      u: Math.max(0, Math.min(1, f.t_s / Math.max(1e-4, durSec))),
-      params: [...f.params],
-    }));
+    const m27RowsPa =
+      m27Override && m27Override.length
+        ? m27Override.map((r) => [...r])
+        : Array.from({ length: Math.max(2, Math.round(durSec * 50)) }, (_, i) => {
+            const s = samplePrewarmAtTime(frames, (i + 0.5) / 50);
+            return [
+              ...s.params19.slice(0, 14),
+              s.params19[16] ?? 0,
+              s.params19[17] ?? 0,
+              s.params19[18] ?? 0,
+              s.f0,
+              s.pr,
+              ...s.glottis,
+            ];
+          });
+    const normFrames =
+      m27Override && m27Override.length
+        ? m27Override.map((row, i) => ({
+            u: m27Override.length > 1 ? i / (m27Override.length - 1) : 0,
+            params: m27RowToPose19(row),
+          }))
+        : frames.map((f) => ({
+            u: Math.max(0, Math.min(1, f.t_s / Math.max(1e-4, durSec))),
+            params: [...f.params],
+          }));
     const clip: Clip = {
       id: `${id}_clip`,
       kind: 'phrase',
@@ -1327,8 +1417,8 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
     };
   };
 
-  const sourceA = buildEndpointWorkspace('suan', durA, suan.geometry_frames, 'a', recA);
-  const sourceB = buildEndpointWorkspace('swan', durB, swan.geometry_frames, 'ɒ', recB);
+  const sourceA = buildEndpointWorkspace('suan', durA, suan.geometry_frames, 'a', recA, reconRowsA);
+  const sourceB = buildEndpointWorkspace('swan', durB, swan.geometry_frames, 'ɒ', recB, reconRowsB);
   const alignment = alignEndpointTimings(sourceA, sourceB, true);
   const trajA = sourceTrajectory(sourceA, durA);
   const trajB = sourceTrajectory(sourceB, durB);
@@ -1389,16 +1479,14 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
   }
 
   const totalSec = Math.max(durA, durB);
-  const STEP_HZ = 100; // Matches ContinuumView.vue STEP_HZ = 100
-  const n = Math.max(20, Math.round(totalSec * STEP_HZ));
+  const STEP_HZ = 100; // Matches ContinuumView.vue STEP_HZ = 100 (subsampled stride=2 -> 50 Hz for neural)
+  const n = Math.max(20, Math.round((totalSec * STEP_HZ) / 2) * 2);
   const endpointF0A = sourceControls(sourceA, durA, 0.54)?.[17] ?? 135;
   const endpointF0B = sourceControls(sourceB, durB, 0.54)?.[17] ?? 135;
   const nucFrameIdx = Math.min(n - 1, Math.round(0.54 * n));
 
   const steps: ContinuumStepItem[] = [];
-  const audios: Record<string, ArrayBuffer> = {};
-  if (recA.ok) audios.endpointA = await recA.file.arrayBuffer();
-  if (recB.ok) audios.endpointB = await recB.file.arrayBuffer();
+  let usedNeural = false;
 
   for (let s = 0; s < specRes.value.cells.length; s++) {
     const cell = specRes.value.cells[s];
@@ -1442,9 +1530,54 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
       glottis.push(interpolateVec(ctrlA ? ctrlA.slice(19, 27) : sampleA.glottis, ctrlB ? ctrlB.slice(19, 27) : sampleB.glottis, u));
     }
 
-    const [snap, synth] = await Promise.all([
+    const rowsData50Hz = tract.flatMap((pose, i) =>
+      i % 2 ? [] : [[...pose.slice(0, 14), ...pose.slice(16), f0[i], pr[i], ...glottis[i]]],
+    );
+
+    const [snap, neuralRes] = await Promise.all([
       poseViaEngine(tract[nucFrameIdx], {}, signal),
-      synthesizeViaEngine(
+      defaultM27Adapter
+        .resynthesize({
+          m27_50hz_pa: rowsData50Hz,
+          synth_mode: 'neural',
+          audio_gain: 'original',
+          speaker_ref_wav_base64: spkRefB64,
+          speaker_ref_filename: spkRefName,
+          signal,
+        })
+        .catch(() => null),
+    ]);
+
+    const resHz = snap.resonances ?? [];
+    let frames: TractAnimFrame[] = [];
+    let wavBuf: ArrayBuffer | null = null;
+    let stepDurSec = totalSec;
+
+    if (neuralRes && neuralRes.ok && neuralRes.value.neural_16k_wav_base64) {
+      usedNeural = true;
+      wavBuf = base64ToArrayBuffer(neuralRes.value.neural_16k_wav_base64);
+      stepDurSec = rowsData50Hz.length / 50;
+      const anim = neuralRes.value.tract_glottis_anim;
+      if (anim?.frames?.length && Array.isArray(anim.parts) && Array.isArray(anim.part_sizes)) {
+        const sampleCount = Math.min(18, anim.frames.length);
+        for (let k = 0; k < sampleCount; k++) {
+          const ai = Math.round((k / Math.max(1, sampleCount - 1)) * (anim.frames.length - 1));
+          const af = anim.frames[ai];
+          const contours = splitM27TractParts(af.pts, anim.parts, anim.part_sizes);
+          if (!Object.keys(contours).length) continue;
+          const fi = Math.max(0, Math.min(rowsData50Hz.length - 1, Math.round(af.t * 50 - 0.5)));
+          frames.push({
+            t: Number(af.t.toFixed(2)),
+            contours,
+            f0: Math.round(af.f0 ?? rowsData50Hz[fi][17] ?? 0),
+            prPa: Math.round(af.pr_pa ?? rowsData50Hz[fi][18] ?? 0),
+          });
+        }
+      }
+    }
+
+    if (!wavBuf || !frames.length) {
+      const synth = await synthesizeViaEngine(
         {
           step_hz: STEP_HZ,
           f0_hz: f0,
@@ -1456,12 +1589,18 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
           include_geometry: true,
         },
         signal,
-      ),
-    ]);
-    const resHz = snap.resonances ?? [];
-    const frames = mapGeometryFrames(synth.geometry_frames, f0[nucFrameIdx], 800);
-    if (!frames.length) {
-      throw new Error(`VTL 引擎未能返回连续统第 S${s} 格的真实声道几何帧`);
+      );
+      if (!frames.length) {
+        frames = mapGeometryFrames(synth.geometry_frames, f0[nucFrameIdx], 800);
+      }
+      if (!wavBuf && synth.wav_base64) {
+        wavBuf = base64ToArrayBuffer(synth.wav_base64);
+        stepDurSec = synth.duration_s ?? totalSec;
+      }
+    }
+
+    if (!frames.length || !wavBuf) {
+      throw new Error(`引擎未能返回连续统第 S${s} 格的真实声道几何帧或音频`);
     }
     steps.push({
       index: s,
@@ -1471,10 +1610,10 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
       f2Hz: Math.round(resHz[1] ?? 0),
       f3Hz: Math.round(resHz[2] ?? 0),
       aminCm2: Number((snap.oral_min_area ?? 0).toFixed(3)),
-      durationSec: Number((synth.duration_s ?? totalSec).toFixed(2)),
+      durationSec: Number(stepDurSec.toFixed(2)),
       frames,
     });
-    audios[`s${s}`] = base64ToArrayBuffer(synth.wav_base64!);
+    audios[`s${s}`] = wavBuf;
   }
 
   return {
@@ -1487,7 +1626,9 @@ async function runContinuumSuanSwanDemo(signal?: AbortSignal): Promise<{
       steps,
     },
     audios,
-    engineLabel: 'alignEndpointTimings + timeWarp + sourceTrajectory + resolveContinuumFramePitch + VTL 2.4',
+    engineLabel: usedNeural
+      ? 'Vox2Tract-Lite + alignEndpointTimings + timeWarp + Tract2Vox-Lite (神经重合成)'
+      : 'alignEndpointTimings + timeWarp + sourceTrajectory + resolveContinuumFramePitch + VTL 2.4',
   };
 }
 

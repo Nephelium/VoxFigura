@@ -136,7 +136,7 @@ export const additionalReferences: MethodReference[] = [
     authors: 'John S. Garofolo；Lori F. Lamel；William M. Fisher 等', license: 'LDC 用户协议；非开放许可，具体权利以取得的授权为准',
     urls: { catalog: 'https://catalog.ldc.upenn.edu/LDC93S1', doi: 'https://doi.org/10.35111/17gk-bn40' },
     citation: 'GAROFOLO J S, LAMEL L F, FISHER W M, et al. TIMIT Acoustic-Phonetic Continuous Speech Corpus: LDC93S1[DS/OL]. Philadelphia: Linguistic Data Consortium, 1993. DOI: 10.35111/17gk-bn40.',
-    reference_note: '训练报告列为训练及边界评测语料；引擎目录包含 TIMITDIC.TXT，英语词典与对齐代码会尝试读取。取得授权、适用范围和具体分发范围需另行核对。',
+    reference_note: '训练报告列为研究训练及边界评测语料；开源仓库与发行包均不分发 TIMIT 语料或 TIMITDIC.TXT，运行时英语词典及对齐统一改用 CMUdict（BSD-2-Clause）。',
   },
   {
     id: 'DATA-ESD', title: 'Emotional Speech Dataset (ESD)', modules: ['核心引擎与模型', '发声调音台'], importance: 33, acknowledgement_group: 'academic',

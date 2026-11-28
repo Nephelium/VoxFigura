@@ -235,11 +235,11 @@ describe('Modular Guide & Technical Report Integrity', () => {
 
     const validCategories = new Set([
       '本地物理合成',
-      '公开朗读/方言',
-      '授权朗读语料',
-      '公开情感/表现',
-      '公开干声歌唱',
-      '真人传感盲测',
+      '开源朗读语料',
+      '受限授权语料',
+      '研究情感/表现语料',
+      '研究歌唱/特殊发声',
+      '独立盲测/自录评测',
       '派生任务缓存',
     ]);
     for (const row of FULL_CORPUS_INVENTORY) {
@@ -257,7 +257,7 @@ describe('Modular Guide & Technical Report Integrity', () => {
   });
 
   it('computes real production-pipeline manual charts and dialect sandhi cases without synthetic shortcuts', () => {
-    expect(DEMO_CACHE_SCHEMA_VERSION).toBe('v3');
+    expect(DEMO_CACHE_SCHEMA_VERSION).toBe('v4');
 
     // 1. Real [pʰa˥˥] compilation via buildAnnotationSynthesis (~236 ms @ 200 Hz >= 45 frames)
     const phys = computeMainSynthesisPhysicsData();

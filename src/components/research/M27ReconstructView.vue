@@ -706,25 +706,25 @@ function buildParamLanes(
     {
       id: 'f0',
       group: 'glottis',
-      name: 'F0',
+      name: '基频',
       unitLabel: 'Hz',
       topTick: `${maxF0}`,
       botTick: `${minF0}`,
       hint: `基频真实刻度 (${minF0}..${maxF0} Hz)`,
       series: [
-        { label: 'F0', col: 17, colorToken: 'warning', min: minF0, max: maxF0, dec: 0, unit: 'Hz', fallback: 120 },
+        { label: '基频', col: 17, colorToken: 'warning', min: minF0, max: maxF0, dec: 0, unit: 'Hz', fallback: 120 },
       ],
     },
     {
       id: 'pr',
       group: 'glottis',
-      name: 'PR',
+      name: '肺压',
       unitLabel: 'Pa',
       topTick: `${maxPR}`,
       botTick: '0',
       hint: `声门下肺压真实刻度 (0..${maxPR} Pa)`,
       series: [
-        { label: 'PR', col: 18, colorToken: 'violet', min: 0, max: maxPR, dec: 0, unit: 'Pa', fillToken: 'violet-bg', fallback: 0 },
+        { label: '肺压', col: 18, colorToken: 'violet', min: 0, max: maxPR, dec: 0, unit: 'Pa', fillToken: 'violet-bg', fallback: 0 },
       ],
     },
     {
@@ -1586,7 +1586,7 @@ function confirmRecordPrep(result: AudioRecordPrepResult) {
   alignmentText.value = result.text;
   if (result.grid) {
     sourceTextGrid.value = result.grid;
-    sourceTextGridName.value = '';
+    sourceTextGridName.value = '模型对齐 · 录音编辑';
     alignmentMessage.value = '已应用录音编辑弹窗中的 Vox2Align-Lite v2 音素边界对齐';
   } else if (result.text) {
     alignmentMessage.value = '已填入参考文本，点击「按原文对齐」或「开始声道重建」生效';
@@ -1601,14 +1601,17 @@ function wavBlob(data?: string) {
   return new Blob([bytes], { type: 'audio/wav' });
 }
 
-function acceptAlignmentGrid(alignment: {
-  textgrid: string;
-  mode?: string;
-  model?: string;
-  syllables?: Array<{ label?: string; word?: string; is_sil?: boolean }>;
-  phones?: Array<{ ipa?: string; is_sil?: boolean }>;
-}) {
-  if (fixedTextGrid.value) return;
+function acceptAlignmentGrid(
+  alignment: {
+    textgrid: string;
+    mode?: string;
+    model?: string;
+    syllables?: Array<{ label?: string; word?: string; is_sil?: boolean }>;
+    phones?: Array<{ ipa?: string; is_sil?: boolean }>;
+  },
+  forceReplace = false,
+) {
+  if (fixedTextGrid.value && !forceReplace) return;
   const parsed = parseTextGrid(alignment.textgrid);
   if (
     !parsed.ok ||
@@ -1728,7 +1731,7 @@ async function alignTranscript() {
   await waitForSourceNormalization();
   const file = sourceFile.value;
   const text = alignmentText.value.trim();
-  if (!file || !text || aligning.value || transcribing.value || working.value || cutting.value || fixedTextGrid.value) return;
+  if (!file || !text || aligning.value || transcribing.value || working.value || cutting.value) return;
   const generation = ++alignmentRun;
   const lang = alignmentLang.value;
   aligning.value = true;
@@ -1746,7 +1749,7 @@ async function alignTranscript() {
     });
     if (generation !== alignmentRun || sourceFile.value !== file) return;
     if (!result.ok) throw new Error(result.error.hint);
-    acceptAlignmentGrid(result.value.alignment);
+    acceptAlignmentGrid(result.value.alignment, true);
     rememberSource();
   } catch (error) {
     if (generation === alignmentRun) alignmentMessage.value = safeReason(error);
@@ -3504,17 +3507,18 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 class="btn xs"
-                :disabled="transcriptionBlocked || !alignmentText.trim() || fixedTextGrid"
+                :disabled="transcriptionBlocked || !alignmentText.trim()"
+                :title="sourceTextGrid ? '按当前参考文本重新对齐并覆盖现有边界' : '按参考文本执行音素边界对齐'"
                 @click="alignTranscript"
               >
-                {{ aligning ? '对齐中…' : '按原文对齐' }}
+                {{ aligning ? '对齐中…' : sourceTextGrid ? '重新对齐' : '按原文对齐' }}
               </button>
             </div>
             <small role="status">
               {{
                 alignmentMessage ||
                 (fixedTextGrid
-                  ? '已采用导入的 TextGrid 边界。'
+                  ? '已采用当前 TextGrid 边界；如需重排，可点击「重新对齐」。'
                   : '提供准确原文可提升 Vox2Align-Lite v2 边界精度；留空亦可直接重建。')
               }}
             </small>

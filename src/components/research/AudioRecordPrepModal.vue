@@ -21,8 +21,18 @@ import {
   extractIntervalTiers,
   sliceAudioBlobKeepRange,
 } from './mixer-prep-utils';
+import { useWorkbenchStore } from '@/stores/workbench';
 import { blobToBase64, encodeMonoWavBase64 } from './research-utils';
 import { cleanTextGridWordLabels } from './m27-session';
+import { MixerSpectrogramCache } from './mixer-spectrogram';
+import {
+  WAVE_MAX_ZOOM,
+  WAVE_MIN_ZOOM,
+  clampWaveViewport,
+  computePcmPeakAbs,
+  drawPaperWaveform,
+  zoomViewportAround,
+} from './paper-waveform';
 import ReconstructionMicControl from './ReconstructionMicControl.vue';
 import { useReconstructionMicMonitor } from './reconstruction-mic-monitor';
 
@@ -83,7 +93,9 @@ const emit = defineEmits<{
   confirm: [result: AudioRecordPrepResult];
 }>();
 
+const store = useWorkbenchStore();
 const adapter = new M27Adapter();
+const specCache = new MixerSpectrogramCache();
 const langOptions = [
   { value: 'auto', label: '自动识别' },
   { value: 'zh', label: '普通话' },
@@ -97,11 +109,25 @@ const audioChanged = ref(false);
 const durationSec = ref(0);
 const sampleRateHz = ref(0);
 const peaks = shallowRef<number[]>([]);
+const pcmPeakAbs = ref(1);
+const bgMode = ref<'waveform' | 'spectrogram'>('waveform');
+const viewZoom = ref(1);
+const viewStartSec = ref(0);
+const specBitmap = shallowRef<HTMLCanvasElement | null>(null);
+const specRangeBitmap = shallowRef<{ start: number; span: number; canvas: HTMLCanvasElement } | null>(null);
+let specSeq = 0;
+let specRangeTimer = 0;
 const labelText = ref('');
 const transcriptText = ref('');
 const alignLang = ref<'auto' | 'zh' | 'en'>('auto');
 const currentGrid = shallowRef<TextGridDocument | null>(null);
 const undoStack = shallowRef<EditSnapshot[]>([]);
+
+const viewport = computed(() =>
+  clampWaveViewport(durationSec.value || 0.001, viewZoom.value, viewStartSec.value),
+);
+
+const maxViewStartSec = computed(() => Math.max(0, (durationSec.value || 0) - viewport.value.spanSec));
 
 const selStart = ref<number | null>(null);
 const selEnd = ref<number | null>(null);
@@ -204,6 +230,7 @@ async function decodeAndMeasure(file: File): Promise<void> {
   sampleRateHz.value = buf.sampleRate;
 
   const ch0 = buf.getChannelData(0);
+  pcmPeakAbs.value = computePcmPeakAbs(ch0);
   const bins = 240;
   const step = Math.max(1, Math.floor(ch0.length / bins));
   const nextPeaks: number[] = [];
@@ -220,8 +247,108 @@ async function decodeAndMeasure(file: File): Promise<void> {
     nextPeaks.push(peak);
   }
   peaks.value = nextPeaks.map((v) => v / maxVal);
+  viewZoom.value = 1;
+  viewStartSec.value = 0;
+  specRangeBitmap.value = null;
   await nextTick();
+  void refreshSpectrogram();
   drawWave();
+}
+
+async function refreshSpectrogram(): Promise<void> {
+  const file = currentFile.value;
+  if (!props.open || bgMode.value !== 'spectrogram' || !file) {
+    specBitmap.value = null;
+    specRangeBitmap.value = null;
+    return;
+  }
+  const seq = ++specSeq;
+  try {
+    const isDark = store.resolvedColorMode.value === 'dark';
+    const bmp = await specCache.render(file, Math.max(560, waveCanvas.value?.clientWidth || 660), isDark);
+    if (seq === specSeq) {
+      specBitmap.value = bmp;
+      drawWave();
+      scheduleHdSpectrogram();
+    }
+  } catch {
+    if (seq === specSeq) specBitmap.value = null;
+  }
+}
+
+function scheduleHdSpectrogram(): void {
+  window.clearTimeout(specRangeTimer);
+  const file = currentFile.value;
+  const vp = viewport.value;
+  if (!props.open || bgMode.value !== 'spectrogram' || !file || vp.zoom < 2.2) {
+    specRangeBitmap.value = null;
+    return;
+  }
+  const seq = ++specSeq;
+  specRangeTimer = window.setTimeout(async () => {
+    try {
+      const isDark = store.resolvedColorMode.value === 'dark';
+      const bmp = await specCache.renderRange(
+        file,
+        vp.startSec,
+        vp.spanSec,
+        Math.max(560, waveCanvas.value?.clientWidth || 660),
+        isDark,
+      );
+      if (seq === specSeq && bmp) {
+        specRangeBitmap.value = { start: vp.startSec, span: vp.spanSec, canvas: bmp };
+        drawWave();
+      }
+    } catch {
+      // keep sliced fallback bitmap
+    }
+  }, 140);
+}
+
+function setZoomAt(factor: number, anchorSec?: number): void {
+  const dur = durationSec.value;
+  if (dur <= 0) return;
+  const vp = viewport.value;
+  const anchor = anchorSec ?? (vp.startSec + vp.spanSec * 0.5);
+  const next = zoomViewportAround(dur, vp.zoom, vp.startSec, factor, anchor, WAVE_MIN_ZOOM, WAVE_MAX_ZOOM);
+  viewZoom.value = next.zoom;
+  viewStartSec.value = next.startSec;
+  specRangeBitmap.value = null;
+  drawWave();
+  scheduleHdSpectrogram();
+}
+
+function resetZoom(): void {
+  viewZoom.value = 1;
+  viewStartSec.value = 0;
+  specRangeBitmap.value = null;
+  drawWave();
+}
+
+function onPanSliderInput(ev: Event): void {
+  const val = Number((ev.target as HTMLInputElement).value);
+  if (!Number.isFinite(val)) return;
+  viewStartSec.value = Math.max(0, Math.min(maxViewStartSec.value, val));
+  specRangeBitmap.value = null;
+  drawWave();
+  scheduleHdSpectrogram();
+}
+
+function onWaveWheel(e: WheelEvent): void {
+  if (durationSec.value <= 0) return;
+  const vp = viewport.value;
+  const panDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+  if (panDelta !== 0) {
+    if (vp.zoom <= 1) return;
+    const step = (panDelta / 300) * vp.spanSec;
+    viewStartSec.value = Math.max(0, Math.min(maxViewStartSec.value, vp.startSec + step));
+    specRangeBitmap.value = null;
+    drawWave();
+    scheduleHdSpectrogram();
+    return;
+  }
+  const factor = e.deltaY < 0 ? 1.28 : 1 / 1.28;
+  setZoomAt(factor, pointerSec(e));
 }
 
 function pushUndo(): void {
@@ -264,7 +391,7 @@ function drawWave(): void {
   if (!canvas) return;
   const rect = canvas.getBoundingClientRect();
   const cssW = Math.max(240, Math.round(rect.width || 620));
-  const cssH = Math.max(88, Math.round(rect.height || 112));
+  const cssH = Math.max(96, Math.round(rect.height || 124));
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
     canvas.width = Math.round(cssW * dpr);
@@ -279,74 +406,105 @@ function drawWave(): void {
   const accent = readToken('--accent', 'Highlight');
   const danger = readToken('--danger', 'Mark');
   const muted = readToken('--muted', 'GrayText');
+  const textCol = readToken('--text', 'CanvasText');
 
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, cssW, cssH);
 
-  // Center baseline
-  const midY = cssH / 2;
-  ctx.strokeStyle = border;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, midY);
-  ctx.lineTo(cssW, midY);
-  ctx.stroke();
-
-  // Selection highlight
   const dur = Math.max(0.001, durationSec.value);
-  if (hasSelection.value && selStart.value !== null && selEnd.value !== null) {
-    const x0 = (selStart.value / dur) * cssW;
-    const x1 = (selEnd.value / dur) * cssW;
-    ctx.save();
-    ctx.globalAlpha = 0.2;
-    ctx.fillStyle = accent;
-    ctx.fillRect(x0, 0, Math.max(1, x1 - x0), cssH);
-    ctx.restore();
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(x0, 0);
-    ctx.lineTo(x0, cssH);
-    ctx.moveTo(x1, 0);
-    ctx.lineTo(x1, cssH);
-    ctx.stroke();
-  }
+  const vp = viewport.value;
+  const vStart = vp.startSec;
+  const vEnd = vp.endSec;
+  const vSpan = Math.max(0.001, vp.spanSec);
+  const timeToX = (t: number) => ((t - vStart) / vSpan) * cssW;
 
-  // Waveform bars
-  const data = peaks.value;
-  if (data.length) {
-    const barW = cssW / data.length;
-    ctx.fillStyle = accent;
-    for (let i = 0; i < data.length; i++) {
-      const h = Math.max(2, data[i] * (cssH * 0.82));
-      ctx.fillRect(i * barW, midY - h / 2, Math.max(1, barW - 0.8), h);
+  // Spectrogram or publication-grade continuous oscillogram waveform
+  const buf = decodedBuf.value;
+  if (bgMode.value === 'spectrogram') {
+    const hd = specRangeBitmap.value;
+    if (hd && Math.abs(hd.start - vStart) < 0.002 && Math.abs(hd.span - vSpan) < 0.002) {
+      ctx.drawImage(hd.canvas, 0, 0, cssW, cssH);
+    } else if (specBitmap.value) {
+      const bmp = specBitmap.value;
+      const sx = (vStart / dur) * bmp.width;
+      const sw = Math.max(1, (vSpan / dur) * bmp.width);
+      ctx.drawImage(bmp, sx, 0, sw, bmp.height, 0, 0, cssW, cssH);
+    } else {
+      ctx.fillStyle = muted;
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('正在生成语谱图…', cssW / 2, cssH / 2);
     }
+  } else if (buf && buf.length > 0) {
+    drawPaperWaveform(ctx, buf.getChannelData(0), buf.sampleRate, {
+      x0: 0,
+      y0: 0,
+      width: cssW,
+      height: cssH,
+      viewStartSec: vStart,
+      viewEndSec: vEnd,
+      peakAbs: pcmPeakAbs.value,
+      strokeColor: textCol,
+      axisColor: border,
+      gridColor: border,
+    });
   } else {
     ctx.fillStyle = muted;
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('正在解析波形…', cssW / 2, midY);
+    ctx.fillText('正在解析波形…', cssW / 2, cssH / 2);
+  }
+
+  // Selection highlight
+  if (hasSelection.value && selStart.value !== null && selEnd.value !== null) {
+    const x0 = timeToX(selStart.value);
+    const x1 = timeToX(selEnd.value);
+    if (x1 >= 0 && x0 <= cssW) {
+      const cx0 = Math.max(0, x0);
+      const cx1 = Math.min(cssW, x1);
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = accent;
+      ctx.fillRect(cx0, 0, Math.max(1, cx1 - cx0), cssH);
+      ctx.restore();
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (x0 >= 0 && x0 <= cssW) {
+        ctx.moveTo(x0, 0);
+        ctx.lineTo(x0, cssH);
+      }
+      if (x1 >= 0 && x1 <= cssW) {
+        ctx.moveTo(x1, 0);
+        ctx.lineTo(x1, cssH);
+      }
+      ctx.stroke();
+    }
   }
 
   // Playhead
   if (playheadSec.value !== null && durationSec.value > 0) {
-    const px = Math.max(0, Math.min(cssW, (playheadSec.value / dur) * cssW));
-    ctx.strokeStyle = danger;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(px, 0);
-    ctx.lineTo(px, cssH);
-    ctx.stroke();
+    const px = timeToX(playheadSec.value);
+    if (px >= 0 && px <= cssW) {
+      ctx.strokeStyle = danger;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, cssH);
+      ctx.stroke();
+    }
   }
 }
 
-function pointerSec(e: PointerEvent): number {
+function pointerSec(e: PointerEvent | WheelEvent): number {
   const canvas = waveCanvas.value;
   if (!canvas || durationSec.value <= 0) return 0;
   const rect = canvas.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
-  return ratio * durationSec.value;
+  const vp = viewport.value;
+  return Math.max(0, Math.min(durationSec.value, vp.startSec + ratio * vp.spanSec));
 }
 
 function onWavePointerDown(e: PointerEvent): void {
@@ -354,7 +512,7 @@ function onWavePointerDown(e: PointerEvent): void {
   const canvas = waveCanvas.value;
   if (!canvas) return;
   const sec = pointerSec(e);
-  const tolSec = (8 / Math.max(1, canvas.getBoundingClientRect().width)) * durationSec.value;
+  const tolSec = (8 / Math.max(1, canvas.getBoundingClientRect().width)) * viewport.value.spanSec;
   if (hasSelection.value && selStart.value !== null && selEnd.value !== null) {
     if (Math.abs(sec - selStart.value) <= tolSec) {
       dragMode = 'left';
@@ -807,8 +965,16 @@ watch(
   { immediate: true },
 );
 
+watch([bgMode, () => store.resolvedColorMode.value], () => {
+  specRangeBitmap.value = null;
+  void refreshSpectrogram();
+  drawWave();
+});
+
 onBeforeUnmount(() => {
   if (typeof window !== 'undefined') window.removeEventListener('keydown', onModalKeydown, true);
+  window.clearTimeout(specRangeTimer);
+  specCache.destroy();
   alignAbort?.abort();
   stopPlayback();
   stopMicCapture();
@@ -837,8 +1003,46 @@ onBeforeUnmount(() => {
           当前片段较长（{{ durationSec.toFixed(2) }} s）；若用于单音节声道连续统，建议拖选目标音节点击「仅保留选区」（也可直接保留多音节短语）。
         </p>
 
-        <!-- Interactive Waveform + Selection + Aligned Phone Strip -->
+        <!-- Interactive Waveform / Spectrogram + X-Axis Zoom + Selection + Aligned Phone Strip -->
         <div class="arp-wave-box sci-plane">
+          <div class="arp-wave-head">
+            <div class="seg control-seg xs" role="group" aria-label="波形与语谱图切换">
+              <button type="button" :class="{ active: bgMode === 'waveform' }" @click="bgMode = 'waveform'">波形图</button>
+              <button type="button" :class="{ active: bgMode === 'spectrogram' }" @click="bgMode = 'spectrogram'">语谱图</button>
+            </div>
+            <div class="arp-zoom-controls" role="group" aria-label="时间轴缩放">
+              <span class="mono muted arp-zoom-range">{{ viewport.startSec.toFixed(2) }}–{{ viewport.endSec.toFixed(2) }} s</span>
+              <button
+                type="button"
+                class="btn xs icon-only"
+                title="缩小 X 轴"
+                aria-label="缩小 X 轴"
+                :disabled="viewport.zoom <= WAVE_MIN_ZOOM || durationSec <= 0"
+                @click="setZoomAt(1 / 1.4)"
+              >
+                <IconSvg name="minus" :size="11" />
+              </button>
+              <button
+                type="button"
+                class="btn xs arp-zoom-readout mono"
+                title="点击复位为 1× 全局视图"
+                :disabled="viewport.zoom <= WAVE_MIN_ZOOM"
+                @click="resetZoom"
+              >
+                {{ viewport.zoom < 1.05 ? '1×' : `${viewport.zoom.toFixed(1)}×` }}
+              </button>
+              <button
+                type="button"
+                class="btn xs icon-only"
+                title="放大 X 轴"
+                aria-label="放大 X 轴"
+                :disabled="viewport.zoom >= WAVE_MAX_ZOOM || durationSec <= 0"
+                @click="setZoomAt(1.4)"
+              >
+                <IconSvg name="plus" :size="11" />
+              </button>
+            </div>
+          </div>
           <canvas
             ref="waveCanvas"
             class="arp-wave-canvas"
@@ -846,29 +1050,43 @@ onBeforeUnmount(() => {
             @pointermove="onWavePointerMove"
             @pointerup="onWavePointerUp"
             @pointercancel="onWavePointerUp"
+            @wheel.prevent="onWaveWheel"
             @dblclick="clearSelection"
           />
+          <div v-if="viewport.zoom > 1.01 && maxViewStartSec > 0" class="arp-pan-row">
+            <input
+              type="range"
+              class="arp-pan-slider"
+              aria-label="水平平移时间窗口"
+              :min="0"
+              :max="maxViewStartSec"
+              :step="Math.max(0.001, maxViewStartSec / 400)"
+              :value="viewport.startSec"
+              @input="onPanSliderInput"
+            />
+          </div>
           <div v-if="phoneIntervals.length && durationSec > 0" class="arp-tier-strip" aria-label="对齐音素预览">
-            <div
-              v-for="(iv, idx) in phoneIntervals"
-              :key="idx"
-              class="arp-tier-cell mono"
-              :style="{
-                left: `${(iv.xmin / durationSec) * 100}%`,
-                width: `${((iv.xmax - iv.xmin) / durationSec) * 100}%`,
-              }"
-              :title="`${iv.text || 'sil'} (${iv.xmin.toFixed(2)}–${iv.xmax.toFixed(2)} s)`"
-            >
-              <span class="ipa notranslate" translate="no">{{ iv.text || '·' }}</span>
-            </div>
+            <template v-for="(iv, idx) in phoneIntervals" :key="idx">
+              <div
+                v-if="iv.xmax > viewport.startSec && iv.xmin < viewport.endSec"
+                class="arp-tier-cell mono"
+                :style="{
+                  left: `${((iv.xmin - viewport.startSec) / Math.max(0.001, viewport.spanSec)) * 100}%`,
+                  width: `${((iv.xmax - iv.xmin) / Math.max(0.001, viewport.spanSec)) * 100}%`,
+                }"
+                :title="`${iv.text || 'sil'} (${iv.xmin.toFixed(2)}–${iv.xmax.toFixed(2)} s)`"
+              >
+                <span class="ipa notranslate" translate="no">{{ iv.text || '·' }}</span>
+              </div>
+            </template>
           </div>
           <div class="arp-wave-foot mono muted">
-            <span>0.00 s</span>
+            <span>{{ viewport.startSec.toFixed(2) }} s</span>
             <span v-if="hasSelection && selStart !== null && selEnd !== null" class="arp-sel-tag">
               已选 {{ selStart.toFixed(2) }}–{{ selEnd.toFixed(2) }} s（{{ Math.round((selEnd - selStart) * 1000) }} ms）
             </span>
-            <span v-else>在波形上左右拖拽框选裁剪区间 · 双击取消选区</span>
-            <span>{{ durationSec.toFixed(2) }} s</span>
+            <span v-else>拖拽框选 · 滚轮缩放 X 轴 · Shift+滚轮平移 · 双击取消选区</span>
+            <span>{{ viewport.endSec.toFixed(2) }} s</span>
           </div>
         </div>
 
@@ -1040,12 +1258,54 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.arp-wave-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 86%, var(--app));
+  flex-wrap: wrap;
+}
+
+.arp-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.arp-zoom-range {
+  font-size: 0.791667rem;
+  margin-right: 4px;
+}
+
+.arp-zoom-readout {
+  min-width: 44px;
+  justify-content: center;
+}
+
 .arp-wave-canvas {
   width: 100%;
-  height: 112px;
+  height: 124px;
   display: block;
   cursor: crosshair;
   touch-action: none;
+}
+
+.arp-pan-row {
+  display: flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--app) 64%, var(--panel));
+}
+
+.arp-pan-slider {
+  width: 100%;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .arp-tier-strip {

@@ -584,7 +584,7 @@ const tabs: ReadonlyArray<{ id: SettingViewTabId; artKey?: string; icon?: string
   { id: 'appearance', artKey: 'appearance', name: '外观与排版' },
   { id: 'layout', artKey: 'layout', name: '布局与分栏' },
   { id: 'engine', artKey: 'engine', name: '声学引擎与模型' },
-  ...(isPortableRuntime ? [{ id: 'storage' as const, icon: 'hard-drive', name: '存储与缓存' }] : []),
+  ...(isPortableRuntime ? [{ id: 'storage' as const, artKey: 'storage', name: '存储与缓存' }] : []),
   { id: 'shortcuts', artKey: 'shortcuts', name: '快捷键' },
   { id: 'credits', artKey: 'credits', name: '引用与致谢' },
 ];

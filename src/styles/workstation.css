@@ -94,11 +94,11 @@
 :root[data-style=clay] .header-tools > button, :root[data-style=clay] .hdr-menu-anchor > button { border-radius:12px; box-shadow:inset 0 -3px 3px color-mix(in srgb,var(--accent) 22%,transparent),inset 1px 2px 2px color-mix(in srgb,var(--neu-hi) 32%,transparent); }
 :root[data-style=glass] .header-tools > button, :root[data-style=glass] .hdr-menu-anchor > button { border-radius:8px; background-image:linear-gradient(150deg,color-mix(in srgb,var(--neu-hi) 15%,transparent),transparent 70%); border:1px solid var(--themed-button-border); }
 :root[data-style=minimal] .header-tools .vc-icon { stroke-width:1.3; }
-:root[data-style=material] .header-tools > button { border-radius:18px; color:var(--accent); }
-:root[data-style=swiss] .header-tools > button { border-radius:0; border-bottom:2px solid var(--border); }
-:root[data-style=bauhaus] .header-tools > button { border:1.5px solid color-mix(in srgb,var(--text) 48%,var(--border)); border-radius:var(--r-ctrl); }
-:root[data-style=brutal] .header-tools > button { border:1.5px solid color-mix(in srgb,var(--text) 72%,var(--border)); box-shadow:1.5px 2px 0 color-mix(in srgb,var(--text) 52%,transparent); }
-:root:is([data-style=brutal],[data-style=bauhaus],[data-style=clay]) .header-tools > button .vc-icon { stroke-width:2.4; }
-:root:is([data-style=swiss],[data-style=bauhaus]) .header-tools > button .vc-icon { stroke-linecap:square; stroke-linejoin:miter; }
-.header-tools > button:disabled { opacity:.38; }
-.header-tools > button:not(:disabled):hover { color:var(--accent); background:var(--header-selected-bg); }
+:root[data-style=material] :is(.header-tools, .hdr-menu-anchor) > button { border-radius:18px; color:var(--accent); }
+:root[data-style=swiss] :is(.header-tools, .hdr-menu-anchor) > button { border-radius:0; border-bottom:2px solid var(--border); }
+:root[data-style=bauhaus] :is(.header-tools, .hdr-menu-anchor) > button { border:1.5px solid color-mix(in srgb,var(--text) 48%,var(--border)); border-radius:var(--r-ctrl); }
+:root[data-style=brutal] :is(.header-tools, .hdr-menu-anchor) > button { border:1.5px solid color-mix(in srgb,var(--text) 72%,var(--border)); box-shadow:1.5px 2px 0 color-mix(in srgb,var(--text) 52%,transparent); }
+:root:is([data-style=brutal],[data-style=bauhaus],[data-style=clay]) :is(.header-tools, .hdr-menu-anchor) > button .vc-icon { stroke-width:2.4; }
+:root:is([data-style=swiss],[data-style=bauhaus]) :is(.header-tools, .hdr-menu-anchor) > button .vc-icon { stroke-linecap:square; stroke-linejoin:miter; }
+:is(.header-tools, .hdr-menu-anchor) > button:disabled { opacity:.38; }
+:is(.header-tools, .hdr-menu-anchor) > button:not(:disabled):hover { color:var(--accent); background:var(--header-selected-bg); }

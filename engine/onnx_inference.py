@@ -464,6 +464,7 @@ def _normalize_en_ipa_v2(ipa: str) -> str:
 
 
 def _get_en_lexicon() -> Dict[Tuple[str, ...], str]:
+    """Load BSD-2-Clause CMUdict word pronunciations mapped to US English IPA sequences."""
     global _EN_LEXICON_CACHE
     if _EN_LEXICON_CACHE is not None:
         return _EN_LEXICON_CACHE
@@ -471,18 +472,17 @@ def _get_en_lexicon() -> Dict[Tuple[str, ...], str]:
     from tt3.mandarin_unt_ipa import arpabet_to_en_ipa_and_stress
 
     tbl: Dict[Tuple[str, ...], str] = {}
-    cand = KF_PKG_ROOT / "assets" / "lexicon" / "TIMITDIC.TXT"
+    cand = ENGINE_DIR.parent / "public" / "vocal-tract" / "assets" / "cmudict.dict"
     if cand.is_file():
         for ln in cand.read_text(encoding="utf-8", errors="replace").splitlines():
-            ln = ln.strip()
-            if not ln or ln.startswith(";"):
+            fields = ln.partition("#")[0].split()
+            if len(fields) < 2 or fields[0].startswith(";"):
                 continue
-            m = re.match(r"^([a-z][a-z'\-]*)\s+/([^/]+)/", ln)
-            if not m:
+            w = re.sub(r"\([0-9]+\)$", "", fields[0].lower())
+            if not re.match(r"^[a-z][a-z'\-]*$", w):
                 continue
-            w = m.group(1)
             seq: List[str] = []
-            for tok in m.group(2).strip().split():
+            for tok in fields[1:]:
                 ipa, _ = arpabet_to_en_ipa_and_stress(tok)
                 if ipa != "sil":
                     seq.append(ipa)

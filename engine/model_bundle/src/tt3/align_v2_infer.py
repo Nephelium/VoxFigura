@@ -11,7 +11,7 @@ Supports:
        - Mandarin islands: decodes **413 strictly legal Mandarin syllables** directly from `zh_syl_ctc_logits`
          (ZERO illegal syllables like `fi`!), expands each legal syllable to canonical `UntPhesoca宽` IPA,
          then runs `viterbi_guided_align_v2` to segment internal phones precisely and reads tones from `tone_logits`!
-       - English islands: decodes phones with boundary-aware HMM + TIMITDIC/CMU lexicon word/syllable matcher!
+       - English islands: decodes phones with boundary-aware HMM + CMUdict lexicon word/syllable matcher!
   3. Simultaneous Vocal-Tract Inversion + Silence Jitter Suppression Mask (`apply_speech_mask_to_m27`)
      and 3-tier Praat `.TextGrid` export.
 """
@@ -72,7 +72,7 @@ from .mandarin_unt_ipa import (  # noqa: E402
 from .pitch import SwiftF0Extractor  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Compact English Lexicon (TIMITDIC) for Lexicon-Aware English Blind Labeling
+# Compact English Lexicon (CMUdict, BSD-2-Clause) for English Blind Labeling
 # ---------------------------------------------------------------------------
 _EN_PHONE_SEQ_TO_WORD: Optional[Dict[Tuple[str, ...], str]] = None
 
@@ -83,19 +83,18 @@ def _get_en_lexicon() -> Dict[Tuple[str, ...], str]:
         return _EN_PHONE_SEQ_TO_WORD
     tbl: Dict[Tuple[str, ...], str] = {}
     for cand in (
-        ROOT / "packages" / "kf_ipa_synth" / "assets" / "lexicon" / "TIMITDIC.TXT",
+        ROOT.parent.parent / "public" / "vocal-tract" / "assets" / "cmudict.dict",
     ):
         if cand.is_file():
             for ln in cand.read_text(encoding="utf-8", errors="replace").splitlines():
-                ln = ln.strip()
-                if not ln or ln.startswith(";"):
+                fields = ln.partition("#")[0].split()
+                if len(fields) < 2 or fields[0].startswith(";"):
                     continue
-                m = re.match(r"^([a-z][a-z'\-]*)\s+/([^/]+)/", ln)
-                if not m:
+                w = re.sub(r"\([0-9]+\)$", "", fields[0].lower())
+                if not re.match(r"^[a-z][a-z'\-]*$", w):
                     continue
-                w = m.group(1)
                 seq: List[str] = []
-                for tok in m.group(2).strip().split():
+                for tok in fields[1:]:
                     ipa, _ = arpabet_to_en_ipa_and_stress(tok)
                     if ipa != "sil":
                         seq.append(ipa)

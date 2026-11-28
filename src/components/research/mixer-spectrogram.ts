@@ -19,6 +19,34 @@ export class MixerSpectrogramCache {
     const modeKey = darkMode ? 'dark' : 'light';
     const existing = this.cache.get(blob)?.[modeKey];
     if (existing) return existing;
+    const resultCanvas = await this.renderInternal(blob, 0, null, width, darkMode);
+    if (resultCanvas && !this.destroyed) {
+      const entry = this.cache.get(blob) ?? {};
+      entry[modeKey] = resultCanvas;
+      this.cache.set(blob, entry);
+    }
+    return resultCanvas;
+  }
+
+  async renderRange(
+    blob: Blob,
+    startSec: number,
+    spanSec: number,
+    width = 760,
+    darkMode = true,
+  ): Promise<HTMLCanvasElement | null> {
+    if (this.destroyed) return null;
+    return this.renderInternal(blob, Math.max(0, startSec), Math.max(0.02, spanSec), width, darkMode);
+  }
+
+  private async renderInternal(
+    blob: Blob,
+    startSec: number,
+    spanSec: number | null,
+    width: number,
+    darkMode: boolean,
+  ): Promise<HTMLCanvasElement | null> {
+    if (this.destroyed) return null;
 
     const id = ++this.reqId;
     const bytes = await blob.arrayBuffer();
@@ -33,6 +61,8 @@ export class MixerSpectrogramCache {
 
     const targetW = Math.max(240, Math.min(1024, Math.round(width)));
     const duration = Math.max(0.04, decoded.duration);
+    const clampedStart = Math.max(0, Math.min(duration - 0.02, startSec));
+    const effectiveSpan = spanSec === null ? duration : Math.max(0.02, Math.min(duration - clampedStart, spanSec));
 
     let resultCanvas: HTMLCanvasElement | null = null;
     const job = this.chain.then(async () => {
@@ -59,17 +89,12 @@ export class MixerSpectrogramCache {
         worker.addEventListener('message', onMessage);
         worker.addEventListener('error', onError);
         worker.postMessage({ type: 'source', pcm: mono, sampleRate: decoded.sampleRate }, [mono.buffer]);
-        worker.postMessage({ type: 'image', id, width: targetW, start: 0, span: duration });
+        worker.postMessage({ type: 'image', id, width: targetW, start: clampedStart, span: effectiveSpan });
       });
     });
     this.chain = job.catch(() => {});
     await job;
 
-    if (resultCanvas && !this.destroyed) {
-      const entry = this.cache.get(blob) ?? {};
-      entry[modeKey] = resultCanvas;
-      this.cache.set(blob, entry);
-    }
     return resultCanvas;
   }
 

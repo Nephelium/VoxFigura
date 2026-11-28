@@ -14,6 +14,14 @@ import { blobToBase64, downloadTextFile } from './research-utils';
 import { cleanTextGridWordLabels } from './m27-session';
 import { MixerSpectrogramCache } from './mixer-spectrogram';
 import {
+  WAVE_MAX_ZOOM,
+  WAVE_MIN_ZOOM,
+  clampWaveViewport,
+  computePcmPeakAbs,
+  drawPaperWaveform,
+  zoomViewportAround,
+} from './paper-waveform';
+import {
   cloneTextGrid,
   countAnnotatedSegments,
   createEqualTextGrid,
@@ -95,11 +103,18 @@ const activeTierIndex = ref(0);
 const selectedIntervalIdx = ref<number | null>(null);
 const selStart = ref<number | null>(null);
 const selEnd = ref<number | null>(null);
+const viewZoom = ref(1);
+const viewStartSec = ref(0);
 
 const waveCanvas = ref<HTMLCanvasElement | null>(null);
 const tierTrackEl = ref<HTMLElement | null>(null);
 const gridFileInput = ref<HTMLInputElement | null>(null);
 const specBitmap = shallowRef<HTMLCanvasElement | null>(null);
+const specRangeBitmap = shallowRef<{ start: number; span: number; canvas: HTMLCanvasElement } | null>(null);
+let specRangeTimer = 0;
+const activePcm = shallowRef<Float32Array | null>(null);
+const activeSampleRate = ref(0);
+const activePcmPeak = ref(1);
 
 const transcribing = ref(false);
 const aligning = ref(false);
@@ -277,6 +292,9 @@ watch(
     statusFailed.value = false;
     selStart.value = null;
     selEnd.value = null;
+    viewZoom.value = 1;
+    viewStartSec.value = 0;
+    specRangeBitmap.value = null;
     selectedIntervalIdx.value = null;
     activeTierIndex.value = 0;
     await Promise.all([
@@ -284,6 +302,7 @@ watch(
       initDraft('a', props.audioA, props.gridA, props.transcriptA),
       initDraft('b', props.audioB, props.gridB, props.transcriptB),
     ]);
+    await syncActivePcm();
     await nextTick();
     void refreshSpectrogram();
     drawWaveCanvas();
@@ -294,10 +313,14 @@ watch(activeSlot, () => {
   stopPlayback();
   selStart.value = null;
   selEnd.value = null;
+  viewZoom.value = 1;
+  viewStartSec.value = 0;
+  specRangeBitmap.value = null;
   selectedIntervalIdx.value = null;
   activeTierIndex.value = 0;
   statusText.value = '';
   statusFailed.value = false;
+  void syncActivePcm();
   void refreshSpectrogram();
   void nextTick(drawWaveCanvas);
 });
@@ -307,18 +330,54 @@ watch(currentTiers, (tiers) => {
 });
 
 watch([bgMode, () => store.resolvedColorMode.value, () => currentDraft.value.file], () => {
+  viewZoom.value = 1;
+  viewStartSec.value = 0;
+  specRangeBitmap.value = null;
+  void syncActivePcm();
   void refreshSpectrogram();
   void nextTick(drawWaveCanvas);
 });
 
-watch([selStart, selEnd, playheadSec, activeTierIndex, selectedIntervalIdx, () => currentDraft.value.grid, () => currentDraft.value.peaks], () => {
+watch([selStart, selEnd, playheadSec, activeTierIndex, selectedIntervalIdx, viewZoom, viewStartSec, () => currentDraft.value.grid, () => currentDraft.value.peaks], () => {
   drawWaveCanvas();
 }, { deep: true });
+
+const viewport = computed(() =>
+  clampWaveViewport(Math.max(0.04, currentDraft.value.duration || 1), viewZoom.value, viewStartSec.value),
+);
+
+const maxViewStartSec = computed(() =>
+  Math.max(0, Math.max(0.04, currentDraft.value.duration || 1) - viewport.value.spanSec),
+);
+
+let pcmSeq = 0;
+async function syncActivePcm(): Promise<void> {
+  const file = currentDraft.value.file;
+  if (!props.open || !file) {
+    activePcm.value = null;
+    activeSampleRate.value = 0;
+    activePcmPeak.value = 1;
+    return;
+  }
+  const seq = ++pcmSeq;
+  try {
+    const buf = await decodeBlob(file);
+    if (seq !== pcmSeq) return;
+    const ch0 = buf.getChannelData(0);
+    activePcm.value = ch0;
+    activeSampleRate.value = buf.sampleRate;
+    activePcmPeak.value = computePcmPeakAbs(ch0);
+    drawWaveCanvas();
+  } catch {
+    if (seq === pcmSeq) activePcm.value = null;
+  }
+}
 
 async function refreshSpectrogram() {
   const file = currentDraft.value.file;
   if (!props.open || bgMode.value !== 'spectrogram' || !file) {
     specBitmap.value = null;
+    specRangeBitmap.value = null;
     return;
   }
   const seq = ++specSeq;
@@ -328,10 +387,82 @@ async function refreshSpectrogram() {
     if (seq === specSeq) {
       specBitmap.value = bmp;
       drawWaveCanvas();
+      scheduleHdSpectrogram();
     }
   } catch {
     if (seq === specSeq) specBitmap.value = null;
   }
+}
+
+function scheduleHdSpectrogram(): void {
+  window.clearTimeout(specRangeTimer);
+  const file = currentDraft.value.file;
+  const vp = viewport.value;
+  if (!props.open || bgMode.value !== 'spectrogram' || !file || vp.zoom < 2.2) {
+    specRangeBitmap.value = null;
+    return;
+  }
+  const seq = ++specSeq;
+  specRangeTimer = window.setTimeout(async () => {
+    try {
+      const isDark = store.resolvedColorMode.value === 'dark';
+      const bmp = await specCache.renderRange(
+        file,
+        vp.startSec,
+        vp.spanSec,
+        Math.max(560, waveCanvas.value?.clientWidth || 760),
+        isDark,
+      );
+      if (seq === specSeq && bmp) {
+        specRangeBitmap.value = { start: vp.startSec, span: vp.spanSec, canvas: bmp };
+        drawWaveCanvas();
+      }
+    } catch {
+      // keep sliced fallback bitmap
+    }
+  }, 140);
+}
+
+function setZoomAt(factor: number, anchorSec?: number): void {
+  const dur = Math.max(0.04, currentDraft.value.duration || 0);
+  if (!hasAudio.value || dur <= 0) return;
+  const vp = viewport.value;
+  const anchor = anchorSec ?? (vp.startSec + vp.spanSec * 0.5);
+  const next = zoomViewportAround(dur, vp.zoom, vp.startSec, factor, anchor, WAVE_MIN_ZOOM, WAVE_MAX_ZOOM);
+  viewZoom.value = next.zoom;
+  viewStartSec.value = next.startSec;
+  specRangeBitmap.value = null;
+  scheduleHdSpectrogram();
+}
+
+function resetZoom(): void {
+  viewZoom.value = 1;
+  viewStartSec.value = 0;
+  specRangeBitmap.value = null;
+}
+
+function onPanSliderInput(ev: Event): void {
+  const val = Number((ev.target as HTMLInputElement).value);
+  if (!Number.isFinite(val)) return;
+  viewStartSec.value = Math.max(0, Math.min(maxViewStartSec.value, val));
+  specRangeBitmap.value = null;
+  scheduleHdSpectrogram();
+}
+
+function onWaveWheel(ev: WheelEvent): void {
+  if (!hasAudio.value) return;
+  const vp = viewport.value;
+  const panDelta = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.shiftKey ? ev.deltaY : 0;
+  if (panDelta !== 0) {
+    if (vp.zoom <= 1) return;
+    const step = (panDelta / 300) * vp.spanSec;
+    viewStartSec.value = Math.max(0, Math.min(maxViewStartSec.value, vp.startSec + step));
+    specRangeBitmap.value = null;
+    scheduleHdSpectrogram();
+    return;
+  }
+  const factor = ev.deltaY < 0 ? 1.28 : 1 / 1.28;
+  setZoomAt(factor, secFromWaveEvent(ev));
 }
 
 function drawWaveCanvas() {
@@ -351,12 +482,13 @@ function drawWaveCanvas() {
 
   const cs = getComputedStyle(canvas);
   const css = (name: string, fb: string) => cs.getPropertyValue(name).trim() || fb;
-  const bg = css('--vm-canvas-bg', '#0e141f');
-  const gridCol = css('--vm-grid-line', 'rgba(148,163,184,0.16)');
-  const waveCol = css('--accent', '#5b9dff');
-  const muted = css('--muted', '#7f91b0');
-  const boundCol = css('--vm-align-bound', 'rgba(148,163,184,0.38)');
-  const playCol = css('--warning', '#fbbf24');
+  const bg = css('--vm-canvas-bg', css('--panel', 'Canvas'));
+  const gridCol = css('--vm-grid-line', css('--border', 'GrayText'));
+  const waveCol = css('--accent', 'Highlight');
+  const textCol = css('--text', 'CanvasText');
+  const muted = css('--muted', 'GrayText');
+  const boundCol = css('--vm-align-bound', css('--border', 'GrayText'));
+  const playCol = css('--warning', 'Mark');
 
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
@@ -366,12 +498,28 @@ function drawWaveCanvas() {
   const y0 = 10;
   const ph = Math.max(40, h - 28);
   const dur = Math.max(0.04, currentDraft.value.duration || 1);
+  const vp = viewport.value;
+  const vStart = vp.startSec;
+  const vEnd = vp.endSec;
+  const vSpan = Math.max(0.001, vp.spanSec);
+  const timeToX = (t: number) => x0 + ((t - vStart) / vSpan) * pw;
 
-  if (bgMode.value === 'spectrogram' && specBitmap.value) {
-    ctx.save();
-    ctx.globalAlpha = 0.9;
-    ctx.drawImage(specBitmap.value, x0, y0, pw, ph);
-    ctx.restore();
+  if (bgMode.value === 'spectrogram') {
+    const hd = specRangeBitmap.value;
+    if (hd && Math.abs(hd.start - vStart) < 0.002 && Math.abs(hd.span - vSpan) < 0.002) {
+      ctx.save();
+      ctx.globalAlpha = 0.92;
+      ctx.drawImage(hd.canvas, x0, y0, pw, ph);
+      ctx.restore();
+    } else if (specBitmap.value) {
+      const bmp = specBitmap.value;
+      const sx = (vStart / dur) * bmp.width;
+      const sw = Math.max(1, (vSpan / dur) * bmp.width);
+      ctx.save();
+      ctx.globalAlpha = 0.92;
+      ctx.drawImage(bmp, sx, 0, sw, bmp.height, x0, y0, pw, ph);
+      ctx.restore();
+    }
   }
 
   // Time ruler ticks
@@ -389,29 +537,32 @@ function drawWaveCanvas() {
     ctx.moveTo(tx, y0);
     ctx.lineTo(tx, y0 + ph);
     ctx.stroke();
-    ctx.fillText(`${(u * dur).toFixed(2)}s`, tx, y0 + ph + 4);
+    ctx.fillText(`${(vStart + u * vSpan).toFixed(2)}s`, tx, y0 + ph + 4);
   }
 
-  // Waveform peaks
-  const peaks = currentDraft.value.peaks;
-  if (peaks.length > 1 && (bgMode.value !== 'spectrogram' || !specBitmap.value)) {
-    const cy = y0 + ph * 0.5;
-    const halfH = ph * 0.44;
-    ctx.fillStyle = waveCol;
-    ctx.globalAlpha = 0.72;
-    const barW = Math.max(1.2, pw / peaks.length);
-    for (let i = 0; i < peaks.length; i++) {
-      const amp = Math.max(0.02, Math.min(1, peaks[i])) * halfH;
-      const bx = x0 + (i / peaks.length) * pw;
-      ctx.fillRect(bx, cy - amp, barW * 0.82, Math.max(1.5, amp * 2));
+  // Publication-grade continuous oscillogram waveform
+  if (bgMode.value !== 'spectrogram' || (!specBitmap.value && !specRangeBitmap.value)) {
+    if (activePcm.value && activeSampleRate.value > 0) {
+      drawPaperWaveform(ctx, activePcm.value, activeSampleRate.value, {
+        x0,
+        y0,
+        width: pw,
+        height: ph,
+        viewStartSec: vStart,
+        viewEndSec: vEnd,
+        peakAbs: activePcmPeak.value,
+        strokeColor: textCol,
+        axisColor: boundCol,
+        gridColor: gridCol,
+      });
     }
-    ctx.globalAlpha = 1;
   }
 
   // Interval boundary lines from active tier
   for (const iv of currentIntervals.value) {
-    const bx = x0 + Math.max(0, Math.min(1, iv.xmin / dur)) * pw;
-    if (bx <= x0 + 1) continue;
+    if (iv.xmin <= vStart || iv.xmin >= vEnd) continue;
+    const bx = timeToX(iv.xmin);
+    if (bx <= x0 + 1 || bx >= x0 + pw - 1) continue;
     ctx.save();
     ctx.strokeStyle = boundCol;
     ctx.setLineDash([3, 3]);
@@ -425,51 +576,61 @@ function drawWaveCanvas() {
 
   // Selected region highlight + trim handles
   if (selStart.value !== null && selEnd.value !== null && selEnd.value > selStart.value) {
-    const sx0 = x0 + Math.max(0, Math.min(1, selStart.value / dur)) * pw;
-    const sx1 = x0 + Math.max(0, Math.min(1, selEnd.value / dur)) * pw;
-    ctx.save();
-    ctx.fillStyle = waveCol;
-    ctx.globalAlpha = 0.2;
-    ctx.fillRect(sx0, y0, Math.max(2, sx1 - sx0), ph);
-    ctx.globalAlpha = 0.95;
-    ctx.strokeStyle = waveCol;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(sx0, y0);
-    ctx.lineTo(sx0, y0 + ph);
-    ctx.moveTo(sx1, y0);
-    ctx.lineTo(sx1, y0 + ph);
-    ctx.stroke();
-    // Small top handle tabs
-    ctx.fillStyle = waveCol;
-    ctx.fillRect(sx0 - 3, y0, 6, 12);
-    ctx.fillRect(sx1 - 3, y0, 6, 12);
-    ctx.restore();
+    const rawSx0 = timeToX(selStart.value);
+    const rawSx1 = timeToX(selEnd.value);
+    if (rawSx1 >= x0 && rawSx0 <= x0 + pw) {
+      const sx0 = Math.max(x0, rawSx0);
+      const sx1 = Math.min(x0 + pw, rawSx1);
+      ctx.save();
+      ctx.fillStyle = waveCol;
+      ctx.globalAlpha = 0.2;
+      ctx.fillRect(sx0, y0, Math.max(2, sx1 - sx0), ph);
+      ctx.globalAlpha = 0.95;
+      ctx.strokeStyle = waveCol;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (rawSx0 >= x0 && rawSx0 <= x0 + pw) {
+        ctx.moveTo(rawSx0, y0);
+        ctx.lineTo(rawSx0, y0 + ph);
+      }
+      if (rawSx1 >= x0 && rawSx1 <= x0 + pw) {
+        ctx.moveTo(rawSx1, y0);
+        ctx.lineTo(rawSx1, y0 + ph);
+      }
+      ctx.stroke();
+      ctx.fillStyle = waveCol;
+      if (rawSx0 >= x0 && rawSx0 <= x0 + pw) ctx.fillRect(rawSx0 - 3, y0, 6, 12);
+      if (rawSx1 >= x0 && rawSx1 <= x0 + pw) ctx.fillRect(rawSx1 - 3, y0, 6, 12);
+      ctx.restore();
+    }
   }
 
   // Live playhead
   if (playheadSec.value !== null && dur > 0) {
-    const px = x0 + Math.max(0, Math.min(1, playheadSec.value / dur)) * pw;
-    ctx.save();
-    ctx.strokeStyle = playCol;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(px, y0);
-    ctx.lineTo(px, y0 + ph);
-    ctx.stroke();
-    ctx.restore();
+    const px = timeToX(playheadSec.value);
+    if (px >= x0 && px <= x0 + pw) {
+      ctx.save();
+      ctx.strokeStyle = playCol;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px, y0);
+      ctx.lineTo(px, y0 + ph);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   ctx.restore();
 }
 
-function secFromWaveEvent(ev: PointerEvent): number {
+function secFromWaveEvent(ev: PointerEvent | WheelEvent): number {
   const canvas = waveCanvas.value;
   if (!canvas) return 0;
   const rect = canvas.getBoundingClientRect();
   const pw = Math.max(40, rect.width - PAD_X * 2);
   const norm = Math.max(0, Math.min(1, (ev.clientX - rect.left - PAD_X) / pw));
-  return norm * Math.max(0.04, currentDraft.value.duration);
+  const vp = viewport.value;
+  return Math.max(0, Math.min(Math.max(0.04, currentDraft.value.duration), vp.startSec + norm * vp.spanSec));
 }
 
 function onWavePointerDown(ev: PointerEvent) {
@@ -479,11 +640,11 @@ function onWavePointerDown(ev: PointerEvent) {
   const rect = canvas.getBoundingClientRect();
   const pw = Math.max(40, rect.width - PAD_X * 2);
   const px = ev.clientX - rect.left;
-  const dur = Math.max(0.04, currentDraft.value.duration);
+  const vp = viewport.value;
 
   if (selStart.value !== null && selEnd.value !== null) {
-    const sx0 = PAD_X + (selStart.value / dur) * pw;
-    const sx1 = PAD_X + (selEnd.value / dur) * pw;
+    const sx0 = PAD_X + ((selStart.value - vp.startSec) / Math.max(0.001, vp.spanSec)) * pw;
+    const sx1 = PAD_X + ((selEnd.value - vp.startSec) / Math.max(0.001, vp.spanSec)) * pw;
     if (Math.abs(px - sx0) <= 8) {
       waveDragMode = 'left';
       canvas.setPointerCapture(ev.pointerId);
@@ -511,9 +672,9 @@ function onWavePointerMove(ev: PointerEvent) {
       const rect = canvas.getBoundingClientRect();
       const pw = Math.max(40, rect.width - PAD_X * 2);
       const px = ev.clientX - rect.left;
-      const dur = Math.max(0.04, currentDraft.value.duration);
-      const sx0 = PAD_X + (selStart.value / dur) * pw;
-      const sx1 = PAD_X + (selEnd.value / dur) * pw;
+      const vp = viewport.value;
+      const sx0 = PAD_X + ((selStart.value - vp.startSec) / Math.max(0.001, vp.spanSec)) * pw;
+      const sx1 = PAD_X + ((selEnd.value - vp.startSec) / Math.max(0.001, vp.spanSec)) * pw;
       canvas.style.cursor = Math.abs(px - sx0) <= 8 || Math.abs(px - sx1) <= 8 ? 'ew-resize' : 'crosshair';
     } else {
       canvas.style.cursor = 'crosshair';
@@ -894,9 +1055,9 @@ function startBoundaryDrag(boundaryIdx: number, ev: PointerEvent) {
 function onBoundaryPointerMove(ev: PointerEvent) {
   if (draggingBoundaryIdx === null || !tierTrackEl.value || !currentDraft.value.grid || !currentTier.value) return;
   const rect = tierTrackEl.value.getBoundingClientRect();
-  const dur = Math.max(0.04, currentDraft.value.duration);
+  const vp = viewport.value;
   const norm = Math.max(0, Math.min(1, (ev.clientX - rect.left) / Math.max(40, rect.width)));
-  const sec = norm * dur;
+  const sec = vp.startSec + norm * vp.spanSec;
   currentDraft.value.grid = moveBoundaryInTier(currentDraft.value.grid, currentTier.value.index, draggingBoundaryIdx, sec);
   const updated = extractIntervalTiers(currentDraft.value.grid)[activeTierIndex.value]?.intervals[draggingBoundaryIdx];
   dragBoundaryReadout.value = updated ? `${updated.xmin.toFixed(3)} s` : `${sec.toFixed(3)} s`;
@@ -1043,6 +1204,37 @@ onBeforeUnmount(() => {
                     <button type="button" :class="{ active: bgMode === 'waveform' }" @click="bgMode = 'waveform'">波形图</button>
                     <button type="button" :class="{ active: bgMode === 'spectrogram' }" @click="bgMode = 'spectrogram'">语谱图</button>
                   </div>
+                  <div class="mx-prep-zoom-group" role="group" aria-label="时间轴缩放">
+                    <button
+                      type="button"
+                      class="btn xs icon-only"
+                      title="缩小 X 轴"
+                      aria-label="缩小 X 轴"
+                      :disabled="viewport.zoom <= WAVE_MIN_ZOOM || !hasAudio"
+                      @click="setZoomAt(1 / 1.4)"
+                    >
+                      <IconSvg name="minus" :size="11" />
+                    </button>
+                    <button
+                      type="button"
+                      class="btn xs mono"
+                      title="点击复位为 1× 全局视图"
+                      :disabled="viewport.zoom <= WAVE_MIN_ZOOM"
+                      @click="resetZoom"
+                    >
+                      {{ viewport.zoom < 1.05 ? '1×' : `${viewport.zoom.toFixed(1)}×` }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn xs icon-only"
+                      title="放大 X 轴"
+                      aria-label="放大 X 轴"
+                      :disabled="viewport.zoom >= WAVE_MAX_ZOOM || !hasAudio"
+                      @click="setZoomAt(1.4)"
+                    >
+                      <IconSvg name="plus" :size="11" />
+                    </button>
+                  </div>
                   <button
                     type="button"
                     class="btn xs"
@@ -1101,7 +1293,20 @@ onBeforeUnmount(() => {
                   @pointermove="onWavePointerMove"
                   @pointerup="onWavePointerUp"
                   @pointercancel="onWavePointerUp"
+                  @wheel.prevent="onWaveWheel"
                 />
+                <div v-if="viewport.zoom > 1.01 && maxViewStartSec > 0" class="mx-prep-pan-row">
+                  <input
+                    type="range"
+                    class="mx-prep-pan-slider"
+                    aria-label="水平平移时间窗口"
+                    :min="0"
+                    :max="maxViewStartSec"
+                    :step="Math.max(0.001, maxViewStartSec / 400)"
+                    :value="viewport.startSec"
+                    @input="onPanSliderInput"
+                  />
+                </div>
               </div>
 
               <!-- 2. Time-Locked Interactive Annotation Tier -->
@@ -1151,12 +1356,13 @@ onBeforeUnmount(() => {
                 <div v-if="currentIntervals.length" ref="tierTrackEl" class="mx-prep-tier-track">
                   <template v-for="(iv, idx) in currentIntervals" :key="`${idx}-${iv.xmin.toFixed(4)}`">
                     <button
+                      v-if="iv.xmax > viewport.startSec && iv.xmin < viewport.endSec"
                       type="button"
                       class="mx-prep-iv"
                       :class="{ selected: selectedIntervalIdx === idx, empty: !iv.text || iv.text === 'sil' || iv.text === 'sp' }"
                       :style="{
-                        left: `${(iv.xmin / Math.max(0.04, currentDraft.duration)) * 100}%`,
-                        width: `${((iv.xmax - iv.xmin) / Math.max(0.04, currentDraft.duration)) * 100}%`,
+                        left: `${((iv.xmin - viewport.startSec) / Math.max(0.001, viewport.spanSec)) * 100}%`,
+                        width: `${((iv.xmax - iv.xmin) / Math.max(0.001, viewport.spanSec)) * 100}%`,
                       }"
                       :title="`${iv.text || '(静音/空)'} · ${iv.xmin.toFixed(3)}–${iv.xmax.toFixed(3)} s`"
                       @click="selectInterval(idx)"
@@ -1164,9 +1370,9 @@ onBeforeUnmount(() => {
                       <span class="mx-prep-iv-txt">{{ iv.text || '·' }}</span>
                     </button>
                     <div
-                      v-if="idx > 0"
+                      v-if="idx > 0 && iv.xmin > viewport.startSec && iv.xmin < viewport.endSec"
                       class="mx-prep-bound"
-                      :style="{ left: `${(iv.xmin / Math.max(0.04, currentDraft.duration)) * 100}%` }"
+                      :style="{ left: `${((iv.xmin - viewport.startSec) / Math.max(0.001, viewport.spanSec)) * 100}%` }"
                       title="左右拖动微调边界"
                       @pointerdown="startBoundaryDrag(idx, $event)"
                     />
@@ -1415,18 +1621,40 @@ onBeforeUnmount(() => {
   color: var(--muted);
 }
 
+.mx-prep-zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
 .mx-prep-wave-host {
+  display: flex;
+  flex-direction: column;
   border-radius: var(--r-ctrl);
   overflow: hidden;
   border: var(--border-w, 1px) solid var(--panel-border);
-  height: 150px;
 }
 
 .mx-prep-wave-canvas {
   display: block;
   width: 100%;
-  height: 100%;
+  height: 150px;
   touch-action: none;
+}
+
+.mx-prep-pan-row {
+  display: flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-top: 1px solid var(--panel-border);
+  background: color-mix(in srgb, var(--app) 64%, var(--panel));
+}
+
+.mx-prep-pan-slider {
+  width: 100%;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .mx-prep-tier-wrap {

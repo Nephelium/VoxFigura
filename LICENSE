@@ -23,5 +23,5 @@ SPDX-License-Identifier: GPL-3.0-or-later
 Note on component provenance and licensing:
 - VocalTractLab 2.4 native engine & geometry bridge (`engine/vtl_native/`): GPL-3.0-or-later.
 - PhoneticToolbox v3 derived modules (`packages/vocal-tract-view/`, `packages/g2p-ts/`): GPL-3.0-or-later.
-- Official Zhihu Kanshan assets (`public/assets/kanshan/`): governed by Zhihu Hackathon S3 event terms (non-commercial competition showcase only; see `DISCLOSURE.md` and `THIRD_PARTY.md`).
+- Official Zhihu Kanshan assets (`assets/kanshan/`, `src/editions/hackathon/assets/`): governed by Zhihu Hackathon S3 event terms (non-commercial competition showcase only; excluded from `public` edition builds; see `DISCLOSURE.md` and `THIRD_PARTY.md`).
 - Bundled fonts (`public/fonts/`): SIL Open Font License 1.1 (OFL-1.1).

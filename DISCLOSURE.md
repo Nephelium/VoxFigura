@@ -55,7 +55,7 @@ JD2 的单项几何差量由本仓库的 `scripts/build-ipa-modifiers.py` 从只
 
 本地引擎从 `engine/model_bundle` 加载 TensorTract3 的 Vox2Tract-Lite、Vox2Align-Lite、Vox2Spk-Lite、IPA2Tract-Lite、Tract2Vox-Lite、Text2Prosody-Lite 及六区面积代理。来源为井井提供的 TensorTract3 发布目录。原权重摘要与变体见 `engine/model_bundle/models/manifest.json`。本地复制了相关 tt3、M27 Voice Morph、M27 Tract Studio 和关键帧合成包源代码，调整模型、词典及原生库查找路径。反演和对齐共用主干；动画使用原包调用的 JD2 几何提取函数。模型产生的器官轨迹属于声学反演估计。
 
-DPDFNet 和 SwiftF0 使用 PhoneticToolbox v3 的 ONNX 和推理函数。普通话映射词表取自 PTB，辅助字典来自本机 MFA 与 TIMIT。个人录音和反演构型位于项目本地参考库 `engine/reference_library`，浏览器通过模型接口读取。前端公开构建不复制模型、研究试听工程和个人录音。引擎支持项目虚拟环境和 `VOCALCUT_PYTHON`；在本工作站可复用训练环境已安装的 Python/CUDA 依赖。
+DPDFNet 和 SwiftF0 使用 PhoneticToolbox v3 的 ONNX 和推理函数。普通话映射词表取自 PTB 与 MFA 普通话词典（CC BY 4.0），英语辅助词典使用开源 CMUdict（BSD-2-Clause）；仓库与发行包不分发 TIMIT 语料及词典文件。个人录音和反演构型位于项目本地参考库 `engine/reference_library`，浏览器通过模型接口读取。前端公开构建不复制模型、研究试听工程和个人录音。引擎支持项目虚拟环境和 `VOCALCUT_PYTHON`；在本工作站可复用训练环境已安装的 Python/CUDA 依赖。
 
 Vox2Align-Lite v2 使用井井提供的正式 FP16 导出（20,000 步，8,805,004 字节），权重 SHA-256 与上游正式清单一致。SDK 复用 TensorTract3 的 v2 推理、模型定义及 UntPhesoca 宽式普通话映射。本地适配使用已有的 PTB 北京普通话表、MFA 词典及 CMUdict 等词表。模型与词表哈希登记于引擎清单。对齐通过本地原文引导生成普通话或英语音节、音素及语音活动层，边界是模型估计。缺少原文时，引擎仍可重建声道并计算静音门控。上游模型目录未附单独的公开分发许可证，此次授权范围为项目本地集成。
 

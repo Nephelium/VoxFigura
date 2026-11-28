@@ -5430,8 +5430,8 @@ onBeforeUnmount(() => {
               type="text"
               class="inp rm-g2p-inp notranslate"
               translate="no"
-              placeholder="输入中/英/日、[IPA¹²³ / ˥˩] 或 {3V̤ ... 3V̤} 混排文本，回车编译入轨"
-              title='VoQS 内的英语原词用双引号包住，例如 [a {F "falsetto" F}]'
+              placeholder="输入中/英/日、[IPA¹²³ / ˥˩]（国际音标须加方括号，已支持多数附加符号、少部分待适配）或 {3V̤ ... 3V̤}"
+              title='国际音标必须放在方括号 [...] 中（目前已支持大多数附加符号，尚有少部分待适配）；VoQS 内的英语原词用双引号包住，例如 [a {F "falsetto" F}]'
               @keydown.enter="compileG2pToTrack"
             />
           </div>

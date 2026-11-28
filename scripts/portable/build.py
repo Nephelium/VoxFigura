@@ -82,7 +82,7 @@ SDK_MODULES = {
 PRIVATE_PATH = re.compile(
     r"(?:^|/)(?:\.env[^/]*|\.git|node_modules|__pycache__|"
     r"\.zhihu-author-defaults\.local\.json|local-model-registry\.json|\.cache|"
-    r"direct_url\.json|"
+    r"direct_url\.json|TIMITDIC\.TXT|"
     r"faster_whisper(?:-[^/]*)?|ctranslate2(?:-[^/]*)?|av(?:\.libs|-[^/]*)?|"
     r"pyopenjtalk(?:-[^/]*)?|"
     r"huggingface_hub(?:-[^/]*)?|tokenizers(?:-[^/]*)?|"
@@ -342,7 +342,7 @@ def stage_application(stage: Path, web: Path, lock: dict) -> None:
             stage_file(stage, f"engine/model_bundle/{directory}/{name}.py")
     for name in ("canonical_ipa_poses.json", "jd2_starter_fallback_poses.json"):
         stage_file(stage, f"engine/model_bundle/packages/kf_ipa_synth/assets/{name}")
-    for name in ("TIMITDIC.TXT", "mandarin_mfa.dict", "mandarin_china_mfa.dict", "mandarin_beijing_ipa.json"):
+    for name in ("mandarin_mfa.dict", "mandarin_china_mfa.dict", "mandarin_beijing_ipa.json"):
         stage_file(stage, f"engine/model_bundle/packages/kf_ipa_synth/assets/lexicon/{name}")
     for name in ("dpdfnet2_48khz_hr.onnx", "swift-f0-0.3.0.onnx", "manifest.json", "SwiftF0-MIT.txt"):
         stage_file(stage, f"engine/model_bundle/ptb/resources/neural/{name}")

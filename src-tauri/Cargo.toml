@@ -1,6 +1,6 @@
 [package]
 name = "voxfigura-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "VoxFigura Portable Desktop Launcher (Tauri 2)"
 authors = ["VoxFigura"]
 edition = "2021"

@@ -262,6 +262,7 @@ class PackagingHardeningTests(unittest.TestCase):
             "engine/model_bundle/weights.safetensors",
             "engine/model_bundle/model.bin",
             "engine/model_bundle/model.onnx_data",
+            "engine/model_bundle/packages/kf_ipa_synth/assets/lexicon/TIMITDIC.TXT",
             "engine/vendor/python-cp311-win_amd64/pillow-12.1.1.dist-info/direct_url.json",
         ]
         for path in must_block:
@@ -357,6 +358,15 @@ class PackagingHardeningTests(unittest.TestCase):
             stats = portable_verify.verify_packaged_mp3s(stage, repo_root=REPO_ROOT)
             self.assertGreaterEqual(stats["mp3_192kbps_checked"], 9)
             self.assertGreaterEqual(stats["example_source_wav_compared"], 9)
+
+    def test_en_blind_lexicon_uses_cmudict_without_timitdic(self) -> None:
+        import onnx_inference  # noqa: E402
+
+        onnx_inference._EN_LEXICON_CACHE = None
+        lex = onnx_inference._get_en_lexicon()
+        self.assertGreater(len(lex), 10000)
+        self.assertIn(("ə", "b", "aʊ", "t"), lex)
+        self.assertEqual(lex[("ə", "b", "aʊ", "t")], "about")
 
 
 if __name__ == "__main__":

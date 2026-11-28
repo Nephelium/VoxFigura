@@ -45,11 +45,11 @@ const NAV_ITEMS = [
 const CORPUS_CATEGORIES: ReadonlyArray<'全部' | CorpusRow['category']> = [
   '全部',
   '本地物理合成',
-  '公开朗读/方言',
-  '授权朗读语料',
-  '公开情感/表现',
-  '公开干声歌唱',
-  '真人传感盲测',
+  '开源朗读语料',
+  '受限授权语料',
+  '研究情感/表现语料',
+  '研究歌唱/特殊发声',
+  '独立盲测/自录评测',
   '派生任务缓存',
 ];
 
@@ -907,7 +907,7 @@ function buildVox2SpkChart(t: ChartThemeTokens): EChartsCoreOption {
         <div id="repDatasets" class="panel">
           <div class="p-head">
             <span>4. 扩充后训练与评测语料清单</span>
-            <span class="tree-tag mono">{{ FULL_CORPUS_INVENTORY.length }} 项数据源 · 隐私零混入</span>
+            <span class="tree-tag mono">{{ FULL_CORPUS_INVENTORY.length }} 项数据源 · 第三方原音频不随包</span>
           </div>
           <div class="p-body rep-body">
             <div class="rep-chart-grid-2">
@@ -917,21 +917,21 @@ function buildVox2SpkChart(t: ChartThemeTokens): EChartsCoreOption {
                 badge="170,550 条 · 8 模式"
                 :height="325"
                 :option-builder="buildSynth180hPieChart"
-                caption="70.2% 单发声态 + 29.8% 句内多态余弦渐变；Batch-2 新增 45,136 条情感配音、京剧独唱、呼麦与喉声泛音真实语料。"
+                caption="70.2% 单发声态 + 29.8% 句内多态余弦渐变；Batch-2 另有 45,136 条情感配音、京剧清唱、呼麦与喉声泛音真实语料（各库按原协议用于离线训练）。"
               />
               <div class="editorial-card rep-card selectable" style="justify-content: space-between">
                 <div>
                   <strong style="font-size: 1rem">Batch-2 语料扩充重点与合规隔离</strong>
                   <ul class="rep-ul" style="margin-top: 8px">
                     <li><strong>多情感与配音大幅扩充</strong>：在原 ESD / Expresso 基础上新增 <code class="mono">EmotionTalk</code>（22.9 h）、<code class="mono">CSEMOTIONS</code>（9.6 h）、<code class="mono">EmoV-DB</code>（8.9 h）与 <code class="mono">RAVDESS</code>（1.7 h）。</li>
-                    <li><strong>高音戏曲与特殊发声态补全</strong>：新增 <code class="mono">JACRC 京剧独唱</code>（10.5 h）及 <code class="mono">EMVD / AVP / Beatbox / 图瓦呼麦与喉声泛音库</code>（4.2 h），同步扩展 <code class="mono">20–1200 Hz</code> 宽域物理合成。</li>
+                    <li><strong>高音戏曲与特殊发声态补全</strong>：新增 <code class="mono">Jingju a Cappella 京剧清唱</code>（7,604 条 / 10.44 h）及 <code class="mono">EMVD / AVP / Beatbox / 图瓦呼麦与喉声泛音</code>（3,133 条 / 4.27 h），同步扩展 <code class="mono">20–1200 Hz</code> 宽域物理合成。</li>
                     <li><strong>窄标构型与神经飞轮</strong>：构建 293 键窄标库 <code class="mono">kf_dataset_narrow_v2</code>（63k 动腔 + 52k 韵律）与 12,000 条 <code class="mono">flywheel_large_v2_12k</code> 闭环数据。</li>
-                    <li><strong>严格盲测与版权边界</strong>：84 位验证说话人、USC-TIMIT EMA 276 条与 236 条金标准 IPA/VoQS 实录严格隔离；第三方语料均不随包再分发原音频。</li>
+                    <li><strong>盲测隔离与版权边界</strong>：84 位验证说话人、USC-TIMIT EMA 276 条（0 条进训练）与 <code class="mono">Tract2Vox</code> 盲测用 236 条自录 IPA/VoQS 实录严格隔离；第三方训练语料均不随仓库与安装包再分发，亦不适用 GPL-3.0 再授权。</li>
                   </ul>
                 </div>
                 <div class="rep-callout-inline">
                   <IconSvg name="shield" :size="14" />
-                  <span>训练脚本全程采用流式索引与内存分片缓存，复现者按原语料协议获取即可。</span>
+                  <span>训练脚本采用本地流式索引与分片缓存；复现者须分别遵循各原语料许可协议自行获取数据。</span>
                 </div>
               </div>
             </div>
