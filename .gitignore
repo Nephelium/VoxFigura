@@ -80,6 +80,8 @@ __pycache__/
 # 编辑器与系统垃圾文件
 .vscode/
 .idea/
+.sd
+.stabledge/
 *.suo
 *.user
 .DS_Store
